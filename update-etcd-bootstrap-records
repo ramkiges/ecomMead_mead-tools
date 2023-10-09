@@ -1,0 +1,39 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/apps/mead-tools:~/bin
+export PATH
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "Usage: $(basename $0) <brand> <env> [ticket]"
+  exit 1  
+}
+
+BRAND=$(tr '[:lower:]' '[:upper:]' <<< $1)
+ENVIRO=$2
+[[ -z $TICKET ]] && TICKET=$3
+[[ -z $ENVIRO ]] && BailOut
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+
+ETCD=$(get-etcd-env $ENVIRO)
+[[ -z $ETCD ]] && BailOut "Can't figure out source env"
+
+# create a string for MANUAL_MARKETS
+MANUAL_MARKETS=
+for brand in $(getbrandlist | tr '[:lower:]' '[:upper:]')
+do
+  for market in US CAN
+  do
+    MANUAL_MARKETS="$brand:$market $MANUAL_MARKETS"
+  done
+done
+
+#set -x
+$JENKINS build -s update-bootstrap-records \
+  -p Brand=${BRAND} \
+  -p Environment=${ENVIRO} \
+  -p Market="\"${MANUAL_MARKETS}\"" \
+  -p UpdateData=false \
+  -p ETCD_NAMESPACE=ecommerce-etcd-${ETCD}
+#{ set +x; } 2>/dev/null
+
+exit 0

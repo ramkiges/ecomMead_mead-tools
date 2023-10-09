@@ -1,0 +1,69 @@
+#!/bin/bash
+# backend setting scriptlet for eqa1
+#
+echo "/// [$(basename $0)-ws_app_owner] Backend settings for $BRAND $ENVIRO $BACKEND ///"
+
+[[ -z $BRAND || -z $ENVIRO || -z $BACKEND ]] && { echo "*** This script is not meant to be run standalone - use 'set-backend' ***"; exit 255; }
+
+#cd $TMP/syncappconfig/config || BailOut "<$(basename $0)> Unable to cd to syncappconfig/config"
+#VALUES=$ENVIRO/values.yaml
+#echo "* update $(basename  $VALUES)"
+#set -x
+#yq eval -i ".\"services\".\"globalMfe\".\"uri\" = \"https://ecommerce-ecom-app-global-eqa1.services.west.nonprod.wsgc.com/\"" $VALUES
+##yq eval -i ".\"services\".\"mfeConfig\".\"uri\" = \"https://ecommerce-ecom-app-config-all-$ENVIRO.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"shopMfe\".\"uri\" = \"https://ecommerce-ecom-app-shop-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"inventoryAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-uat3.services.west.nonprod.wsgc.com/api/inventory/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"catalogAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-uat3.services.west.nonprod.wsgc.com/api/catalog/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"orderservicingMfe\".\"uri\" = \"https://ecommerce-ecom-app-order-servicing-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"customerMfe\".\"uri\" = \"https://ecommerce-ecom-app-customer-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"EcomSvcCusotmer\".\"uri\" = \"https://ecommerce-ecom-svc-customer-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"orderservicingMfe\".\"uri\" = \"https://ecommerce-ecom-app-order-servicing-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"orderServicing\".\"uri\" = \"https://ecommerce-ecom-svc-order-servicing-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"svcPhygital\".\"uri\" = \"https://ecommerce-ecom-svc-phygital-uat.services.west.nonprod.wsgc.com/api/phygital/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"productMfe\".\"uri\" = \"https://ecommerce-ecom-app-product-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"registryAppService\".\"uri\" = \"https://ecommerce-ecom-svc-registry-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"registryMfe\".\"uri\" = \"https://ecommerce-ecom-app-registry-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#{ set +x; } 2>/dev/null
+
+echo "* update appsettings"
+#set -x
+
+{ set +x; } 2>/dev/null
+
+#echo "* update $(basename $POM)"
+##set -x
+#propset -f $POM -p frontend.jmsOrderCreate.password -v fastqa1
+#propset -f $POM -p frontend.jmsOrderCreate.providerUrl -v tcp://tibintpprdrk1p.wsgc.com:10006
+#propset -f $POM -p frontend.jmsOrderCreate.username -v appecomqa1
+#propset -f $POM -p frontend.jmsOrder.password -v fastqa1
+#propset -f $POM -p frontend.jmsOrderPricing.password -v fastqa1
+#propset -f $POM -p frontend.jmsOrderPricing.providerUrl -v tcp://tibintpprdrk1p.wsgc.com:10008
+#propset -f $POM -p frontend.jmsOrderPricing.username -v appecomqa1
+#propset -f $POM -p frontend.jmsOrder.providerUrl -v tcp://tibinttstmp3p.wsgc.com:20011
+#propset -f $POM -p frontend.jmsOrderReservation.password -v fastqa1
+#propset -f $POM -p frontend.jmsOrderReservation.providerUrl -v tcp://tibintpprdrk1p.wsgc.com:10006
+#propset -f $POM -p frontend.jmsOrderReservation.username -v appecomqa1
+#propset -f $POM -p frontend.jmsOrder.username -v apptibco
+#propset -f $POM -p frontend.jms.password -v fastqa1
+#propset -f $POM -p frontend.jms.providerUrl -v tcp://tibintpprdrk1p.wsgc.com:10006
+#propset -f $POM -p frontend.jms.subscriberClientId -v @NODENAME@
+#propset -f $POM -p frontend.jms.username -v apptibco
+#propset -f $POM -p frontend.jmsWismo.password -v n3tw0rk
+#propset -f $POM -p frontend.jmsWismo.passwordCov2 -v n3tw0rk
+#propset -f $POM -p frontend.jmsWismo.providerUrl -v tcp://tibinttstmp1p.wsgc.com:20001
+#propset -f $POM -p frontend.jmsWismo.username -v apptibco
+#propset -f $POM -p frontend.jmsWismo.usernameCov2 -v apptibco
+#{ set +x; } 2>/dev/null
+
+if [[ $MARKET = "CAN" ]]
+then
+  echo "* update $MARKET-specific settings"
+#set -x
+  #yq eval -i ".\"services\".\"shopMfe\".\"uri\" = \"https://ecommerce-ecom-app-shop-eqa1.services.west.nonprod.wsgc.com/\"" $VALUES
+  #yq eval -i ".\"services\".\"inventoryAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-ca2.services.west.nonprod.wsgc.com/api/inventory/v1/\"" $VALUES
+  #yq eval -i ".\"services\".\"catalogAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-ca2.services.west.nonprod.wsgc.com/api/catalog/v1/\"" $VALUES
+  #wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk GEO_PROVINCES_API.STATES_PROVINCES_URL.s=https://ecommerce-ecom-svc-customer-eqa1.services.west.nonprod.wsgc.com/api/geo/v1/provinces.json
+  wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk 'PIP.FULFILLMENT_COUNTRY_CODE.a=CA'
+{ set +x; } 2>/dev/null
+fi
+

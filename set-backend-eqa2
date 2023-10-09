@@ -1,0 +1,110 @@
+#!/bin/bash
+# backend setting scriptlet for eqa2/dtcmou_app_owne
+#
+echo "/// [$(basename $0)-dtcmou_app_owner] Backend settings for $BRAND $ENVIRO $BACKEND ///"
+
+[[ -z $BRAND || -z $ENVIRO || -z $BACKEND ]] && { echo "*** This script is not meant to be run standalone - use 'set-backend' ***"; exit 255; }
+
+#cd $TMP/syncappconfig/config || BailOut "<$(basename $0)> Unable to cd to syncappconfig/config"
+#VALUES=$ENVIRO/values.yaml
+#echo "* update $(basename  $VALUES)"
+#set -x
+#yq eval -i ".\"services\".\"mfeConfig\".\"uri\" = \"https://ecommerce-ecom-app-config-all-$ENVIRO.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"shopMfe\".\"uri\" = \"https://ecommerce-ecom-app-shop-eqa2.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"globalMfe\".\"uri\" = \"https://ecommerce-ecom-app-global-eqa2.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"orderservicingMfe\".\"uri\" = \"https://ecommerce-ecom-app-order-servicing-eqa2.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"customerMfe\".\"uri\" = \"https://ecommerce-ecom-app-customer-eqa2.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"EcomSvcCusotmer\".\"uri\" = \"https://ecommerce-ecom-svc-customer-eqa2.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"orderServicing\".\"uri\" = \"https://ecommerce-ecom-svc-order-servicing-eqa2.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"svcPhygital\".\"uri\" = \"https://ecommerce-ecom-svc-phygital-eqa2.services.west.nonprod.wsgc.com/api/phygital/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"inventoryAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-qa2.services.west.nonprod.wsgc.com/api/inventory/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"catalogAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-qa2.services.west.nonprod.wsgc.com/api/catalog/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"productMfe\".\"uri\" = \"https://ecommerce-ecom-app-product-regression.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"registryAppService\".\"uri\" = \"https://ecommerce-ecom-svc-registry-eqa2.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"registryMfe\".\"uri\" = \"https://ecommerce-ecom-app-registry-eqa2.services.west.nonprod.wsgc.com/\"" $VALUES
+#{ set +x; } 2>/dev/null
+
+echo "* update appsettings"
+#set -x
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk  PRODUCT_CONFIGURATOR.SERVICE_URI.r=https://eqa2-product-configuration-service-supplychain.services.west.nonprod.wsgc.com/v1/products
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMEXP.EXPRESS_CHECKOUT_COOKIE.s=${BRAND_UC}EXPRESS_CHECKOUT_QA2
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMPRF.PERSISTENT_METRICS_COOKIE.s=${BRAND_UC}_PCMETRICS_COOKIE_QA
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMPRF.USER_PERSIST_COOKIE_NAME.s=${BRAND_UC}MX_PERSIST_COOKIE_QA
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMPRF.ACCT_COOKIENAME.s=${BRAND_UC}MX_ACCT_QA
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMPRF.PRF_COOKIENAME.s=${BRAND_UC}MX_SIGNIN_QA
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMPRF.TEXT_ME_OFFERS_ENABLED.b=false
+
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMCRT.SAVEDCARTCOOKIE.s=${BRAND_UC}MX_SAVEDCART_QA2
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMCRT.SESSIONCARTCOOKIE.s=${BRAND_UC}MX_SESCART_QA2
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMCAT.BANNERCOOKIE.s=${BRAND_UC}MX_BANNERS_QA2
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMCRT.MAXSESSIONTIME.t=1,1,0,0
+
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMSES.DATATABLE.s=${BRAND_UC}PE_SESSION_DATA
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMSES.INFOTABLE.s=${BRAND_UC}PE_SESSION_INFO
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMSES.COOKIENAME.s=${BRAND_UC}PE_SID_QA2
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMSES.POTENTIALSECURECOOKIENAME.s=${BRAND_UC}PE_PSSID_QA2
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMSES.SECURECOOKIENAME.s=${BRAND_UC}PE_SSID_QA2
+
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk COMREG.REG_STS_COOKIENAME.s=${BRAND_UC}MX_REGSTS_QA
+
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk CUSTOMER_SERVICE.KAFKA_ERROR_TOPIC_PREFIX.s=QA2.B.
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk CUSTOMER_SERVICE.KAFKA_TOPIC_PREFIX.s=QA2.B
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk CHKT.KAFKA_TOPIC_PREFIX.s=QA2.B.
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk AFFIRM.EPS_TOKEN_SCHEME.s=AFP_PMNT_QA2
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk VENMO.EPS_TOKEN_SCHEME.s=BTVT_PMNT_QA2
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk CART_CHECKOUT.SERVICE_URI.r=https://ecommerce-cart-checkout-qa2.services.west.nonprod.wsgc.com/cartservice/v1/domain/
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk ORDER_HISTORY_SERVICE.URL.s=https://eqa2-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/orderservice/v1/history
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk ORDER_SERVICE.URL.s=https://eqa2-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/orderservice/v1/orders/
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk SELF_SERVICE.APPOINTMENTS_URL.s=https://eqa2-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/appointment/v1/workorders/
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk SELF_SERVICE.RESCHEDULE_ELIGIBILITY_URL.s=https://eqa2-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/appointment/reschedule/v1/workorders/
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk SINGLE_PAGE_CHECKOUT.CARE_CENTER_REDIRECT_BASE_URL.r=https://eqa2-ccui.wsgc.com/oms/#/detail/order/default/
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk TRACKING_SERVICE.URL.s=https://eqa2-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/trackingservice/v1/
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk TRACKING_SERVICE.THIRD_PARTY_SERVICE_URI.r=https://eqa2-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/shipments/tracking/details
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk LOYALTY.KAFKA_TOPIC_PREFIX.s=QA2.L.
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk UPS_TRACKING_SERVICE.SERVICE_URI.r=https://tibinttstmp7p.wsgc.com:19109/v1/GetTrackingDetails
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk PAYMENT.TOKENIZATION_EPS_URLS.a=https://tibinttstsac5p.wsgc.com:19092/paymentservice/v1
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk ORDER_RETURN_DETAILS_SERVICE.SERVICE_URI.r=https://tibinttstsac5p.wsgc.com:19105/v1/GetOrderReturnEligibility
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk ORDERSCREENING.SERVICE_URL.s=https://tibinttstsac5p.wsgc.com:19096/ecommerce/orderfraudscreening
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk INVENTORY_OMS_RESERVATION_REST.SERVICE_URI.r=https://tibinttstsac5p.wsgc.com:19110
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk INVENTORY_OMS_REST.SERVICE_URI.r=https://tibinttstsac5p.wsgc.com:19104
+wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk PAYMENT.TOKENIZATION_EPS_SCC_SCHEME.s=WSI_SCC_QA2
+{ set +x; } 2>/dev/null
+
+echo "* update $(basename $POM)"
+#set -x
+propset -f $POM -p frontend.jmsOrder.providerUrl -v tcp://tibinttstmp3p.wsgc.com:20011
+propset -f $POM -p frontend.jmsOrder.username -v apptibco  
+propset -f $POM -p frontend.jmsOrder.password -v n3tw0rk 
+propset -f $POM -p frontend.jmsOrderPricing.providerUrl -v tcp://tibinttstmp3p.wsgc.com:20011
+propset -f $POM -p frontend.jmsOrderPricing.username -v apptibco 
+propset -f $POM -p frontend.jmsOrderPricing.password -v n3tw0rk 
+propset -f $POM -p frontend.jmsOrderCreate.providerUrl -v tcp://tibinttstmp3p.wsgc.com:20011
+propset -f $POM -p frontend.jmsOrderCreate.username -v apptibco 
+propset -f $POM -p frontend.jmsOrderCreate.password -v n3tw0rk 
+propset -f $POM -p frontend.jmsOrderReservation.providerUrl -v tcp://tibinttstmp3p.wsgc.com:20011
+propset -f $POM -p frontend.jmsOrderReservation.username -v apptibco 
+propset -f $POM -p frontend.jmsOrderReservation.password -v n3tw0rk 
+propset -f $POM -p frontend.jms.providerUrl -v tcp://tibinttstmp3p.wsgc.com:20011
+propset -f $POM -p frontend.jms.username -v apptibco
+propset -f $POM -p frontend.jms.password -v n3tw0rk
+propset -f $POM -p frontend.jms.subscriberClientId -v @NODENAME@
+propset -f $POM -p frontend.jmsWismo.username -v apptibco
+propset -f $POM -p frontend.jmsWismo.password -v n3tw0rk
+propset -f $POM -p frontend.jmsWismo.usernameCov2 -v apptibco
+propset -f $POM -p frontend.jmsWismo.passwordCov2 -v n3tw0rk
+{ set +x; } 2>/dev/null
+
+if [[ $MARKET = "CAN" ]]
+then
+  echo "* update $MARKET-specific settings"
+#set -x
+  #yq eval -i ".\"services\".\"shopMfe\".\"uri\" = \"https://ecommerce-ecom-app-shop-caqa11.services.west.nonprod.wsgc.com/\"" $VALUES
+  #yq eval -i ".\"services\".\"inventoryAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-ca1.services.west.nonprod.wsgc.com/api/inventory/v1/\"" $VALUES
+  #yq eval -i ".\"services\".\"catalogAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-ca1.services.west.nonprod.wsgc.com/api/catalog/v1/\"" $VALUES
+
+  wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk GEO_PROVINCES_API.STATES_PROVINCES_URL.s=https://ecommerce-ecom-svc-customer-eqa2.services.west.nonprod.wsgc.com/api/geo/v1/provinces.json
+  wsi_settings.sh --brand $BRAND --env $ENVIRO -v --bulk 'PIP.FULFILLMENT_COUNTRY_CODE.a=CA'
+
+{ set +x; } 2>/dev/null
+fi
+

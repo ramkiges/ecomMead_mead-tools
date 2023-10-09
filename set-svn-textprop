@@ -1,0 +1,19 @@
+#!/bin/bash
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin:~/bin
+# set SVN properties for text files
+
+for file in $*
+do
+  type="text/plain"
+  eol="native"
+
+	svn add $file >/dev/null 2>&1
+  ext=$(echo "$file" | awk -F\. '{ print $NF }')
+  [[ $ext = "md" ]] && type="text/markdown"
+
+	svn propset svn:mime-type $type $file
+	svn propset svn:eol-style $eol $file
+	svn propset svn:keywords "Id Author LastChangedDate LastChangedBy" $file
+	#svn commit -m "[DEVOPS] set text file properties" $file
+done
+

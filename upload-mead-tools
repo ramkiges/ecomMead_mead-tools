@@ -1,0 +1,9 @@
+#!/bin/bash
+
+FILES="jmxclient.jar jira-close jira-comment jira-create jira-delete"
+
+for file in $FILES
+do
+  artifact-upload $file wsgc/mead-tools
+done
+

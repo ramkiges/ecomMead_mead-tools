@@ -1,0 +1,52 @@
+#!/bin/bash
+# update ww_installations for admintool
+PATH=/apps/mead-tools:/usr/local/bin:/usr/bin:/sbin:/usr/sbin:~/bin:/wsgc/bin
+source /apps/buildsystem/bin/env.sh
+PATH=$ORACLE_HOME/bin:$PATH
+export PATH
+
+desc="IntDev Environment"
+
+#alias sqlplus="DYLD_LIBRARY_PATH=~/instantclient sqlplus"
+
+BailOut() {
+    [ -n "$1" ] && echo "$*"
+    exit 1
+}
+
+# the schema is almost irrelevant, as most tables are part of a synonym
+DST_SCHEMA=eqa3_app_owner
+[[ -z $DST_SCHEMA ]] && BailOut "Need destination schema"
+
+# getdb is a script which returns the db connections params for a given schema
+DST_DB=$(getdb $DST_SCHEMA)
+[ -z "$DST_DB" ] && BailOut "Can't get creds for $DST_SCHEMA $BRAND $DST_ENV"
+DST_dbHost=$(echo "$DST_DB" | awk -F\| '{ print $1 }')
+DST_dbOwner=$(echo "$DST_DB" | awk -F\| '{ print $2 }')
+DST_dbUser=$(echo "$DST_DB" | awk -F\| '{ print $3 }')
+DST_dbPass=$(echo "$DST_DB" | awk -F\| '{ print $4 }')
+DST_dbSID=$(echo "$DST_DB" | awk -F\| '{ print $5 }')
+DST_dbPort=$(echo "$DST_DB" | awk -F\| '{ print $6 }')
+DST_dbTable=$(echo "$DST_DB" | awk -F\| '{ print $7 }')
+
+DEL="delete from $DST_dbOwner.WW_INSTALLATIONS;" 
+echo "$DEL" | sqlplus -S ${DST_dbUser}/${DST_dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${DST_dbHost})(PORT=${DST_dbPort}))(CONNECT_DATA=(SID=${DST_dbSID})))" 
+
+seq=1
+for env in prod $(get-env-list -e bpv) $(getenvlist -e uat) $(get-env-list -e rgs) $(get-env-list -e qa) $(get-env-list -e int) $(get-env-list -e perf)
+do
+    #schema=$(getschema ws $env 2>/dev/null | awk -F: '{ print $1 }')
+    #[[ -z $schema ]] && schema=$(getschema rj $env 2>/dev/null | awk -F: '{ print $1 }')
+    #[[ $schema = $DST_SCHEMA ]] || continue
+    #echo "$env"; continue
+
+    inst=$(get-installation ws $env)
+    [[ -z $inst ]] && inst=$(get-installation rj $env)
+    [[ -z $inst ]] && inst=$env
+
+    I_Q="insert into $DST_dbOwner.WW_INSTALLATIONS (INSTALLATION, SEQUENCE, DESCRIPTION) values ('$inst', $seq, '$desc');"
+    echo "$I_Q"
+    echo "$I_Q" | sqlplus -S ${DST_dbUser}/${DST_dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${DST_dbHost})(PORT=${DST_dbPort}))(CONNECT_DATA=(SID=${DST_dbSID})))" >/dev/null 2>&1
+    seq=$(expr $seq + 1)        
+done
+

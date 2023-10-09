@@ -1,0 +1,53 @@
+#!/bin/bash
+TMP=~/Downloads
+mkdir -p $TMP
+
+BailOut() {
+	[ -n "$1" ] && echo "$1" >&2
+	echo "Usage: $(basename $0) <srv1> <srv2> <FILE> [key]" >&2
+	exit 1
+}
+
+SRV1=$1
+SRV2=$2
+FILE1=$3
+FILE2=$3
+KEY=$4
+
+if echo "$1" | grep -q ":"
+then
+    SRV1=$(echo "$1" | awk -F: '{ print $1 }')
+    FILE1=$(echo "$1" | awk -F: '{ print $2 }')
+    KEY=$3
+fi
+
+if echo "$2" | grep -q : 
+then
+    SRV2=$(echo "$2" | awk -F: '{ print $1 }')
+    FILE2=$(echo "$2" | awk -F: '{ print $2 }')
+    KEY=$3
+fi
+
+[ -z "$FILE1" -o -z "$FILE2" ] && BailOut
+
+TMP1="$TMP/$(basename $FILE1)-$SRV1"
+TMP2="$TMP/$(basename $FILE2)-$SRV2"
+
+#ssh -q -tt $SSHUSER@$SRV1 "sudo chmod o+r $FILE1"
+#ssh -q -tt $SSHUSER@$SRV2 "sudo chmod o+r $FILE2"
+
+scp -q $SSHUSER@$SRV1:$FILE1 $TMP1 || BailOut "Could't scp $SRV1:$FILE1"
+scp -q $SSHUSER@$SRV2:$FILE2 $TMP2 || BailOut "Could't scp $SRV2:$FILE2"
+
+ls -dl $TMP1 $TMP2
+
+#CMD="diff -iBewb --normal $TMP1 $TMP2"
+CMD="diff --normal $TMP1 $TMP2"
+[ -n "$KEY" ] && CMD="$CMD | egrep -i \"$KEY\" "
+
+eval "$CMD"
+
+ssh -q -tt $SSHUSER@$SRV1 "rpm -q --whatprovides $FILE1"
+ssh -q -tt $SSHUSER@$SRV2 "rpm -q --whatprovides $FILE1"
+
+

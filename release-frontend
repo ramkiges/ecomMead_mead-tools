@@ -1,0 +1,13 @@
+#!/bin/bash
+
+jenkins build -s create-release-artifact-configs -p Project=frontend -p Release_Config_Common=true
+
+# will need to update version of common
+#jenkins build -s create-release-artifact https://repos.wsgc.com/svn/devops/application/frontend-2.1/common/role/trunk/
+
+#jenkins build -s create-release-artifact https://repos.wsgc.com/svn/devops/application/frontend-2.1/common/service/tomcat/wsgc-devops-frontend-service-tomcat/trunk/
+
+jenkins build -s create-release-artifact-configs -p Project=frontend -p Release_Config_PRD=true
+
+
+

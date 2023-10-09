@@ -1,0 +1,85 @@
+#!/bin/bash
+# sets up Jenkins jobs after cutting a new release
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps:~/bin
+
+RELEASE=$(echo "$1" | tr "A-Z" "a-z")
+ENV=$(echo "$2" | tr "A-Z" "a-z")
+SRC_ENV=$(echo "$3" | tr "A-Z" "a-z")
+SRC_GEN="latest-qa"
+PAUSE=60
+umask 000 
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <release> <target-env> [source-env]"
+	echo
+	exit 1
+}
+
+timeStamp() { echo ">>> $* $(date +'%Y-%m-%d %H:%M') <<<"; }
+
+[ -z "$RELEASE" ] && BailOut "Need release name"
+[ -z "$ENV" ] && BailOut "Need target-env to which to deploy"
+[ -z "$SRC_ENV" ] && SRC_ENV="int2"
+
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+[ -z "$JENKINS" ] && BailOut "Can't find jenkins-jnlp"
+GETURLS=$(which geturls 2>/dev/null)
+
+case $ENV in
+	int1) TEAM="Release-Env";;
+	int2) TEAM="Release-Env";;
+	uat1) TEAM="Brand-Team";;
+	uat2) TEAM="Brand-Team";;
+	uat3) TEAM="Release-Env";;
+	rgs1) TEAM="Release-Env";;
+	qa10) TEAM="EnterpriseQA";;
+	qa11) TEAM="EnterpriseQA";;
+	qa15) TEAM="Release-Env";;
+	*) TEAM="Release-Env";;
+esac 
+
+# check to see what release is deployed now
+DEPLOYED_RELEASE=$($JENKINS list-jobs | grep -i "deploy-${ENV}.*CONTENT" | grep -i release | awk -F- '{ print $NF }' | head -1)
+if [ "$DEPLOYED_RELEASE" = "$RELEASE" ] 
+then
+	echo "$RELEASE is already deployed to $ENV - nothing to do"
+	exit 0
+fi
+
+# deploy
+timeStamp "Updating frontend deployers for $ENV $TEAM"
+
+eval $JENKINS build -s simple-update-frontend-deployer -p ENV="$ENV" -p NEW_SHORTCUT_NAME="$RELEASE-shortcut" -p AFFINITY_TEAM="$TEAM" -p AFFINITY_CONTACT=
+
+for BRAND in mg pb pk pt we ws
+do
+	# give jenkins a chance to catch up (ie update the view)
+	sleep $PAUSE 
+
+	timeStamp "Updating ECM generations for $BRAND $ENV"
+	[ -n "$SRC_ENV" ] && eval $JENKINS build -s copy-ecm-generations -p Brand="$BRAND" -p Source_Environment="$SRC_ENV" -p Destination_Environment="$ENV" -p Commit=true 
+
+	timeStamp "Updating WCM generation for $BRAND $ENV"
+	[ -n "$SRC_GEN" ] && eval $JENKINS build -s wcm-update-generation -p SITE="$BRAND" -p ENV="$ENV" -p GENERATION="$SRC_GEN"
+
+	timeStamp "Updating frontend config for $BRAND $ENV"
+	eval $JENKINS build -s wsgc-devops-frontend21-qa-single-env -p BRAND="$BRAND" -p ENVIRONMENT="$ENV"
+done
+
+# add settings job to the view
+eval $JENKINS add-job-to-view "deploy-$ENV-$TEAM" adhoc-appsetting 
+
+# kick off the deployers
+for BRAND in mg pb pk pt we ws
+do
+	job=$($JENKINS list-jobs | grep -i "^deploy-.*CONTENT" | grep -iw "$ENV" | grep -i "$BRAND")
+	timeStamp "Deploying $BRAND $ENV ($job)"
+	eval $JENKINS build -s $job
+done
+
+#
+TRIGGER=$(eval JENKINS list-jobs | grep "trigger-all.*$ENV")
+
+exit 0
+

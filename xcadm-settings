@@ -1,0 +1,20 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+
+BRAND=admin
+ENVIRO=qa4
+COMMENT="-c 'update xcadm settings for $ENVIRO'"
+
+BRAND_UC=WS
+
+export ADHOC=true
+
+wsi_settings.sh "$COMMENT" --brand $BRAND --env $ENVIRO --bulk COMSES.DATATABLE.s=${BRAND_UC}PE_SESSION_DATA
+wsi_settings.sh "$COMMENT" --brand $BRAND --env $ENVIRO --bulk COMSES.INFOTABLE.s=${BRAND_UC}PE_SESSION_INFO
+#wsi_settings.sh "$COMMENT" --brand $BRAND --env $ENVIRO --bulk COMSES.LIFETIME.t=0,0,5,0
+#wsi_settings.sh "$COMMENT" --brand $BRAND --env $ENVIRO --bulk COMSES.SCANTIME.t=0,0,0,30
+#wsi_settings.sh "$COMMENT" --brand $BRAND --env $ENVIRO --bulk COMSES.CACHETIME.t=0,0,5,0
+#wsi_settings.sh "$COMMENT" --brand $BRAND --env $ENVIRO --bulk COMSES.MAXCACHE.i=5000
+#wsi_settings.sh "$COMMENT" --brand $BRAND --env $ENVIRO --bulk COMSES.MAX_LENGTH.t=0,0,5,0
+
+

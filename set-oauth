@@ -1,0 +1,291 @@
+#!/bin/bash
+# hack of a script to configure oauth settings for either QA or UAT
+
+# TODO:  update syncappconfig, eg
+# auth:
+#  environment: qa
+#
+#  experimentation:
+#      environment: QA32
+#          baseUri: https://ecommerce-experiment-proxy-qa.services.west.nonprod.wsgc.com/experimentation/v1/
+
+# TODO: add Manifest support eg https://github.wsgc.com/eCommerce-DevOps/env-manifest/blob/release/manifest/rgs1/rgs1-services-manifest.yaml#L24 
+# get-manifest-property -e uat -s oauth -p '"configuration"."applicationProperties"."wsgc.migration.oauth.accessTokenUri"'
+
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/apps/mead-tools:~/bin
+export PATH
+#export ADHOC=true
+
+FRONTEND=https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk
+APPSETTINGS=https://repos.wsgc.com/svn/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site/
+ENVIRO=$1
+REALM=$2
+[[ -n $3 ]] && BRANDS=$3 || BRANDS=$(getbrandlist -a $ENVIRO)
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  echo "Usge: $(basename $0) <env> <qa|uat> [brands]"
+  #rm -rf $TMP
+  exit 1  
+}
+
+Notation() { echo "### [$(basename $0)] $* "; }
+
+[[ -n $TICKET ]] && REASON=$TICKET || REASON="DEVOPS"
+
+if [[ -z $REALM ]]
+then
+  [[ $ENVIRO =~ qa  ]] && REALM=qa
+  [[ $ENVIRO =~ rgs ]] && REALM=qa
+  [[ $ENVIRO =~ uat ]] && REALM=uat
+  [[ $ENVIRO =~ bpv ]] && REALM=uat
+  [[ $ENVIRO =~ int ]] && REALM=qa
+fi
+
+[[ -z $REALM ]] && BailOut "Need oauth domain [qa|uat]"
+
+echo "$REALM" | egrep -iwq "uat|qa" || BailOut "Invalid domain: $REALM"
+REALM=$(tr '[:upper:]' '[:lower:]' <<< $REALM)
+
+TMP=/tmp/$(basename $0)-$ENVIRO-$LOGNAME
+rm -rf $TMP
+
+export DEVOPS_REPO=$TMP/devops
+
+ADG_REPO=git@github.wsgc.com:eCommerce-DevOps/delivery-gateway-helm-config.git
+ADG_DIR=$(get-adg-env $ENVIRO 2>/dev/null)
+ADG_BRANCH=$(get-adg-branch $ENVIRO)
+
+MANIFEST=$TMP/manifest
+rm -rf $MANIFEST
+Notation "Clone and update Manifest"
+hub clone -q git@github.wsgc.com:eCommerce-Mead/env-manifest.git $MANIFEST || BailOut "Unable to clone manifest"
+cd $MANIFEST/manifest || BailOut "Unable to cd to $MANIFEST/manifest"
+ENV_YML=$ENVIRO/$ENVIRO-services-manifest.yaml
+if [[ -e $ENV_YML ]] 
+then
+  o=$(yq eval "(.services.[] | select(has(\"name\")) | select(.name == \"oauth\")).configuration.shared" $ENV_YML | grep -iv "null") 
+  [[ -n $o ]] && yq eval "(.services.[] | select(has(\"name\")) | select(.name == \"oauth\")).configuration.shared=\"$REALM-shared\"" -i $ENV_YML
+  git commit -q -m "[$REASON] set oauth domain to $REALM-shared" $ENV_YML && git push
+else
+  echo "Unable to find $ENV_YML"
+fi
+
+# svn checkout
+#[[ $(dirname $(cat $HOME/.wsi_settings.sh 2>/dev/null) 2>/dev/null) =~ /tmp/ ]] && rm -rf $HOME/.wsi_settings.sh
+[[ $(uname) = Linux ]] && rm -rf $HOME/.wsi_settings.sh
+if [[ ! -d $(dirname $(cat $HOME/.wsi_settings.sh 2>/dev/null) 2>/dev/null) ]]
+then
+  Notation "Clone $TMP/devops"
+  svn co -q $FRONTEND $TMP/devops/application/frontend-2.1/qa/config/app/trunk
+  svn co -q $APPSETTINGS $TMP/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site/
+  svn cleanup $TMP/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site/
+  svn cleanup $TMP/devops/application/frontend-2.1/qa/config/app/trunk
+fi
+
+if [[ -n $ADG_DIR ]]
+then
+  rm -rf $TMP/adg || BailOut "Can't cleanup prior execution"
+  git clone -b $ADG_BRANCH -q $ADG_REPO $TMP/adg || BailOut "Unable to clone $ADG_REPO/nonprod"
+  cd $TMP/adg || BailOut "Unable to cd to $TMP/adg"
+  cd config/$ADG_DIR || BailOut "Unable to cd to src/main/helm/config/$ADG_DIR"
+
+  REALM_UC=$(tr 'a-z' 'A-Z' <<< $REALM)
+  exp="(.environments.[] | select (has(\"name\")) | select(.name == \"$ENVIRO\")).oauth.env = \"$REALM\""
+  yq eval -i "$exp" values.yaml
+
+  exp="(.environments.[] | select (has(\"name\")) | select(.name == \"$ENVIRO\")).oauth.clientId = \"delivery_gateway/$REALM_UC\""
+  yq eval -i "$exp" values.yaml
+
+  exp="(.environments.[] | select (has(\"name\")) | select(.name == \"$ENVIRO\")).authStateId = \"WS$REALM_UC\""
+  yq eval -i "$exp" values.yaml
+
+  exp="(.environments.[] | select (has(\"name\")) | select(.name == \"$ENVIRO\")).auth_state_props.client = \"ecom_WS/$REALM_UC\""
+  yq eval -i "$exp" values.yaml
+
+  #yq eval values.yaml | grep -A+20 $ENVIRO 
+  yq eval values.yaml | grep -A+20 $ENVIRO | grep -A+10 "oauth:" | egrep -i "oauth:|env:|clientId:|authStateId:|auth_state_props:|client:"
+
+  #TODO: need to manipulate secrets.yaml
+  #git add values.yaml 
+  #git commit 
+  #git push
+fi
+
+
+REALM_ORG=$REALM
+for BRAND in $BRANDS
+do
+    AKAMAI=$(get-akamai $BRAND $ENVIRO)
+    AKAMAI_HOST=$(get-akamai $BRAND $ENVIRO | awk -F/ '{ print $3 }')
+
+    SCHEMA=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+    [[ -z $SCHEMA ]] && BailOut "Can't get schema for $BRAND $ENVIRO"
+
+    DB=$(getschema $BRAND $ENVIRO | awk -F: '{ print $2 }')
+    [[ $DB =~ vweb ]] && REALM=qa || REALM=$REALM_ORG
+
+    echo "> $BRAND ($REALM)"
+
+    OVERRIDE=$(geturls $BRAND $ENVIRO | grep -i override.properties)
+    [[ -z $OVERRIDE ]] && { echo "Can't find override for $BRAND $ENVIRO"; continue; }
+    svn -q up $OVERRIDE
+
+    BRAND_UC=$(echo "$BRAND" | tr "a-z" "A-Z")
+    ENVIRO_UC=$(echo "$ENVIRO" | tr "a-z" "A-Z")
+
+    if [ "$REALM" = "uat" ]
+    then
+      OAUTH_HOST=ecommerce-oauth-uat.services.west.nonprod.wsgc.com
+      case $BRAND in
+        gr )  DP_CLIENT_PASSWORD="G7V}aC)L_8"
+              LINK_CLIENT_PASSWORD="8XPd?67" 
+              DP_CLIENT_ID="ecom_PB/UAT"
+              ;;
+        mg )  DP_CLIENT_PASSWORD="2fLJ+4RMnz"
+              LINK_CLIENT_PASSWORD=")hZ3y93Mqd" 
+              ;;
+        pb )  DP_CLIENT_PASSWORD="G7V}aC)L_8"
+              LINK_CLIENT_PASSWORD="8XPd?67" 
+              ;;
+        pk )  DP_CLIENT_PASSWORD="ttLaZM6T[["
+              LINK_CLIENT_PASSWORD="Xgbl8a<3L$" 
+              ;;
+        pt )  DP_CLIENT_PASSWORD="/5kwAByBt^"
+              LINK_CLIENT_PASSWORD="(4Wj9DQbAc" 
+              ;;
+        rj )  DP_CLIENT_PASSWORD="G7V}aC)L_8"
+              LINK_CLIENT_PASSWORD="8XPd?67" 
+              DP_CLIENT_ID="ecom_PB/UAT"
+              ;;
+        we )  DP_CLIENT_PASSWORD="E?XxW3zDT&"
+              LINK_CLIENT_PASSWORD=")y5bDev8Nq" 
+              ;;
+        ws )  DP_CLIENT_PASSWORD="6t?QcMV9>)"
+              LINK_CLIENT_PASSWORD="jyY=pAu5+&" 
+              ;;
+      esac
+
+        [[ -z $DP_CLIENT_ID ]] && DP_CLIENT_ID="ecom_${BRAND_UC}/UAT"
+        [[ -z $LINK_CLIENT_ID ]] && LINK_CLIENT_ID="mashery_${BRAND_UC}/UAT"
+    fi
+
+    if [ "$REALM" = "qa" ]
+    then
+        OAUTH_HOST=ecommerce-oauth-qa.services.west.nonprod.wsgc.com
+        case $BRAND in
+            mg )  DP_CLIENT_PASSWORD="MGecom123"
+                  LINK_CLIENT_PASSWORD="MGmash123" ;;
+            pb )  DP_CLIENT_PASSWORD="PBecom123"
+                  LINK_CLIENT_PASSWORD="PBmash123" ;;
+            rj )  DP_CLIENT_PASSWORD="RJecom123"
+                  LINK_CLIENT_PASSWORD="RJmash123" ;;
+            gr )  DP_CLIENT_PASSWORD="PBecom123"
+                  LINK_CLIENT_PASSWORD="PBmash123" ;;
+            pk )  DP_CLIENT_PASSWORD="PKecom123"
+                  LINK_CLIENT_PASSWORD="PKmash123" ;;
+            pt )  DP_CLIENT_PASSWORD="PTecom123"
+                  LINK_CLIENT_PASSWORD="PTmash123" ;;
+            we )  DP_CLIENT_PASSWORD="WEecom123"
+                  LINK_CLIENT_PASSWORD="WEmash123" ;;
+            ws )  DP_CLIENT_PASSWORD="WSecom123"
+                  LINK_CLIENT_PASSWORD="WSmash123" ;;
+        esac
+        DP_CLIENT_ID="ecom_${BRAND_UC}/QA"
+        LINK_CLIENT_ID="mashery_${BRAND_UC}/QA"
+    fi       
+
+    MARKET=$(getmarket $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+    [[ $MARKET =~ us ]] && MARKET=
+    [[ -n $MARKET ]] && MARKET="$MARKET/"
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ECOMSERV.URI_PREFIX --type s $MARKET$ENVIRO
+
+    [ "$REALM" = "uat" ] && wsi_settings.sh --brand $BRAND --env $ENVIRO update DOMAIN_PUBLISHER_CLIENT.DOMAIN_PUBLISHER_GROUP_NAME --type s "${BRAND}-uat3"
+    [ "$REALM" = "qa" ]  && wsi_settings.sh --brand $BRAND --env $ENVIRO update DOMAIN_PUBLISHER_CLIENT.DOMAIN_PUBLISHER_GROUP_NAME --type s "${BRAND}-qa"
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update REGISTRY.BRAND_NAME --type s $AKAMAI
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update REGISTRY.REG_URL --type s $AKAMAI_HOST
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update LOYALTY.ELS_CARD_ENDPOINT_URL --type r https://loyalty-${REALM}1-rk1v.wsgc.com/loyalty/v1/loyaltyCards
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update PLATFORM_SESSION_SERVICE.SERVICE_URI --type r https://edap-platform-svc-session-${REALM}.services.west.nonprod.wsgc.com/session-service/v1/session
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update DOMAIN_PUBLISHER_CLIENT.DOMAIN_PUBLISHER_URL --type s https://search-publisher-${REALM}-rk1v.wsgc.com/v1/domains/
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update AB_TESTS.GLOBAL_AB_TESTS_ENABLED --type b false
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update CACHING.EXPERIMENTATION_PROXY_CACHE_TTL --type i 120
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update AB_TESTS.PROXY_ENDPOINT_URI --type r https://ecommerce-experiment-proxy-${REALM}.services.west.nonprod.wsgc.com/experimentation/v1/environments/$ENVIRO_UC/concepts/$BRAND_UC/schedule
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.DP_CLIENT_ID --type s "$DP_CLIENT_ID"
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.DP_CLIENT_PASSWORD --type s "$DP_CLIENT_PASSWORD"
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.LINK_CLIENT_ID --type s "$LINK_CLIENT_ID"
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.LINK_CLIENT_PASSWORD --type s "$LINK_CLIENT_PASSWORD"
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.STANDARD_LOGIN_COOKIE_NAME --type s "${BRAND_UC}_SLID"
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.OAUTH_AUTHORIZATION_TOKEN_URL --type s https://$OAUTH_HOST/oauth/authorize
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.OAUTH_ACCESS_TOKEN_URI --type s https://$OAUTH_HOST/oauth/token
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.OAUTH_CHECK_TOKEN_URI --type s https://$OAUTH_HOST/oauth/check_token
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.USER_SERVICE_URI --type s https://$OAUTH_HOST/v1/users
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.DEFAULT_MAX_PER_ROUTE --type i 20
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.PERSISTENT_LOGIN_EXCLUDED_URLS_REGEX --type s "/(search/stores.json|services/(?!shoppingcart)|storepickup|eligiblePromotions.json).*"
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.PROFILE_SERVICE_URL --type r https://ecommerce-profile-${REALM}1.services.west.nonprod.wsgc.com/v2/profiles
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.VERIFICATION_SERVICE_URL --type r https://ecommerce-profile-${REALM}1.services.west.nonprod.wsgc.com/v2/verification/
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.AUTHENTICATION_CACHE_TTL --type i 300000
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.AUTHENTICATION_TTL_CACHE_SIZE --type i 1000
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.CONNECT_TIMEOUT --type i 70000
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.IS_PERSISTENT_LOGIN_ENABLED --type b true
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.IS_AUTO_LOGIN_SKIP_FOR_EXCLUDED_URLS --type b true
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.MAX_TOTAL_CONNECTIONS --type i 100
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update ACCOUNT_SERVICES.READ_TIMEOUT --type i 70000
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update OAUTH.ACCESS_TOKEN_URI --type s https://$OAUTH_HOST/oauth/token
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update CROSS_BRAND_REGISTRY.ERS_ENDPOINT_URL --type s https://registry-${REALM}1-rk1v.wsgc.com/registry/v3
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update REGISTRY.FOUNDATION_URL --type s https://ecommerce-registryv2-${REALM}.services.west.nonprod.wsgc.com/registryservice/
+
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update PLATFORM_SESSION_SERVICE.SERVICE_URI --type r https://edap-platform-svc-session-${REALM}.services.west.nonprod.wsgc.com/session-service/v1/session
+    wsi_settings.sh --brand $BRAND --env $ENVIRO update FAVORITES.SERVICE_URL --type s https://ecommerce-favorites-${REALM}.services.west.nonprod.wsgc.com/favorites/v3
+
+    svn commit -m "[$REASON] update ${REALM} oauth-related settings for $ENVIRO $(basename $0)" $OVERRIDE
+
+    Notation "Run appsettings-$SCHEMA-$BRAND "
+    jenkins-jnlp build appsettings-$SCHEMA-$BRAND >/dev/null 2>&1 &
+done
+
+set -x
+#get-manifest-property -e $ENVIRO -s cart-checkout -p '"configuration"."oauth"."base.uri"'
+
+#get-manifest-property -e $ENVIRO -s oauth -p '"configuration"."applicationProperties"."wsgc.migration.oauth.accessTokenUri"'
+#get-manifest-property -e $ENVIRO -s oauth -p '"configuration"."applicationProperties"."wsgc.migration.oauth.accessTokenUri"'
+
+#get-manifest-property -e $ENVIRO -s credit-card-orchestration -p '"configuration"."applicationProperties"."oauth.endpoint"'
+
+#get-manifest-property -e $ENVIRO -s experiment-proxy -p '"configuration"."applicationProperties"."wsgc.oauth.accessTokenURI"'
+#get-manifest-property -e $ENVIRO -s experiment-proxy -p '"configuration"."applicationProperties"."wsgc.oauth.checkTokenURI"'
+
+#get-manifest-property -e $ENVIRO -s salesforceconnector -p '"configuration"."applicationProperties"."oauth.baseUri"'
+#get-manifest-property -e $ENVIRO -s salesforceconnector -p '"configuration"."applicationProperties"."oauth.access_token_url"'
+#get-manifest-property -e $ENVIRO -s salesforceconnector -p '"configuration"."applicationProperties"."oauth.check_token_url"'
+
+#get-manifest-property -e $ENVIRO -s salesforceconnector -p '"configuration"."applicationProperties"."oauth.health_endpoint"'
+
+#get-manifest-property -e $ENVIRO -s favorites -p '"configuration"."environmentSettings"."favorites_service_oauth.check_token_url/r"'
+
+#get-manifest-property -e $ENVIRO -s ecom-svc-catalog -p '"configuration"."applicationProperties"."oauth_rest_client.access_token_url/r"'
+
+#get-manifest-property -e $ENVIRO -s ecom-svc-customer -p '"configuration"."applicationProperties"."oauth.checkTokenUrl"'
+#get-manifest-property -e $ENVIRO -s ecom-svc-customer -p '"configuration"."applicationProperties"."oauth.accessTokenUrl"'
+#get-manifest-property -e $ENVIRO -s ecom-svc-customer -p '"configuration"."applicationProperties"."user.service.url"'
+
+#get-manifest-property -e $ENVIRO -s ecom-svc-order-servicing -p '"configuration"."applicationProperties"."oauth.baseUri"'
+#get-manifest-property -e $ENVIRO -s ecom-svc-order-servicing -p '"configuration"."applicationProperties"."oauth.checkTokenUrl"'
+#get-manifest-property -e $ENVIRO -s ecom-svc-order-servicing -p '"configuration"."applicationProperties"."oauth.accessTokenUrl"'
+
+#get-manifest-property -e $ENVIRO -s membership-service -p '"configuration"."applicationProperties"."oauth.endpoint"'
+{ set +x; } 2>/dev/null
+
+update-etcd-bootstrap-records $BRAND $ENVIRO
+
+rm -rf $TMP
+
+exit 0

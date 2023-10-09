@@ -1,0 +1,288 @@
+#!/bin/bash
+# replacement for the python wsi_settings
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin:/bin:/bin:/usr/bin:/usr/sbin:/sbin:/apps/mead-tools:/apps/java/bin:~/bin:$PATH
+export PATH
+
+#DEBUG=2
+DEVOPS=https://repos.wsgc.com/svn/devops
+PROPERTIES=packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site
+FRONTEND=application/frontend-2.1/qa/config/app/trunk
+WSGC=/tmp/wsgc-$(basename $0)-$LOGNAME
+export LC_CTYPE=en_US.UTF-8
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+  [[ -n $1 ]] && echo "$LOGNAME@$(hostname --short)/$(basename $0): $*" >&2
+
+  [[ -n $TMP ]] && rm -rf $TMP
+
+  exit 1
+}
+
+Usage() {
+  echo "$(basename $0) - multi-function SVN settings tool
+Usage:
+Add/update settings
+$(basename $0) --brands <brands> --envs <envs> [update|delete] <setting> --type <type> <value> [-m 'commit message']
+
+Get local SVN paths for settings files:
+$(basename $0) --brands <brands> --envs <envs> [get] [pom|override|defaults|globals]
+"
+  exit 0
+}
+
+Debug() { echo "$*" >&2; }
+
+# make sure we have our basic scripts
+for script in getschema geturls 
+do
+    which $script >/dev/null 2>&1 || BailOut "Can't find $script"
+done
+
+setVars() {
+    [[ $DEBUG -ge 1 ]] && Debug ">>> $FUNCNAME $BRAND $ENVIRO <<<"
+    # impute some values
+
+    # temp hack for multiple schemas with the same name
+    SCHEMA=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+    SID=$(getschema $BRAND $ENVIRO | awk -F: '{ print $2 }')
+    [ -z "$SCHEMA" ] && BailOut "Can't get schema for $BRAND $ENVIRO"
+
+    pe=$ENVIRO
+    [[ $pe = "qa" ]] && pe=qa1
+    [[ $pe = "uat" ]] && pe=uat1
+    POM="$DEVOPS_REPO/$FRONTEND/$BRAND/$pe/pom.xml"
+    [[ -e $POM ]] || BailOut "Can't find pom: $POM"
+    [[ -n $MESSAGE || -n $TICKET ]] && { svn -q up $POM || BailOut "Unable to svn up $POM [$FUNCNAME]"; }
+
+    OVERRIDE="$DEVOPS_REPO/$PROPERTIES/$SID/$SCHEMA/$BRAND/override/override.properties"
+    [ -e "$OVERRIDE" ] || BailOut "Can't find override: $OVERRIDE"
+    [ -n "$MESSAGE" -o -n "$TICKET" ] && { svn -q up $OVERRIDE || BailOut "Unable to svn up $OVERRIDE [$FUNCNAME]"; }
+
+    DEFAULTS="$DEVOPS_REPO/$PROPERTIES/$SID/$SCHEMA/$BRAND/default/default.properties"
+    GLOBALS="$DEVOPS_REPO/$PROPERTIES/$SID/$SCHEMA/global/global.properties"
+}
+
+updateSetting() {
+    [[ $DEBUG -ge 1 ]] && Debug ">>> $(basename $0):$FUNCNAME $ACTION $SETTING <<<"
+    [[ $DEBUG -ge 2 ]] && INSTALL="cp" || INSTALL="mv"     
+    TMPFILE=$TMP/$BRAND-$DB_ENV-$SETTING-$ACTION-$INSTALL
+
+    # create token for removal
+    TOKEN="^$SETTING\.$DB_ENV\."
+
+    # check to see if the settings are the same - this shortcuts making a useless commit
+    if [[ $ACTION = "update" || $ACTION = "add" ]]
+    then
+      OLD=$(grep "$TOKEN" $OVERRIDE)
+      CNT=$(grep "$TOKEN" $OVERRIDE | wc -l)
+      NEW="$SETTING.$DB_ENV.$TYPE=$VALUE"
+      #[[ $OLD = $NEW && $CNT -eq 1 ]] && echo "/// $(basename $0):$FUNCNAME $BRAND $ENVIRO - Old and new settings are identical"
+      [[ $OLD = $NEW && $CNT -eq 1 ]] && return
+    fi
+    
+    # remove setting first - this is an easy way to deal with duplicates and incorrect types
+    [[ $DEBUG -ge 2 ]] && Debug "  del $SETTING ($TOKEN)"
+    egrep -iv "$TOKEN" $OVERRIDE > $TMPFILE
+
+    # add setting back in with new value
+    if [[ $ACTION = "update" || $ACTION = "add" ]]
+    then
+        [[ $DEBUG -ge 1 ]] && Debug "/// $(basename $0):$FUNCNAME $BRAND $ENVIRO add $SETTING ($SETTING.$DB_ENV.$TYPE)"
+        BRAND_LC=$(tr '[:upper:]' '[:lower:]' <<< $BRAND)
+        BRAND_UC=$(tr '[:lower:]' '[:upper:]' <<< $BRAND)
+        DOMAIN=$(get-domain $BRAND $DB_ENV)
+        SITE_ID=$(get-siteid $BRAND $DB_ENV)
+        MARKET=$(get-market $BRAND $DB_ENV)
+        MARKET_LC=$(tr '[:upper:]' '[:lower:]' <<< $MARKET)
+        MARKET_UC=$(tr '[:lower:]' '[:upper:]' <<< $MARKET)
+
+        # variable substitutions
+        NEW_VALUE=$VALUE
+        NEW_VALUE=$(sed -es/"@DOMAIN@"/"$DOMAIN"/g <<< $NEW_VALUE)
+        NEW_VALUE=$(sed -es/"@MARKET@"/"$MARKET"/g <<< $NEW_VALUE)
+        NEW_VALUE=$(sed -es/"@SITE_ID@"/"$SITE_ID"/g <<< $NEW_VALUE)
+        NEW_VALUE=$(sed -es/"@BRAND@"/"$BRAND"/g <<< $NEW_VALUE)
+        NEW_VALUE=$(sed -es/"@BRAND_UC@"/"$BRAND_UC"/g <<< $NEW_VALUE)
+        NEW_VALUE=$(sed -es/"@BRAND_LC@"/"$BRAND_LC"/g <<< $NEW_VALUE)
+
+        echo "$SETTING.$DB_ENV.$TYPE=$NEW_VALUE" >> $TMPFILE || BailOut "Write to $TMPFILE failed"
+    fi
+    [[ $DEBUG -ge 2 ]] && diff $OVERRIDE $TMPFILE
+
+    # install updated file
+    $INSTALL $TMPFILE $OVERRIDE || BailOut "Unable to update $OVERRIDE"
+
+    commitSetting
+}
+
+commitSetting() {
+    [[ $DEBUG -ge 1 ]] && Debug ">>> $FUNCNAME $BRAND $DB_ENV <<<"
+
+    svn cleanup $OVERRIDE >/dev/null 2>&1
+    svn -q up $OVERRIDE || BailOut "Unable to svn up $OVERRIDE [$FUNCNAME]"
+    echo "$MESSAGE" | grep -iq "$SETTING" || MESSAGE="$MESSAGE {$SETTING}"
+    MESSAGE=$(sed -es/\"//g <<< $MESSAGE)
+    svn -q commit -m "[$TICKET] $MESSAGE" $OVERRIDE || BailOut "Commit failed"
+}
+
+# if no args are passed, display usage message and exit
+[[ -z $1 ]] && BailOut
+
+# parse args
+while [ $# -gt 0 ]
+do
+    case $1 in
+        -z )    DEFAULT_SCOPE=true 
+                shift;;
+        -r|--repo|--devops )
+                $(echo "$2" | grep -q -- "^-") || { DEVOPS_REPO="$2"; }
+                shift;;
+        -b|--brand* )
+                $(echo "$2" | grep -q -- "^-") || { BRAND_LIST="$2"; }
+                shift;;
+        -e|--env* )
+                $(echo "$2" | grep -q -- "^-") || { ENV_LIST="$2"; }
+                shift ;;
+        -s|--set* )
+                $(echo "$2" | grep -q -- "^-") || { SETTING="$2"; }
+                shift;;
+        -a|--action )
+                $(echo "$2" | grep -q -- "^-") || { ACTION="$2"; }
+                shift;;
+        -u|--up* )
+                $(echo "$2" | grep -q -- "^-") || { ACTION="update"; }
+                shift;;
+        -d|--del* )
+                $(echo "$2" | grep -q -- "^-") || { ACTION="delete"; }
+                shift;;
+        -t|--jira|-j|--ticket )
+                $(echo "$2" | grep -q -- "^-") || { TICKET="$2"; }
+                shift;;
+        -q|--quiet )
+                $(echo "$2" | grep -q -- "^-") || { QUIET="true"; }
+                shift;;
+        -v|--val* )
+                $(echo "$2" | grep -q -- "^-") || { VALIDATE="true"; }
+                shift;;
+        -m|--message|-c|--comment* )
+                $(echo "$2" | grep -q -- "^-") || { MESSAGE=$2; }
+                shift;;
+        -d|--debug )
+                DEBUG="true"
+                shift;;
+        --typ* )
+                $(echo "$2" | grep -q -- "^-") || { TYPE="$2"; }
+                shift
+                VALUE=$2
+                shift ;;
+        * )     # query,get,update,compare,delete
+                if echo "$2" | egrep -iq "add|update|delete|get"
+                then
+                    ACTION=$(echo "$2" | tr "A-Z" "a-z")
+                    shift
+                    SETTING=$2
+                fi
+        shift ;;
+    esac
+done
+
+[[ -z $BRAND_LIST ]] && BailOut "Need brands"
+[[ -z $ENV_LIST ]] && BailOut "Need environments"
+[[ -z $SETTING ]] && BailOut "Need setting"
+[[ $ACTION = "update" && -z $TYPE ]] && BailOut "Need setting type for $ACTION"
+MESSAGE=$(sed -es/"-c "//g <<< $MESSAGE)
+[[ -z $TICKET ]] && TICKET="DEVOPS"
+
+# this is tricky, because the underlying tooling makes assumptions as to where this stuff is
+[[ -z $DEVOPS_REPO ]] && DEVOPS_REPO=$HOME/devops
+if [[ ! -d $DEVOPS_REPO ]]
+then
+  [[ $DEBUG -ge 2 ]] && Debug "DEVOPS_REPO does not exist - creating $DEVOPS_REPO"
+  mkdir -p $DEVOPS_REPO/$PROPERTIES || BailOut "Unable to mkdir $DEVOPS_REPO/$PROPERTIES "
+  mkdir -p $DEVOPS_REPO/$FRONTEND || BailOut "Unable to mkdir $DEVOPS_REPO/$FRONTEND "
+  svn -q co $DEVOPS/$PROPERTIES $DEVOPS_REPO/$PROPERTIES || BailOut "Could not svn co appsettings repo"
+  svn -q co $DEVOPS/$FRONTEND $DEVOPS_REPO/$FRONTEND || BailOut "Could not svn co frontend repo"
+fi
+
+#set -x
+svn cleanup $DEVOPS_REPO/$PROPERTIES || BailOut "Cleanup on $DEVOPS_REPO/$PROPERTIES failed"
+svn cleanup $DEVOPS_REPO/$FRONTEND || BailOut "Cleanup on $DEVOPS_REPO/$FRONTEND failed"
+svn -q up $DEVOPS_REPO/$PROPERTIES
+svn -q up $DEVOPS_REPO/$FRONTEND
+#{ set +x; } 2>/dev/null
+
+# we don't care about the value if we're deleting it
+[[ $ACTION = "delete" ]] && VALUE=
+
+# set up tmp directory
+umask 000
+TMP=/tmp/$(basename $0).tmp/$LOGNAME-$$
+mkdir -p $TMP || BailOut "Can't create tmp $TMP"
+chmod 777 $(dirname $TMP) >/dev/null 2>&1
+
+# remove commas from Brand and Environment lists
+BRAND_LIST=$(echo "$BRAND_LIST" | sed -es/','/' '/g | tr "A-Z" "a-z")
+ENV_LIST=$(echo "$ENV_LIST" | sed -es/','/' '/g | tr "A-Z" "a-z")
+[[ $ACTION = "add" ]] && ACTION="update"
+
+for ENVIRO in $ENV_LIST
+do
+#    [ "$ENVIRO" = "rgs1" ] && DB_ENV="regression"
+#    [ "$ENVIRO" = "int2" ] && DB_ENV="integration2"
+#    [ "$ENVIRO" = "int1" ] && DB_ENV="integration"
+#    [ "$ENVIRO" = "int" ] && DB_ENV="integration"
+#    [[ $ENVIRO = "uat1" ]] && DB_ENV="uat"
+#    [[ $ENVIRO =~ perf ]] && DB_ENV="perf"
+
+    for BRAND in $BRAND_LIST
+    do
+        DB_ENV=$(get-installation $BRAND $ENVIRO)
+        [[ -z $DB_ENV ]] && DB_ENV=$ENVIRO
+
+        # special for admin scope
+        [[ $BRAND =~ default ]] && continue
+        if echo "$BRAND_LIST" | grep -wq "default"
+        then
+            CMD="adhoc-appsetting-default -b $BRAND -e $ENVIRO -a $ACTION -s $SETTING"
+            [[ -n $TYPE ]] && CMD="$CMD -d $TYPE -v '$VALUE'"
+#set -x
+            eval $CMD
+{ set +x; } 2>/dev/null
+            continue
+        fi 
+
+        # special for default scope
+        if [[ $BRAND =~ adm ]]
+        then
+            CMD="adhoc-appsetting-xcadm --env $ENVIRO $ACTION $SETTING"
+            [[ -n $TYPE ]] && CMD="$CMD --type $TYPE '$VALUE'"
+            eval $CMD
+            continue
+        fi 
+
+        setVars
+
+        [[ $ACTION = "update" || $ACTION = "delete" ]] && updateSetting
+
+        if [[ $ACTION = "get" ]] 
+        then
+            echo "Brand:$BRAND Environment: $ENVIRO"
+            case $SETTING in
+                pom* ) echo "Path:$POM";;
+                over* ) echo "Path:$OVERRIDE";;
+                def* ) echo "Path:$DEFAULTS";;
+                glo* ) echo "Path:$GLOBALS";;
+            esac
+        fi
+    done
+done
+
+rm -rf $TMP
+
+exit 0

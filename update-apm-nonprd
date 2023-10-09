@@ -1,0 +1,90 @@
+#!/bin/bash
+TICKET="DEVOPS"
+#SERVER=apm-qa.wsgc.com
+SERVER=adyrck-vicn001.wsgc.com
+
+#KEY="7493f02d-b309-4f14-ad93-720faae926a6"
+KEY="29c7cd7c-0c7a-41ca-95b4-867fbcab0144"
+UAT_KEY="29c7cd7c-0c7a-41ca-95b4-867fbcab0144"
+WCM_KEY_NONPRD="b64ed9e8-4a17-46ad-8ee5-648426b58d66"
+ECM_KEY_NONPRD="6bc09b92-4e4b-4b41-9a08-b31568b012c4"
+ECM_KEY_PRD="2cb03018-334c-4d27-8c26-783f93c61a91"
+
+if [ -z "$1" ]
+then
+    echo "Usage: $(basename $0) <dir> [dir2] ..."
+    exit 1
+fi
+
+for dir in $*
+do
+    # figure out which SCM we're using - I should create a function for this
+    SCM=
+    svn info >/dev/null 2>&1 && SCM=svn
+    git status >/dev/null 2>&1 && SCM=git
+
+    for POM in $(find $dir -name pom.xml)
+    do
+        # skip these paths
+        echo "$POM|$(pwd)" | egrep -iq "branches|tags|prd|release|common" && continue
+        [ "$SCM" = "svn" ] && svn up $POM
+        [ "$SCM" = "git" ] && git pull >/dev/null 2>&1
+
+        CFG=$(find $dir -name require-devops-appdynamics-support.cfg | egrep -iv "branches|tags|prd|release|common") >/dev/null 2>&1
+
+        # if we don't have the QA appdynamics hostname in the pom, we probably don't need to update it
+        egrep -iq "apmconqark1|adyrck-vicn001|apmconqa|apmcondevrk1|apm-qa|appdynamics.controller|appdynamics.tiername|appdynamics.account.key" $POM || continue
+
+        echo "> $POM"
+
+        echo "$POM $(pwd)" | egrep -iq "uat" && KEY=$UAT_KEY 
+        echo "$POM $(pwd)" | egrep -iq "perf" && KEY=$UAT_KEY 
+        echo "$POM $(pwd)" | egrep -iq "single.*qa7|pradm.*qa7|pricing.*qa7|publisher.*qa7" && KEY=$UAT_KEY 
+        echo "$POM $(pwd)" | egrep -iq "frontend.*uat|frontend.*rgs1" && KEY=$UAT_KEY 
+        echo "$POM $(pwd)" | egrep -iq "wcm.*qa|wcm.*uat|wcm.*poc|wcm.*rgs" && KEY=$WCM_KEY_NONPRD
+        echo "$POM $(pwd)" | egrep -iq "ecm.*qa|ecm.*uat" && KEY=$ECM_KEY_NONPRD
+        echo "$POM $(pwd)" | egrep -iq "ecm.*prd" && KEY=$ECM_KEY_PRD
+        
+        # set controller to new QA server
+        if grep -q "appdynamics.controller.hostname" $POM 
+        then
+            propset -f $POM -p appdynamics.controller.hostname -v $SERVER
+        else
+            echo "$(pwd)/$POM needs 
+    <appdynamics.controller.hostname>$SERVER</appdynamics.controller.hostname> "
+        fi
+
+        # check for appdynamics.account.key - need this property or the agent can't connect
+        if grep -q "appdynamics.account.key" $POM 
+        then
+            propset -f $POM -p appdynamics.account.key -v $KEY
+        else
+            echo "$(pwd)/$POM needs 
+    <appdynamics.account.key>$KEY</appdynamics.account.key>  "
+        fi
+
+        # these are already set as defaults in wsgc-devops-application, so we either need to update them or delete them
+        propset -f $POM -p appdynamics.controller.port -v 5443 >/dev/null 2>&1
+        propset -f $POM -p appdynamics.sslEnabled -v true>/dev/null 2>&1
+
+        # need to make this work with git as well
+        if [ "$SCM" = "svn" ] 
+        then
+            svn diff $POM | egrep "^-|^\+" | grep -v "pom.xml"
+            svn add $CFG >/dev/null 2>&1
+            svn commit -m "[$TICKET] Updating New non-prod app dynamics properties" $POM $CFG
+        fi
+
+        if [ "$SCM" = "git" ] 
+        then
+            git diff $POM | egrep "^-|^\+" | grep -v "pom.xml" | sort -k2
+            git add $POM $CFG
+            git commit -m "[$TICKET] Updating non-prod appdynamics agent properties" $POM $CFG
+            git push
+        fi
+
+        echo
+    done
+done
+
+

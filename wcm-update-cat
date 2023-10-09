@@ -1,0 +1,566 @@
+#!/bin/bash
+# updates WCM CAT generation
+source /apps/buildsystem/bin/env.sh
+export PATH=/apps/mead-tools:/apps:/bin:/usr/bin:/sbin:/usr/sbin:/apps/jdk8/bin:/apps/java/bin:/apps/jdk7/bin:/usr/local/bin:~/bin:$ORACLE_HOME/bin:$PATH
+#PATH=/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:/opt/oracle/product/11.2.0/client_1/bin:/usr/lib/oracle/11.2/client64/bin/
+export PATH=$PATH:/apps/bgb/apps/biggreenbutton/bin
+
+LOG=/apps/generation-history.log
+LOG_DATE=$(date +'%Y-%m-%d %H:%M')
+
+#ORACLE_HOME=/opt/oracle/product/11.2.0/client_1/
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+UAT_HOST=buildsystem-uat2-rk1v.wsgc.com
+BGB_HOST=locker-dev-rk2v.wsgc.com
+BGB_HOST_OLD=locker-dev-rk2v.wsgc.com
+IMG_HOST=img-qa-rk1v.wsgc.com
+IMGPATH1="imageuser@${IMG_HOST}:/images/ecom-images/internal/tmpl/catalogdata"
+IMGPATH2="imageuser@${IMG_HOST}:/images/ecom-images/wcm-non-prod-builds/internal/tmpl/catalogdata"
+#IMGPATH3="imageuser@${IMG_HOST}:/images2/ecom-images/internal/tmpl/catalogdata"
+CTLOUT=/tmp/$(basename $0).error
+ZIPPATH=
+GMTP_SYNC=
+
+# production image host
+PRD_HOST=vaultprdrk1v
+PRD_PATH=/apps/buildsystem
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+# QA/UAT image host
+UAT_HOST=buildsystem-uat2-rk1v
+
+# destination host/directory
+DST_HOST=$BGB_HOST
+
+export SSHOPTS="-q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+umask 000
+
+BailOut() {
+  [ -n "$1" ] && echo "$(basename $0): $*"
+  [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_FAIL}$(basename $0): attempt to stage CAT generation $GEN in $BRAND $ENV failed - $*"
+	exit 1
+}
+
+BRAND=$1
+ENV=$2
+ENVIRO=$ENV
+GEN=$(echo "$3" | awk -F\. '{ print $1 }')
+MARKET=$(getmarket $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+[[ $MARKET =~ us ]] && MARKET=
+[[ -n $MARKET ]] && GMTP_PATH="/$MARKET" || GMTP_PATH=
+[[ $ENV = "regression" ]] && ENV="rgs1"
+
+[ "$LOGNAME" != 'imageuser' ] && BailOut "Please run this as 'imaguser' instead of $(whoami)"
+
+POM=$FRONTEND/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+P_POM=$FRONTEND/qa/config/app/trunk/$BRAND/pom.xml
+
+JMX_PORT=39667
+for dir in /wsgc/bin /apps ~/bin
+do
+	[ -e $dir/jmxclient.jar ] && { JMX_JAR=$dir/jmxclient.jar; break; }
+done
+
+[[ -z $BRAND ]] && BailOut
+[[ -n $GEN ]] && SYNC_CATALOG=false
+[[ -z $GEN && $SYNC_CATALOG =~ false ]] && BailOut "Need CAT generation"
+[[ -n $TICKET ]] && TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+SITEID=$(brand2site $BRAND $ENV)
+
+# getdb is a script which returns the db connections params for a given schema
+SCHEMA=$(getschema $BRAND $ENV)
+[ -z "$SCHEMA" ] && BailOut "Can't get schema for $BRAND $ENV"
+DB=$(getdb $SCHEMA)
+[ -z "$DB" ] && BailOut "Can't get creds for $OWNER $BRAND $ENV"
+dbHost=$(echo "$DB" | awk -F\| '{ print $1 }')
+dbOwner=$(echo "$DB" | awk -F\| '{ print $2 }')
+dbUser=$(echo "$DB" | awk -F\| '{ print $3 }')
+dbPass=$(echo "$DB" | awk -F\| '{ print $4 }')
+dbSID=$(echo "$DB" | awk -F\| '{ print $5 }')
+dbPort=$(echo "$DB" | awk -F\| '{ print $6 }')
+dbTable=$(echo "$DB" | awk -F\| '{ print $7 }')
+dbCred=$(echo "$DB" | awk -F\| '{ print $8 }')
+dbSecret=$(echo "$DB" | awk -F\| '{ print $9 }')
+dbConnect=$(echo "$DB" | awk -F\| '{ print $10 }')
+dbSchema=$(echo $SCHEMA | awk -F: '{ print $1 }')
+
+# make sure the .tnsnames.ora file has our SID
+grep -iwq "$dbSID" $HOME/.tnsnames.ora || BailOut "DB SID $dbSID not found in $HOME/.tnsnames.ora"
+
+# figure out which credential file to use
+[[ -e /apps/bgb/apps/biggreenbutton/credentials/$dbCred ]] && CREDFILE=$dbCred
+[[ -z $CREDFILE ]] && CREDFILE=$(basename $(egrep -il "username=$dbUser|username=$dbOwner" /apps/bgb/apps/biggreenbutton/credentials/*) 2>/dev/null)
+[[ -z $CREDFILE ]] && BailOut "Can't figure out credential file for $SCHEMA"
+
+# db env translations
+DB_ENV=$(get-installation $BRAND $ENV)
+[[ -z $DB_ENV ]] && BailOut "Why is DB_ENV blank?"
+
+# define various paths
+PRD_DIR=/apps/buildsystem${GMTP_PATH}/wcmbuilds/${BRAND}dpcatalogdatabuild
+UAT_DIR="/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild"
+#DST_DIR="/apps/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild"
+DST_DIR="/apps/buildsystem${GMTP_PATH}/wcmbuilds/${BRAND}dpcatalogdatabuild"
+#/apps2/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild
+#/apps2/buildsystem/can/wcmbuilds/${BRAND}dpcatalogdatabuild
+
+# logic to sync the generation with that of the catalog instance
+if [[ $SYNC_CATALOG =~ true ]]
+then
+  GEN=$(get-catalog-gen $BRAND $ENVIRO)
+  CAT=$(get-catalog-env $BRAND $ENVIRO)
+  URL=$(get-catalog-url $BRAND $ENVIRO)
+  BUILDID=$(gen2dir $GEN)
+  echo "Generation in ecom-svc-catalog '$CAT' is $GEN ($BUILDID)"
+  [[ -z $GEN ]] && BailOut "Unable to get a generation from ecom-svc-catalog instance '$CAT' [$URL]"
+fi
+
+# logic to grab the latest qa/prod generation number
+if [ "$GEN" = "latest-qa" ] || [ "$GEN" = "qa" ]
+then
+  # need to inspect each of the builds to make sure it's non-prod
+  for build in $(ssh $SSHOPTS $UAT_HOST "ls -t $UAT_DIR/" | egrep -iv "tmp")
+  do
+    gen=$(dir2gen $build)
+    [[ $gen =~ ^4 ]] && { BUILDID=$build; break; }
+  done
+  [[ -z $BUILDID ]] && BailOut "Can't get latest qa build for $BRAND $ENV"
+  GEN=$(dir2gen $BUILDID)
+  [[ -z $GEN ]] && BailOut "Can't get latest qa generation for $BRAND $ENV"
+  echo "Latest QA Generation: $GEN ($BUILDID)"
+fi
+
+if [ "$GEN" = "latest-prod" ] || [ "$GEN" = "prod" ] || [ "$GEN" = "latest-prd" ] || [ "$GEN" = "prd" ]
+then
+    BUILDID=$(ssh $SSHOPTS $PRD_HOST "ls -t $PRD_DIR/| egrep -iv "tmp" | head -1 " 2>/dev/null)
+    [ -z "$BUILDID" ] && BailOut "Can't get latest prod build for $BRAND $ENV"
+    GEN=$(dir2gen $BUILDID)
+    [ -z "$GEN" ] && BailOut "Can't get latest prod generation for $BRAND $ENV"
+    echo "Latest Prod Generation: $GEN"
+fi
+
+[[ -z $BUILDID && -z $GEN ]] && BailOut "BuildID is empty"
+
+# figure out what the build (directory) string is
+BUILDID=$(gen2dir $GEN)
+
+##Checks Generation Length
+GENLEN=${#GEN}
+[ $GENLEN -ne 9 ] && BailOut "GenId doesn't have 9 digits"
+
+# is it production (3) or QA (4) ? - grab the first number of the generation to find out!
+SOURCE=${GEN:0:1}
+
+#ZIPPATH="/apps/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID/assortment-$BUILDID.zip"
+SUMMARY=$(geturls $BRAND $ENV | grep -i summary.html | awk '{ print $1 }')
+WCM_HOST_QA=${BRAND}-wcm-qa1-sac1v
+WCM_HOST_UAT=${BRAND}-wcm-uat1-rk1v
+
+# get old generation
+OLD_SQL="set heading off; 
+select * from 
+(SELECT GENERATION FROM ${dbOwner}.WW_GENERATION_SCHEDULE WHERE (SITE = '$SITEID' and installation = '$DB_ENV' and subsystem = 'CAT') order by START_TIME desc)
+where rownum = 1;"
+OLD_GEN=$(echo "$OLD_SQL" | sqlplus -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(${dbConnect}=${dbSID})))" | egrep -iv "selected" | tr '\n' ' ' | awk '{ print $1 }' )
+
+R_OG="${OLD_GEN:0:1}"
+R_NG="${GEN:0:1}"
+[[ $R_OG != $R_NG ]] && G_WARN="*** New and old generations are not from the same prod/non-prod base ***"
+
+# if they haven't asked to copy, then we won't force it, either
+[[ $COPYASSETS =~ false ]] && FORCECOPY=false
+
+echo "Site:             $BRAND ($SITEID)"
+[[ -n $MARKET ]] && echo "Market:           $MARKET"
+echo "Schema:           $SCHEMA [$dbSID]"
+echo "Old GenerationId: $OLD_GEN"
+echo "New GenerationId: $GEN" 
+[[ -n $G_WARN ]] && echo "$G_WARN"
+echo "BuildID:          $BUILDID"
+echo "Installation:     $DB_ENV"
+#echo "SOURCE is $SOURCE"
+#echo "CAT location:     $ZIPPATH"
+echo "CredFile:         $CREDFILE"
+[[ -n $SUMMARY ]] && echo "Summary page:     $SUMMARY"
+echo "CopyAssets:       $COPYASSETS"
+echo "ForceCopy:        $FORCECOPY"
+
+[[ $OLD_GEN = $GEN && $COPYASSETS = "false" ]] && { echo "New CAT generation is the same as the old one - nothing to do"; exit 0; }
+  
+if [[ $SOURCE = "4" ]]
+then
+    SRC_HOST=$UAT_HOST
+    SRC_DIR=$UAT_DIR
+fi
+
+if [[ $SOURCE = "3" ]]
+then
+    SRC_HOST=$PRD_HOST
+    SRC_DIR=$PRD_DIR
+fi
+
+#ZIPPATH="/apps/buildsystem${GMTP_PATH}/wcmbuilds/${BRAND}${MARKET}dpcatalogdatabuild/$BUILDID/assortment-$BUILDID.zip"
+ZIPPATH="/apps/buildsystem${GMTP_PATH}/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID/assortment-$BUILDID.zip"
+
+echo "*** Trying to get assortment from $SRC_HOST:$SRC_DIR/$BUILDID"
+#echo "scp -qr $SRC_HOST:$SRC_DIR/$BUILDID $DST_DIR"
+if [[ -e $DST_DIR/$BUILDID ]]
+then 
+  #echo "$DST_DIR/$BUILDID already exists"
+  ret=0
+else
+set -x
+  scp -qr $SSHOPTS $SRC_HOST:$SRC_DIR/$BUILDID $DST_DIR #2>/dev/null 
+{ ret=$? set +x; } 2>/dev/null
+fi
+
+if [[ $ret -ne 0 ]]
+then
+    echo "+++ Unable to find $BUILDID on $SRC_HOST:$SRC_DIR"
+    echo "Most recent generations on $SRC_HOST:"
+    for g in $(ssh -q $SSHOPTS $SRC_HOST "cd $SRC_DIR >/dev/null 2>&1 && ls -1t | grep 'wcm-build' | head -3")
+    do
+        echo "> $g - $(dir2gen $g)"
+    done
+
+    if [ -n "BGB_HOST_OLD" ]
+    then
+        echo "+++ Trying to get assortment from old BGB host $BGB_HOST_OLD" 
+        scp -r $SSHOPTS imageuser@$BGB_HOST_OLD:$SRC_DIR/$BUILDID $DST_DIR >/dev/null 2>&1 
+        if [ $? -eq 0 ] 
+        then
+            echo ">>> Found $BUILDID on $BGB_HOST_OLD"
+            #[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_INFO}$(basename $0): $BUILDID was present on $BGB_HOST_OLD"
+        else
+          echo "+++ Unable to find $BUILDID on $BGB_HOST_OLD:$SRC_DIR"
+          echo "Most recent generations $BGB_HOST_OLD:"
+          for g in $(ssh -q $SSHOPTS $BGB_HOST_OLD "cd $SRC_DIR >/dev/null 2>&1 && ls -1t | grep 'wcm-build' | head -3")
+          do
+            echo "> $g - $(dir2gen $g)"
+          done
+        fi
+    fi 
+
+    if [[ ! -f $ZIPPATH && -n $MARKET ]]
+    then
+        # try can directory
+        echo "Trying $MARKET"
+        scp -r $SSHOPTS imageuser@$BGB_HOST_OLD:/apps2/buildsystem/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID $DST_DIR >/dev/null 2>&1 
+        if [ $? -eq 0 ] 
+        then
+          GMTP_DIR="/apps/buildsystem/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild"
+          scp -r $SSHOPTS imageuser@$BGB_HOST_OLD:/apps2/buildsystem/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID $GMTP_DIR >/dev/null 2>&1 
+          echo ">>> Found CAN $BUILDID on $BGB_HOST_OLD"
+          GMTP_SYNC=/apps/buildsystem/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID/catalogdatagenctl-$BUILDID.zip 
+          #[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_INFO}$(basename $0): $BUILDID was present on $BGB_HOST_OLD"
+        fi
+      fi
+
+
+    if [[ ! -f $ZIPPATH ]]
+    then
+        echo "Trying PRD"
+        # removed user name as it was causing command to hang
+        scp -r $SSHOPTS $PRD_HOST:$PRD_PATH/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID $DST_DIR >/dev/null 2>&1 
+        if [ $? -eq 0 ]
+        then
+          GMTP_DIR="/apps/buildsystem/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild"
+          scp -r $SSHOPTS $PRD_HOST:$PRD_PATH/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID $GMTP_DIR >/dev/null 2>&1 
+          echo ">>> Found CAN $BUILDID on $PRD_HOST"
+          GMTP_SYNC=/apps/buildsystem/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID/catalogdatagenctl-$BUILDID.zip 
+          #[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_INFO}$(basename $0): $BUILDID was present on $PRD_HOST"
+        fi
+    fi
+
+    # thought: don't bail out in case the build is staged locally
+    #BailOut "Unable to copy $BUILDID from $SRC_HOST:$SRC_DIR"
+fi
+
+[[ -f $ZIPPATH ]] || BailOut "Can't find zip file $ZIPPATH remotely or locally"
+echo "*** Assortment $(basename $ZIPPATH) is now staged locally"
+
+# copy to another BGB server - is this actually necessary?
+#[[ -z $MARKET ]] && BGB_LIST="bgb-uat1-rk1v bgb-uat3-rk1v bgb-rgs1-rk1v"
+#[[ $MARKET =~ can ]] && BGB_LIST="bgb-ca-rgs1-rk1v"
+#for bgb in $BGB_LIST
+#do
+#  echo "*** Copy assortment to $bgb"
+#  ssh -q $SSHOPTS $bgb "ls -ld /bgb/buildsystem-2.0-work/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild"
+#set -x
+#  scp -qr $SSHOPTS $DST_DIR/$BUILDID $bgb:/bgb/buildsystem-2.0-work/$GMTP_PATH/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID
+#{ set +x; } 2>/dev/null
+#done
+
+cd /apps/bgb/apps/biggreenbutton
+if [[ -n $GMTP_SYNC ]]
+then  
+  SYNC=$GMTP_SYNC 
+else
+  SYNC=/apps/buildsystem${GMTP_PATH}/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID/catalogdatagenctl-$BUILDID.zip 
+fi
+
+CMD="./bin/oraclectlsync -s $SYNC -d $dbSID -c $CREDFILE -i $SITEID -g $GEN -t $dbOwner -v deploy"
+echo $CMD
+$CMD > $CTLOUT 2>&1 </dev/null
+ret=${PIPESTATUS[0]}
+if [[ $ret -ne 0 && -n $GMTP_SYNC ]]
+then
+  echo "Do something magical!"
+  CMD=$(echo $CMD | sed -es%/can/%/%g)
+  echo $CMD
+  #$CMD > $CTLOUT 2>&1 </dev/null
+  #ret=${PIPESTATUS[0]}
+fi
+
+if [[ $ret -ne 0 ]]
+then
+  ERROR=$(egrep -i "mismatch|Permission denied" $CTLOUT)
+  [[ -z $ERROR ]] && echo "Complete error message: $(cat $CTLOUT)"
+  BailOut "*** oraclectlsync returned $ret: ERROR:$ERROR ***" 
+fi
+
+# Copies build to image server - I don't know if it's really necessary to copy to both
+#for IMGPATH in $IMGPATH1 $IMGPATH2 $IMGPATH3
+#do
+#    echo "*** Copying WCM build to $(echo $IMGPATH | awk -F\@ '{ print $2 }' )"
+#    [ -n "$BGB_HOST_OLD" ] && scp $SSHOPTS imageuser@$BGB_HOST_OLD:$ZIPPATH $IMGPATH </dev/null >/dev/null 2>&1 &
+#set -x
+#    scp $SSHOPTS $ZIPPATH $IMGPATH </dev/null || BailOut "Copy to $IMGPATH failed"
+#{ set +x; } 2>/dev/null
+#done
+
+echo "*** Activate the new CAT generation"
+SQL="WHENEVER SQLERROR EXIT
+INSERT INTO ${dbOwner}.ww_generation_schedule (site, installation, subsystem, generation, start_time, REFRESH)
+VALUES ($SITEID, '$DB_ENV', 'CAT', $GEN, SYSDATE, 0);
+commit; "
+#echo "$SQL"
+echo "$SQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(${dbConnect}=${dbSID})))" 
+cd /apps/bgb/apps/biggreenbutton/bin/
+
+#set -x
+perl ./updategen \
+  -s $SITEID \
+  -i $ENV \
+  -e dp${ENV} \
+  -g $GEN \
+  -c CAT >/dev/null 2>&1
+{ set +x; } 2>/dev/null
+
+set -x
+/apps/bgb/apps/biggreenbutton/bin/launcher /apps/bgb/apps/biggreenbutton ftlzipsync@$BGB_HOST \
+  --source=$ZIPPATH \
+  --host=$IMG_HOST \
+  --destination=/images/ecom-images/internal${GMTP_PATH}/tmpl/catalogdata \
+  --credentials=imageuser \
+  deploy
+{ set +x; } 2>/dev/null
+
+if [[ $COPYASSETS = "true" ]]
+then
+  # parse out catImageBase to use to validate that the assets are in place on the image server
+  CMX=$(svn  --non-interactive cat $POM | grep "<frontend.cmx>" | awk -F '[<>]' '{ print $3 }' | sort -u)
+  [[ -z $CMX ]] && CMX=$(svn --non-interactive cat $P_POM | grep "<frontend.cmx>" | awk -F '[<>]' '{ print $3 }')
+
+  WCM=$(svn  --non-interactive cat $POM | grep "<frontend.wcm>" | awk -F '[<>]' '{ print $3 }' | sort -u)
+  [[ -z $WCM ]] && WCM=$(svn --non-interactive cat $P_POM | grep "<frontend.wcm>" | awk -F '[<>]' '{ print $3 }')
+
+  catIB=$(svn  --non-interactive cat $POM | grep "<frontend.secureCatImageBase>" | awk -F '[<>]' '{ print $3 }')
+  CAT_HOST=$(awk -F/ '{ print $3 }' <<< $catIB | awk -F\. '{ print $1 }')
+
+  catIB=$(sed -es%https://%%g <<< $catIB)
+  catIB=$(sed -es/'${frontend.brand}'/$BRAND/g <<< $catIB)
+  catIB=$(sed -es/'${frontend.cmx}'/$CMX/g <<< $catIB)
+  catIB=$(sed -es%qark-images.[a-z][a-z]imgs.com/%%gi <<< $catIB)
+  catIB=$(sed -es%[a-z][a-z]imgs/%%gi <<< $catIB)
+  catIB=$(sed -es%qark/%qa/%g <<< $catIB)
+
+  I_INFO="$(dirname $ZIPPATH)/importinfo.txt"
+  [[ -e $I_INFO ]] || BailOut "Can't find $I_INFO"
+
+  echo "*** Stage CAT to image server $IMG_HOST"
+  echo "+++ importinfo: $I_INFO"
+
+  egrep -i "REQUIRES" $I_INFO| awk '{ print $2, $3 }' | sort -u |
+  while read requires
+  do
+    atype=$(awk '{ print $1 }' <<< $requires)
+    apath=$(awk '{ print $2 }' <<< $requires)
+
+    src=$(awk -F/ '{ print $1 }' <<< $apath)
+    env=$(awk -F- '{ print $2 }' <<< $src)
+    dir=$(awk -F/ '{ print $(NF-1) "/" $NF }' <<< $apath)
+
+    echo "--- copy $src $dir"
+
+    # not needed
+    [[ $atype =~ catdata ]] && continue      
+
+    # we're already handling this
+    [[ $atype =~ ftltemplates ]] && continue      
+
+    # not needed
+    [[ $atype =~ catimages ]] && continue      
+
+    if [[ $atype =~ cpimages ]]
+    then
+#echo "catIB: $catIB"
+#echo "CAT_HOST: $CAT_HOST"
+
+      # we don't try to copy assets to anything other than the image server
+      [[ $CAT_HOST =~ qark-images || $CAT_HOST =~ img-qa- || $CAT_HOST = "imgrck-vicn001" ]] || { echo "@@@ Non-standard catImage host ($CAT_HOST) - skipping"; continue; }
+
+#set -x
+      IMG="https://$IMG_HOST/${BRAND}imgs/${catIB}wcm/$dir"
+{ ret=$? set +x; } 2>/dev/null
+      DPATH=$(cut -d/ -f2- <<< $catIB)
+      DST=/images/ecom-images/$BRAND-images/qa/${DPATH}wcm/${dir}/
+      SRC=/apps/wsgc-contentprocessor-$env/data/published/$BRAND/images/wcm/$dir/
+#echo "IMG: $IMG"
+      curl $USER_AGENT -fsqk $IMG/ -o /dev/null 
+      ret=$?
+
+      # if the asset directory is there, and we've not set FORCECOPY, the move on
+      [[ $ret -eq 0 && $FORCECOPY =~ false ]] && { echo "/// skipping $dir $IMG"; continue; }
+
+      # normal dirtreesync if the asset is not there
+      if [[ $ret != 0 ]]
+      then
+        set -x
+        sudo -u builder \
+          /apps/bgb/apps/biggreenbutton/bin/launcher /apps/bgb/apps/biggreenbutton \
+          dirtreesync@$src \
+          --source=$SRC \
+          --host=$IMG_HOST \
+          --destination=$DST \
+          --credentials=imageuser \
+          deploy 
+        { ret=$? set +x; } 2>/dev/null                   
+      fi
+
+      # if the sync is happy, move on
+      #[[ $ret -eq 0 && $FORCECOPY =~ false ]] && { echo "dirtreesync OK - we're not going to force anything"; continue; }
+
+      # if sync is not happy, but FORCECOPY is not set, move on
+      #[[ $FORCECOPY =~ true ]] || { echo "dirtreesync not OK, but FORCECOPY not set"; continue; }
+
+      continue
+
+      # now we force it
+      echo "* rsync $src:$SRC to $IMG_HOST:$DST"
+      TMP="/tmp/$(basename $0)/$dir"
+      mkdir -p $TMP
+#set -x
+      rsync --update -zarch $src:$SRC $TMP
+      rsync --update -zarch $TMP $IMG_HOST:$(dirname $DST)
+{ set +x; } 2>/dev/null
+      rm -rf $TMP
+      continue; 
+    fi
+
+    echo "*** how did we end up here? ***"
+  done
+fi
+
+#set -x
+#/apps/bgb/apps/biggreenbutton/bin/launcher /apps/bgb/apps/biggreenbutton dirtreesync@$BGB_HOST \
+#  --source=$ZIPPATH \
+#  --host=$IMG_HOST \
+#  --destination=/images/ecom-images/internal/tmpl/catalogdata \
+#  --credentials=imageuser \
+#  deploy
+#{ set +x; } 2>/dev/null
+
+#/bgb/tomcat-bgb/apps/bgb/bin/launcher /bgb/tomcat-bgb/apps/bgb dirtreesync@imgproc-rgs2-sac1v --source=/apps/wsgc-contentprocessor-rgs2/data/published/pt/images/wcm/202240/0005/ --host=$IMG_HOST --destination=/images/ecom-images/pt-images/wcm-non-prod-assets/images/dp/wcm/202240/0005 --credentials=imageuser deploy
+
+#set -x
+#/apps/bgb/apps/biggreenbutton/bin/launcher /apps/bgb/apps/biggreenbutton oraclectlsync@$BGB_HOST \
+#  --source=$SYNC \
+#  --database=$dbSID \
+#  --credentials=$dbCred \
+#  --site=$SITEID \
+#  --generation=$GEN \
+#  --schema=$dbSchema \
+#  deploy
+#{ set +x; } 2>/dev/null
+
+[[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): CAT generation $GEN staged for $BRAND $ENV $G_WARN"
+#[[ -n $TICKET ]] && jira-label "$TICKET" "Update-CAT-generation"
+
+## stage that on the WCM host - there are cases where people need to import it directly to /wcm/publish/exports/ (but as the tomcat user)
+#if echo "$ENV" | egrep -iq "qa|int|rgs|regression|dev" 
+#then
+#    echo "*** Staging to $WCM_HOST_QA"
+#    scp $SSHOPTS -r /apps/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID $WCM_HOST_QA:/tmp </dev/null
+#fi
+#
+#if echo "$ENV" | egrep -iq "uat|int|bpv" 
+#then
+#    echo "*** Staging to $WCM_HOST_UAT"
+#    scp $SSHOPTS -r /apps/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild/$BUILDID $WCM_HOST_UAT:/tmp </dev/null
+#fi
+
+# tell DP to invalidate its product cache
+#if [ -n "$JMX_JAR" ]
+#then
+#    HOST=$(geturls $BRAND $ENV|grep -i "host:" | awk -F: '{ print $2 }' | awk '{ print $1 }')
+#    if [ -n "$HOST" ]
+#    then
+#        for job in availabilityCache baseSkuCache${OLD_GEN}.0 checkAvailabilityCache foundationDataCache skuCache${OLD_GEN}.0
+#        do
+#         echo "Invalidating $HOST DP cache: $job"
+#         java -jar $JMX_JAR - $HOST:39667 com.wsgc.ecommerce.$BRAND:type=Cache,name=$job removeAll >/dev/null 2>&1
+#     done
+#    else
+#        echo "Can't figure out the host for $BRAND $ENV"
+#    fi
+#fi
+
+# if the rapidbuild flag is set
+if [ "$RAPIDBUILD" = "true" ]
+then
+    echo "*** Updating RapidBuild" 
+
+    # figure out if we're using the QA or UAT env
+    if echo "$ENV" | egrep -iq "qa|int" 
+    then
+        echo "WCM QA Console: http://$WCM_HOST_QA:38600/system/console/configMgr "
+        echo "WCM QA RapidBuild: http://$WCM_HOST_QA:38600/etc/rapidBuild/rapidBuildImportExport.html "
+        DB_SRC="qa"
+    fi
+    if echo "$ENV" | egrep -iq "uat" 
+    then
+        DB_SRC="uat"
+        echo "WCM UAT Console: http://$WCM_HOST_UAT:38600/system/console/configMgr "
+        echo "WCM UAT RapidBuild: http://$WCM_HOST_UAT:38600/etc/rapidBuild/rapidBuildImportExport.html"
+    fi
+    [ -z "$DB_SRC" ] && BailOut "Can't stage to RapidBuild because we don't know the DB source"
+
+    # get the RapidBuild env
+    RB_ENV=$(svn cat https://repos.wsgc.com/svn/devops/application/wcm/${DB_SRC}/config/cm/trunk/pom.xml |grep -i "<wcm.standardActiveGenerationFetcher.installationValue>" | grep -vi "#" | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+    [ -z "$RB_ENV" ] && BailOut "Can't figure out which DB RapidBuild is pointed to"
+
+    # update the generation for RapidBuild
+    SQL="SET ECHO OFF;
+WHENEVER SQLERROR EXIT;
+INSERT INTO ${dbOwner}.ww_generation_schedule (site, installation, subsystem, generation, start_time, REFRESH)
+VALUES ('$SITEID', '$RB_ENV', 'CAT', '$GEN', SYSDATE, 0);
+commit;"
+    #echo "$SQL"
+    echo "$SQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(${dbConnect}=${dbSID})))" 
+    
+    # validate that it is what we think it should be
+    #SQL="SELECT generation FROM ww_generation_schedule WHERE site = '$SITEID' and installation = '$RB_ENV' and rownum = 1;"
+    #echo "$SQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): CAT generation $GEN staged for $BRAND RapidBuild $RB_ENV"
+fi
+
+echo "$LOG_DATE,$BRAND,$ENVIRO,CAT,$OLD_GEN,$GEN,$BUILD_USER_ID $RUNBY,$BUILD_URL,$TICKET" >> $LOG
+
+exit 0

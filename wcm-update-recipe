@@ -1,0 +1,141 @@
+#!/bin/bash
+# updates WCM RECIPE generation
+
+source /apps/buildsystem/bin/env.sh
+PATH=/apps/mead-tools:/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:$ORACLE_HOME/bin:$PATH
+#PATH=/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:/opt/oracle/product/11.2.0/client_1/bin:/usr/lib/oracle/11.2/client64/bin/
+export PATH
+source /apps/buildsystem/bin/env.sh
+
+SSHOPTS="-o StrictHostKeyChecking=no"
+#ORACLE_HOME=/opt/oracle/product/11.2.0/client_1/
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+IMGPATH="imageuser@img-qa1-rk1v:/images/ecom-images/internal/tmpl/recipe"
+UAT_HOST=buildsystem-uat2-rk1v
+PRD_HOST=vaultprdrk1v
+UAT_DIR="/buildsystem/wcmbuilds/wsdprecipebuild"
+PRD_DIR="/apps/buildsystem/wcmbuilds/wsdprecipebuild"
+BRAND=ws
+SITE=ws
+SITEID=61
+umask 000
+
+##Checks that all aruments are defined
+
+BailOut() {
+  [ -n "$1" ] && echo "$(basename $0): $*"
+	echo "Usage: $(basename $0) <env> <recipe_generation>"
+	echo
+    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_FAIL}$(basename $0): attempt to stage RECIPE $GEN in $ENV failed - $*"
+	exit 1
+}
+
+ENV=$1
+GEN=$(echo "$2" | awk -F\. '{ print $1 }')
+
+[ "$LOGNAME" != 'imageuser' ] && BailOut "Please run this as 'imaguser' instead of $(whoami)"
+[ -z "$ENV" ] && BailOut
+[ -z "$GEN" ] && BailOut "Need recipe generation"
+[ -n "$TICKET" ] && TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+
+# getdb is a script which returns the db connections params for a given schema
+SCHEMA=$(getschema $BRAND $ENV)
+[ -z "$SCHEMA" ] && BailOut "Can't get schema for $BRAND $ENV"
+DB=$(getdb $SCHEMA)
+[ -z "$DB" ] && BailOut "Can't get creds for $OWNER $BRAND $ENV"
+dbHost=$(echo "$DB" | awk -F\| '{ print $1 }')
+dbOwner=$(echo "$DB" | awk -F\| '{ print $2 }')
+dbUser=$(echo "$DB" | awk -F\| '{ print $3 }')
+dbPass=$(echo "$DB" | awk -F\| '{ print $4 }')
+dbSID=$(echo "$DB" | awk -F\| '{ print $5 }')
+dbPort=$(echo "$DB" | awk -F\| '{ print $6 }')
+dbTable=$(echo "$DB" | awk -F\| '{ print $7 }')
+dbCred=$(echo "$DB" | awk -F\| '{ print $8 }')
+
+# figure out which credential file to use
+[ -f /apps/bgb/apps/biggreenbutton/credentials/$dbCred ] && CREDFILE=$dbCred
+[ -z "$CREDFILE" ] && CREDFILE=$(basename $(egrep -il "username=$dbUser|username=$dbOwner" /apps/bgb/apps/biggreenbutton/credentials/*) 2>/dev/null)
+[ -z "$CREDFILE" ] && BailOut "Can't figure out credential file for $dbUser"
+
+# db env translations
+DB_ENV=$(get-installation $BRAND $ENV)
+#[ "$DB_ENV" = "int" ] && DB_ENV="integration"
+#[ "$DB_ENV" = "int1" ] && DB_ENV="integration"
+#[ "$DB_ENV" = "int2" ] && DB_ENV="integration2"
+#[ "$DB_ENV" = "rgs1" ] && DB_ENV="regression"
+#[ "$DB_ENV" = "regression2" ] && DB_ENV="rgs2"
+#[ "$DB_ENV" = "rgs2" ] && DB_ENV="rgs2"
+
+echo "Site and SiteID defaults to: $SITE/$SITEID for recipe activations"
+
+##Checks Generation Length
+GENLEN=${#GEN}
+[ $GENLEN -ne 9 ] && BailOut "GenId doesn't have 9 digits"
+
+YEAR=20${GEN:1:6}
+MISC=${GEN:0:1}
+SEQ=${GEN:7:2}
+
+SOURCE=${GEN:0:1}
+BUILDID=$YEAR'-'$MISC$SEQ
+ZIPPATH="/apps/buildsystem/wcmbuilds/${SITE}dprecipebuild/wcm-build-$BUILDID/recipexml-wcm-build-$BUILDID.zip"
+SUMMARY=$(geturls $BRAND $ENV | grep -i summary.html | awk '{ print $1 }')
+
+echo "Site is $SITE"
+echo "SiteID is $SITEID"
+echo "GenerationId is $GEN" 
+echo "Build ID is $BUILDID"
+echo "Recipe path is $IMGPATH"
+echo "Recipe location is at $ZIPPATH"
+echo "CredFile is $CREDFILE"
+[ -n "$SUMMARY" ] && echo "Summary page: $SUMMARY"
+
+if [ "$SOURCE" = "4" ]
+then
+    SRC_HOST=$UAT_HOST
+    SRC_DIR=$UAT_DIR
+fi
+
+if [ "$SOURCE" = "3" ]
+then
+    SRC_HOST=$PRD_HOST
+    SRC_DIR=$PRD_DIR
+fi
+
+echo "Attempting to copy $GEN from $SRC_HOST:$SRC_DIR/wcm-build-$BUILDID"
+scp -qr $SSHOPTS $SRC_HOST:$SRC_DIR/wcm-build-$BUILDID /apps/buildsystem/wcmbuilds/wsdprecipebuild
+if [ $? -ne 0 ]
+then
+    echo "Unable to copy $BUILDID - Here are the most recent generations:"
+    for g in $(ssh -q $SSHOPTS $SRC_HOST "cd $SRC_DIR; ls -1t | grep 'wcm-build' | head")
+    do
+         echo "> $g - $(dir2gen $g)"
+    done
+fi
+
+[ -f "$ZIPPATH" ] || BailOut "Can't find zip file $ZIPPATH"
+echo "ZIP: $(ls -lh $ZIPPATH)"
+
+cd /apps/bgb/apps/biggreenbutton
+SYNC=/apps/buildsystem/wcmbuilds/${SITE}dprecipebuild/wcm-build-$BUILDID/recipegenctl-wcm-build-$BUILDID.zip
+./bin/oraclectlsync -s $SYNC -d $dbSID -c $CREDFILE -i $SITEID -g $GEN -t $dbOwner -v deploy
+[ $? -ne 0 ] && BailOut "oraclectlsync returned $?"
+
+# Copies build to image server
+echo " Copying WCM Recipe build to image server: 
+scp -q $ZIPPATH $IMGPATH"
+scp -q $SSHOPTS imageuser@locker-dev-rk2v:$ZIPPATH $IMGPATH
+
+echo " Finally  activate the generation in the Admin tool"
+
+SQL="WHENEVER SQLERROR EXIT
+INSERT INTO ww_generation_schedule (site, installation, subsystem, generation, start_time, REFRESH)
+VALUES ($SITEID, '$DB_ENV', 'RECIPE', $GEN, SYSDATE, 0);
+commit;
+"
+echo "$SQL"
+echo "$SQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): RECIPE $GEN staged in $ENV"
+
+exit 0

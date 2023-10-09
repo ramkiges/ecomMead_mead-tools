@@ -1,0 +1,612 @@
+#!/bin/bash
+# script to switch a schema
+
+#TODO: https://github.wsgc.com/eCommerce-Kubernetes-Bedrock/ecom-svc-phygital-helm-config
+#TODO: automate secrets update etcd-config-tool-k8s-package 
+
+PATH=/opt/homebrew/bin:/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/java/bin:/apps/mead-tools:/apps:/apps/scripts:/apps/scm-tools:$PATH:~/bin:$PATH
+export PATH
+# TODO: update catalog service 
+
+TMP="/tmp/$(basename $0)-$LOGNAME"
+mkdir -p $TMP
+DATE="$(date +'%Y-%m-%d %H:%M')"
+
+REPO_FRONTEND=https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk
+REPO_DEPLOYMENTS=https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties
+REPO_APPSETTINGS=https://repos.wsgc.com/svn/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site/
+REPO_MANIFEST=git@github.wsgc.com:eCommerce-DevOps/env-manifest.git
+
+ETCD_CONFIG_TOOL_REPO=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/etcd-config-tool-k8s-package.git
+ETCD_CONFIG_TOOL_BRANCH=release
+
+CATALOG_REPO=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-svc-catalog-helm-config.git
+CATALOG_BRANCH=release
+[[ $BUILD_USER_ID =~ svc || $BUILD_USER_ID =~ ciuser || $RUNBY =~ svc || $RUNBY =~ ciuser ]] && RUNBY=$(sed -es/^a_//g <<< $LOGNAME)
+
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+
+# Jira icons
+export ICON_FAIL=" (x) "
+export ICON_SUCC=" (/) "
+export ICON_WARN=" (!) "
+export ICON_INFO=" (i) "
+
+BailOut() {
+	[ -n "$1" ] && echo "$*" 
+	echo "Usage: $(basename $0) <-b brand> <-e env> <-d dest_schema> <-q backend> <-c clone_env> [-s src_schema] [-l content_path] <-p step> [-t ticket]
+Steps
+    content
+    bgb
+    pom
+    settings
+    backend
+    MFE
+    deploy
+    CORS
+"
+	exit 1
+}
+
+Usage() {
+    echo "$(basename $0): "
+}
+
+timeStamp() { echo ">>> $(date +'%Y-%m-%d %H:%M') $* <<<"; }
+
+Notation() { echo "### [$(basename $0)] $* "; }
+
+updateContentPath() {
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+}
+
+updateCORS() {
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+  echo set-CORS $BRAND $ENVIRO $TICKET
+}
+
+updateMFE() {
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+  url="jdbc:oracle:thin:@${DST_dbHost}:${DST_dbPort}/${DST_dbSID}"
+  user=${DST_dbUser}
+  schema=$(tr '[:lower:]' '[:upper:]' <<< ${DST_dbOwner})
+
+echo "*** this is a work-in-progress ***"
+  SYNCAPP_ORG=eCommerce-Tahoe
+  SYNCAPP_BCH=all-nonprod-session
+  SYNCAPP_REPO=git@github.wsgc.com:$SYNCAPP_ORG/etcd-syncappconfig-helm-config.git
+  rm -rf $TMP/syncapp
+  git clone -q -b $SYNCAPP_BCH $SYNCAPP_REPO $TMP/syncapp || BailOut "Unable to clone $SYNCAPP_REPO"
+  cd $TMP/config || BailOut "Unable to cd to $TMP/syncapp/config"
+  VALUES=$ENVIRO/values.yaml
+  [[ -e $VALUES ]] || BailOut "etcd-config-tool values.yaml missing for $ENVIRO"
+  #yq eval $VALUES 
+set -x
+  yq eval ".syncconfig.oracle.db.url = \"$url\"" -i $VALUES
+  yq eval ".syncconfig.oracle.db.username = \"$user\"" -i $VALUES
+  yq eval ".syncconfig.oracle.tablePrefix = \"${schema}.\"" -i $VALUES
+
+  yq eval ".syncconfig.\"oracle.db.url\" = \"$url\"" -i $VALUES
+  yq eval ".syncconfig.\"oracle.db.username\" = \"$user\"" -i $VALUES
+  yq eval ".syncconfig.\"oracle.tablePrefix\" = \"${schema}.\"" -i $VALUES
+
+  git add $VALUES
+  git commit -q -a -m "[$REASON] set schema to $DST_SCHEMA"
+  git push -q 
+  git diff
+{ set +x; } 2>/dev/null
+
+  rm -rf $TMP/catalog
+  git clone -q -b $CATALOG_BRANCH $CATALOG_REPO $TMP/catalog || BailOut "Unable to clone $CATALOG_REPO/$CATALOG_BRANCH"
+  cd $TMP/catalog/config || BailOut "Unable to cd to $TMP/catalog/config"
+
+  rm -rf $TMP/etcd-config-tool
+  git clone -q -b $ETCD_CONFIG_TOOL_BRANCH $ETCD_CONFIG_TOOL_REPO $TMP/etcd-config-tool || BailOut "Unable to clone $ETCD_CONFIG_TOOL_REPO/$ETCD_CONFIG_TOOL_BRANCH"
+  cd $TMP/etcd-config-tool/src/main/helm/config || BailOut "Unable to cd to $TMP/etcd-config-tool/src/main/helm/config"
+  VALUES=$ENVIRO/values.yaml
+  [[ -e $VALUES ]] || VALUES=$INSTALLATION/values.yaml
+  [[ -e $VALUES ]] || BailOut "etcd-config-tool values.yaml missing for $ENVIRO"
+
+#  # clone the secrets from the ref enviro
+#  if [[ -n $REF_ENVIRO ]]
+#  then 
+#    REF_CFG=$REF_ENVIRO
+#    [[ $REF_ENVIRO = "rgs1" ]] && REF_CFG=regression
+#    [[ -e $REF_CFG/secrets.yaml ]] || BailOut "etcd-config-tool secrets.yaml missing for $REF_CFG ($REF_CFG/secrets.yaml)"
+#    cp $REF_CFG/secrets.yaml $ENVIRO
+#    #user=$(yq eval '."syncconfig"."oracle.db.username"' $REF_CFG/values.yaml)
+#    #url=$(yq eval '."syncconfig"."oracle.db.url"' $REF_CFG/values.yaml)
+#    #schema=$(yq eval '."syncconfig"."oracle.tablePrefix"' $REF_CFG/values.yaml)
+#  fi
+
+  # in some cases, there are 2 sets of oracle params in the file.  Why?  Who knows.
+set -x
+  yq eval ".syncconfig.oracle.db.url = \"$url\"" -i $VALUES
+  yq eval ".syncconfig.oracle.db.username = \"$user\"" -i $VALUES
+  yq eval ".syncconfig.oracle.tablePrefix = \"${schema}.\"" -i $VALUES
+
+  yq eval ".syncconfig.\"oracle.db.url\" = \"$url\"" -i $VALUES
+  yq eval ".syncconfig.\"oracle.db.username\" = \"$user\"" -i $VALUES
+  yq eval ".syncconfig.\"oracle.tablePrefix\" = \"${schema}.\"" -i $VALUES
+
+  git add $VALUES
+  git commit -q -a -m "[$REASON] set schema to $DST_SCHEMA"
+  git push -q 
+{ set +x; } 2>/dev/null
+
+  [[ $ENVIRO =~ uat || $ENVIRO =~ bpv ]] && REALM=uat || REALM=qa
+  etcd-bootstrap-all $REALM $ENVIRO 
+
+  echo "*** Update MFE config ***"
+  run-mfe-config $ENVIRO &
+
+  #Notation "Update etcd-bootstrap-records"
+  #update-etcd-bootstrap-records $BRAND $ENVIRO $TICKET >/dev/null 2>&1 &
+}
+
+deploy() {
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+  eval jenkins-jnlp build -s wsgc-devops-frontend21-qa-single-env -p BRAND=$BRAND -p ENVIRONMENT=$ENVIRO
+
+  Notation "Deploy $BRAND $ENVIRO"
+  eval jenkins-jnlp build checkenv \
+    -p Brand=${BRAND} \
+    -p Environment=${ENVIRO} \
+    -p Ticket=${TICKET} \
+    -p Options=Deploy-Content \
+    -p Options=Check-Schema \
+    -p Options=Force-Content \
+    -p Options=Deploy-War \
+    -p Options=Rebuild-Config \
+    -p Options=Rebuild-MFE \
+    -p RunBy=$RUNBY \
+    -p Options=Clear-Logs >/dev/null 2>&1 &
+
+  # not needed CheckEnv does this
+  #Notation "Update deployment matrix data"
+  #eval jenkins-jnlp build generate-deployment-matrix-data -p ENV_LIST=${ENVIRO} >/dev/null 2>&1 &
+}
+
+# TODO - add logic to remove settings from old schema overrides
+updateSettings() {
+    Notation "$FUNCNAME $BRAND $ENVIRO"
+    [[ $SRC_SCHEMA = $DST_SCHEMA ]] && { echo "SRC and DST schemas are the same, skipping"; return; }
+
+    # check out appsetting repo
+    rm -rf $TMP/appsettings 
+    svn -q co $REPO_APPSETTINGS $TMP/appsettings || BailOut "Could not co $REPO_APPSETTINGS to $TMP/appsettings"
+
+    DST_OVERRIDE=$TMP/appsettings/$DST_dbSID/$DST_dbOwner/${BRAND}/override/override.properties
+    [ -f "$DST_OVERRIDE" ] || BailOut "Can't find destination override ($DST_OVERRIDE)"
+
+    SRC_OVERRIDE=$TMP/appsettings/$SRC_dbSID/$SRC_dbOwner/${BRAND}/override/override.properties
+    [ -f "$SRC_OVERRIDE" ] || BailOut "Can't find source override ($SRC_OVERRIDE)"
+
+    #echo "Copy $ENVIRO/$INSTALLATION settings from $SRC_OVERRIDE to $DST_OVERRIDE" 
+
+    rm -f $DST_OVERRIDE.new
+
+    /bin/echo -ne "Remove $BRAND $ENVIRO [$INSTALLATION] appsettings from $DST_SCHEMA "
+    for setting in $(awk -F\. '{ print $1 "." $2 }' $SRC_OVERRIDE $DST_OVERRIDE | egrep -vi "^#|^$" | sort -u)
+    do
+      egrep -i "^$setting\." $DST_OVERRIDE | sort -u | egrep -iv "^$setting\.${INSTALLATION}\.|^$setting\.${ENVIRO}\." >> $DST_OVERRIDE.new 
+    done
+    echo "- done"
+
+    /bin/echo -ne "Copy $BRAND $ENVIRO appsettings from $SRC_SCHEMA to $DST_SCHEMA "
+    for setting in $(awk -F\. '{ print $1 "." $2 }' $SRC_OVERRIDE $DST_OVERRIDE | egrep -vi "^#|^$" | sort -u)
+    do
+      egrep -i "^$setting\.${INSTALLATION}\." $SRC_OVERRIDE | sort -u >> $DST_OVERRIDE.new 
+    done
+    echo "- done"
+
+    # copy the new dst file into place
+    mv $DST_OVERRIDE.new $DST_OVERRIDE || BailOut "Something went wrong with mv $DST_OVERRIDE.new $DST_OVERRIDE"
+
+    svn commit -m "[$REASON] $(basename $0) - switch ${ENVIRO} schema to $DST_SCHEMA" $DST_OVERRIDE || BailOut "Unable to commit $DST_OVERRIDE" 
+    { set +x; } 2>/dev/null
+
+    #updateCORS 
+
+    [[ $ENVIRO =~ uat ]] && OAUTH=uat
+    [[ $ENVIRO =~ bpv ]] && OAUTH=uat
+    [[ $ENVIRO =~ int ]] && OAUTH=qa
+    [[ -z $OAUTH ]] && OAUTH=qa
+    jenkins-jnlp -s build set-oauth -p Brand=$BRAND -p Environment=$ENVIRO -p Oauth=$OAUTH -p Ticket=$TICKET #>/dev/null 2>&1
+
+    # trigger jenkins appsetting job
+    get-appsetting-job $BRAND $ENVIRO run > /dev/null 2>&1
+
+    [[ -n ${TICKET} ]] && jira-comment "${TICKET}" "${ICON_INFO}$(basename $0) - update ${BRAND} ${ENVIRO} appsettings for $DST_SCHEMA"
+
+    eval jenkins-jnlp build checkenv \
+      -p Brand=${BRAND} \
+      -p Environment=${ENVIRO} \
+      -p Ticket=${TICKET} \
+      -p RunBy=$RUNBY \
+      -p Options=Validate-Appsettings >/dev/null 2>&1 &
+    
+}
+
+updateECM() {
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+  ecmEnv=$(get-ecm-env $BRAND $ENVIRO)
+  echo "ECM Environment: $ecmEnv"
+  echo "(this is a no-op placeholder)"
+}
+
+updateBGB() {
+  Notation "$FUNCNAME $BRAND $ENVIRO"
+
+    MARKET=$(get-market ${BRAND} ${ENVIRO})
+    case $MARKET in
+      CAN ) 
+          BGB_REPO=git@github.wsgc.com:eCommerce-DevOps/bgb-ca-rgs1-config.git 
+          BGB_HOST=bgb-ca-rgs1-rk1v
+        ;;
+      US  ) 
+          BGB_REPO=git@github.wsgc.com:eCommerce-DevOps/bgb-uat3-config.git 
+          BGB_HOST=bgb-uat3-rk1v
+        ;;
+      *   ) BailOut "No idea what BGB repo to use for $MARKET" ;;
+    esac
+    BGB_NAME=$(basename $BGB_REPO | sed -es/\.git//g)
+
+    rm -rf $TMP/bgb
+    git clone -q $BGB_REPO $TMP/bgb || BailOut "Unable to clone $BGB_REPO"
+    cd $TMP/bgb
+
+    cat > src/main/resources/tomcat/apps/bgb/etc/dp${INSTALLATION} << EOF
+owner=$DST_dbOwner
+connection=dbi:Oracle:host=$DST_dbHost;sid=$DST_dbSID;port=$DST_dbPort
+credentialfile=/bgb/tomcat-bgb/apps/bgb/credentials/$DST_dbCred
+EOF
+
+    git add src/main/resources/tomcat/apps/bgb/etc/dp${ENVIRO}
+    git commit -q -a -m "[$REASON] update config for ${ENVIRO}"
+    git push -q 
+
+    #/bin/timeout -k 30s 20s scp -q src/main/resources/tomcat/apps/bgb/etc/dp${ENVIRO} builder@$BGB_HOST:/bgb/tomcat-bgb/apps/bgb/etc
+
+    [[ -n ${TICKET} ]] && jira-comment "${TICKET}" "${ICON_INFO}$(basename $0) - update ${BRAND} ${ENVIRO} BGB for $DST_SCHEMA"
+}
+
+updateBackEnd() {
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+
+  cd /tmp
+  set-backend $BRAND $ENVIRO $BACKEND $TICKET
+
+  #[[ -n ${TICKET} ]] && jira-comment "${TICKET}" "${ICON_INFO}$(basename $0) - set backend for ${BRAND} ${ENVIRO} to $BACKEND"
+}
+
+checkoutPOM() {
+    # check out frontend repo
+    rm -rf $TMP/frontend
+    svn -q co $REPO_FRONTEND $TMP/frontend || BailOut "Could not co $REPO_FRONTEND to $TMP/frontend"
+
+    DST_POM=$TMP/frontend/${BRAND}/${ENVIRO}/pom.xml
+    #[[ -n $REF_ENVIRO ]] && SRC_POM=$TMP/frontend/${BRAND}/$REF_ENVIRO/pom.xml || SRC_POM=$DST_POM
+
+    #[ -e "$DST_POM" ] || BailOut "Can't find destination pom ($DST_POM)"
+    #[ -e "$SRC_POM" ] || BailOut "Can't find source pom ($SRC_POM)"
+}
+
+updatePOM(){
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+
+    # get these properties from the db info, rather than blindly copying from the old env
+    propset -f $DST_POM -p frontend.tableOwner -v $DST_dbOwner
+    propset -f $DST_POM -p frontend.datasource.ecomDB.url -v "jdbc:oracle:thin:@$DST_dbHost:$DST_dbPort/$DST_dbSID"
+    propset -f $DST_POM -p frontend.datasource.session.url -v "jdbc:oracle:thin:@$DST_dbHost:$DST_dbPort/$DST_dbSID"
+    propset -f $DST_POM -p frontend.datasource.ecomDB.username -v $DST_dbUser
+    propset -f $DST_POM -p frontend.datasource.session.username -v $DST_dbUser
+    propset -f $DST_POM -p frontend.datasource.ecomDB.password -v $DST_dbSecret
+    propset -f $DST_POM -p frontend.datasource.session.password -v $DST_dbSecret
+
+#frontend.remoteContentArchiveUrlBases \
+    # copy pom properties
+    for prop in \
+frontend.jms.providerUrl \
+frontend.jms.username \
+frontend.jms.password \
+frontend.jms.subscriberClientId \
+frontend.jmsWismo.providerUrl \
+frontend.jmsWismo.username \
+frontend.jmsWismo.password \
+frontend.jmsWismo.usernameCov2 \
+frontend.jmsWismo.passwordCov2 \
+frontend.jmsOrder.providerUrl \
+frontend.jmsOrder.username \
+frontend.jmsOrder.password \
+frontend.jmsOrderCreate.providerUrl \
+frontend.jmsOrderCreate.username \
+frontend.jmsOrderCreate.password \
+frontend.jmsOrderPricing.providerUrl \
+frontend.jmsOrderPricing.username \
+frontend.jmsOrderPricing.password \
+frontend.jmsOrderReservation.providerUrl \
+frontend.jmsOrderReservation.username \
+frontend.jmsOrderReservation.password \
+frontend.loyaltyJms.url \
+frontend.loyaltyJms.queueName \
+frontend.loyaltyJms.username \
+frontend.loyaltyJms.password
+    do
+      # need to do this differently
+      break
+        [[ -z $REF_ENVIRO ]] && break
+        key=$(grep -iw "$prop>" $SRC_POM | awk -F '[<>]' '{ print $2 }' | sort -u)
+        if [ -n "$key" ]
+        then
+            propcopy -f $DST_POM -p $key -s $SRC_POM
+        else
+            echo "property '$prop' not found in $SRC_POM"
+        fi
+    done
+
+    #svn diff $DST_POM
+    svn commit -m "[$REASON] $(basename $0) - switch schema $DST_SCHEMA" $DST_POM || BailOut "Unable to commit $DST_POM" 
+    [[ -n ${TICKET} ]] && jira-comment "${TICKET}" "${ICON_INFO}$(basename $0) - update ${BRAND} ${ENVIRO} pom for $DST_SCHEMA"
+
+    #eval jenkins-jnlp build -s wsgc-devops-frontend21-qa-app-config
+    #eval jenkins-jnlp build -s wsgc-devops-frontend21-qa-$BRAND-app-config
+    eval jenkins-jnlp build wsgc-devops-frontend21-qa-single-env -p BRAND=$BRAND -p ENVIRONMENT=$ENVIRO >/dev/null 2>&1 &
+}
+
+updateDeployments() {
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+    MARKET=$(get-market ${BRAND} ${ENVIRO} | tr '[:upper:]' '[:lower:]')
+    [[ $MARKET = us ]] && MARKET=
+    TMP_PROPERTIES=$TMP/${BRAND}${MARKET}.properties
+
+    # clean up repo landing zone
+    rm -rf $TMP/properties
+    mkdir -p $TMP/properties || BailOut "Could not mkdir $TMP/properties"
+
+    # check out deployments repo
+    svn -q co $REPO_DEPLOYMENTS $TMP/properties || BailOut "Could not co $REPO_DEPLOYMENTS"
+
+    URI_BGB=$(grep -i "^bgburi=" $TMP/properties/${ENVIRO}/${BRAND}${MARKET}.properties)
+    URI_BSYS=$(grep -i "^bsuri=" $TMP/properties/${ENVIRO}/${BRAND}${MARKET}.properties)
+    DROP_DIR=$(grep -i "^drop.dir=" $TMP/properties/${ENVIRO}/${BRAND}${MARKET}.properties)
+
+    # create new properties file
+    cat > $TMP_PROPERTIES << EOF
+project=$(echo ${BRAND} | tr "A-Z" "a-z")
+projectAbbr=$(echo ${BRAND} | tr "a-z" "A-Z")
+site.id=$(brand2site ${BRAND} ${ENVIRO})
+ActInstallation=$(echo ${INSTALLATION} | tr "A-Z" "a-z")
+host=$(get-host ${BRAND} ${ENVIRO} | awk -F\. '{ print $1 }')
+content.svn=
+war.url.base=http://snapshotrepo.wsgc.com/snapshotrepo/com/wsgc/ecommerce/wsgc-$(echo ${BRAND} | tr "A-Z" "a-z")/\${snapshot.path}-SNAPSHOT/
+java_home=/apps/java
+$DROP_DIR
+
+# DB creds
+DBHost=$DST_dbHost
+DBInst=$DST_dbSID
+DBSchema=$DST_dbOwner
+DBUid=$DST_dbUser
+DBPwd=$DST_dbPass
+#bgb.stage=${INSTALLATION}
+$URI_BGB
+$URI_BSYS
+EOF
+
+    cp $TMP_PROPERTIES $TMP/properties/${ENVIRO}/${BRAND}${MARKET}.properties 
+    #svn diff $TMP/properties/${ENVIRO}/${BRAND}${MARKET}.properties
+    svn commit -m "[$REASON] $(basename $0) - switch ${BRAND} ${ENVIRO} schema $DST_SCHEMA" $TMP/properties/${ENVIRO}/${BRAND}${MARKET}.properties || BailOut "Unable to commit $TMP/properties/${ENVIRO}/${BRAND}.properties"
+    [[ -n ${TICKET} ]] && jira-comment "${TICKET}" "${ICON_INFO}$(basename $0) - update ${BRAND} ${ENVIRO} deployment properties for $DST_SCHEMA"
+}
+
+updateGenerations() {
+	Notation "$FUNCNAME $BRAND $ENVIRO"
+
+  [[ -n $REF_ENVIRO ]] && SRC_ENVIRO=$REF_ENVIRO || SRC_ENVIRO=rgs1
+  eval jenkins-jnlp build copy-generations \
+    -p Ticket=${TICKET} \
+    -p Brand=${BRAND} \
+    -p Source_Environment=${SRC_ENVIRO} \
+    -p Destination_Environment=${ENVIRO} \
+    -p CAT=true \
+    -p CMX=true \
+    -p RunBy=$RUNBY \
+    -p Update_Archive_Locator=true 
+}
+
+while getopts ":b:e:d:s:p:q:t:c:" opt 
+do
+    case ${opt} in
+        # brand
+        b ) BRAND=$(echo $OPTARG | tr "A-Z" "a-z");;
+
+        # environment
+        e ) ENVIRO=$(echo $OPTARG | tr "A-Z" "a-z");;
+
+        # source schema
+        s ) SRC_SCHEMA=$(echo $OPTARG | tr "A-Z" "a-z");;
+         
+        # destination schema
+        d ) DST_SCHEMA=$(echo $OPTARG | tr "A-Z" "a-z");;
+
+        # content path
+        l ) CONTENT_PATH=$(echo $OPTARG | tr "A-Z" "a-z");;
+
+        # backend
+        q ) BACKEND=$(echo $OPTARG | tr "A-Z" "a-z");;
+
+        # which step in the process we're doing
+        p ) STEPLIST="$STEPLIST $(echo $OPTARG | tr "A-Z" "a-z")" ;;
+
+        # environment to clone
+        c ) REF_ENVIRO=$(echo $OPTARG | tr "A-Z" "a-z");;
+
+        # ticket
+        t ) TICKET=$(echo $OPTARG | tr "a-z" "A-Z");;
+
+        # help
+        h|\? ) { Usage; exit; } ;;
+    esac
+done
+
+if [ -n "$TICKET" ]
+then
+  TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+  for jira in $TICKET
+  do
+    echo "* Jira: https://jira.wsgc.com/browse/$jira *"
+    jira-label $TICKET ops:schema-switch
+  done
+fi
+
+[[ $DST_SCHEMA = nochange ]] && DST_SCHEMA=
+[[ -z $DST_SCHEMA ]] && DST_SCHEMA=$(getschema ${BRAND} ${ENVIRO} | awk -F: '{ print $1 }')
+[[ -z $SRC_SCHEMA ]] && SRC_SCHEMA=$(getschema ${BRAND} ${ENVIRO} | awk -F: '{ print $1 }')
+#[[ -z $DST_SCHEMA ]] && BailOut "Need destination schema"
+#[[ -z $SRC_SCHEMA ]] && BailOut "Need source schema"
+
+[[ -z ${BRAND} ]] && BailOut "Need brand"
+[[ -z ${ENVIRO} ]] && BailOut "Need environmnet"
+[[ -z $STEPLIST ]] && BailOut "Need step(s)"
+[[ -n $TICKET ]] && REASON=${TICKET} || REASON="DEVOPS" 
+
+case $DST_SCHEMA in
+    vtrn1 ) 
+        DST_SCHEMA=vtrn1 
+        #[[ -z $REF_ENVIRO ]] && REF_ENVIRO=qa11
+    ;;
+
+    veqa1 ) 
+        DST_SCHEMA=veqa1 
+        [[ -z $REF_ENVIRO ]] && REF_ENVIRO=qa11
+    ;;
+
+    veqa2 ) 
+        DST_SCHEMA=veqa2 
+        [[ -z $REF_ENVIRO ]] && REF_ENVIRO=qa10
+    ;;
+
+    veqa3 ) 
+        DST_SCHEMA=veqa3 
+        #[[ -z $REF_ENVIRO ]] && REF_ENVIRO=qa31
+    ;;
+
+    eqa3 ) 
+        DST_SCHEMA=eqa3_app_owner 
+        [[ -z $REF_ENVIRO ]] && REF_ENVIRO=qa31 
+    ;;
+
+    ws_app_owner ) 
+      [[ -z $REF_ENVIRO ]] && REF_ENVIRO=uat3 
+    ;;
+
+    ecom_can_prf ) 
+      [[ -z $REF_ENVIRO ]] && REF_ENVIRO=caperf 
+    ;;
+
+    dtc_app_owner | eqa1 ) 
+        DST_SCHEMA=dtc_app_owner
+        [[ -z $REF_ENVIRO ]] && REF_ENVIRO=qa3 
+        s=$(getschema $BRAND $REF_ENVIRO | awk -F: '{ print $1 }')
+        [[ $s = "dtc_app_owner" ]] || BailOut "$REF_ENVIRO is not a valid reference for dtc_app_owner"
+    ;;
+
+    dtcmou_app_owner | eqa2 ) 
+      [[ -z $REF_ENVIRO ]] && REF_ENVIRO=qa9
+      s=$(getschema $BRAND $REF_ENVIRO | awk -F: '{ print $1 }')
+      [[ $s = "dtcmou_app_owner" ]] || BailOut "$REF_ENVIRO is not a valid reference for dtcmou_app_owner"
+    ;;
+
+    dtcitg_app_owner ) 
+      [[ -z $REF_ENVIRO ]] && REF_ENVIRO=qa15 
+    ;;
+
+    * ) echo "no reference env for $DST_SCHEMA";;
+esac
+
+# getdb is a script which returns the db connections params for a given schema
+DST_DB=$(getdb $DST_SCHEMA)
+[ -z "$DST_DB" ] && BailOut "Can't get creds for destination schema $DST_SCHEMA"
+DST_dbHost=$(echo "$DST_DB" | awk -F\| '{ print $1 }')
+DST_dbOwner=$(echo "$DST_DB" | awk -F\| '{ print $2 }' | tr "A-Z" "a-z")
+DST_dbUser=$(echo "$DST_DB" | awk -F\| '{ print $3 }')
+DST_dbPass=$(echo "$DST_DB" | awk -F\| '{ print $4 }')
+DST_dbSID=$(echo "$DST_DB" | awk -F\| '{ print $5 }')
+DST_dbPort=$(echo "$DST_DB" | awk -F\| '{ print $6 }')
+DST_dbTable=$(echo "$DST_DB" | awk -F\| '{ print $7 }')
+DST_dbCred=$(echo "$DST_DB" | awk -F\| '{ print $8 }')
+DST_dbSecret=$(echo "$DST_DB" | awk -F\| '{ print $9 }')
+DST_dbConnect=$(echo "$DST_DB" | awk -F\| '{ print $10 }')
+DST_SCHEMA=$(echo $DST_SCHEMA | awk -F: '{ print $1 }')
+
+[[ -z $SRC_SCHEMA ]] && SRC_SCHEMA=$(getschema $BRAND $REF_ENVIRO)
+SRC_DB=$(getdb $SRC_SCHEMA)
+[ -z "$SRC_DB" ] && BailOut "Can't get creds for source schema $SRC_SCHEMA ($REF_ENVIRO)"
+SRC_dbHost=$(echo "$SRC_DB" | awk -F\| '{ print $1 }')
+SRC_dbOwner=$(echo "$SRC_DB" | awk -F\| '{ print $2 }' | tr "A-Z" "a-z")
+SRC_dbUser=$(echo "$SRC_DB" | awk -F\| '{ print $3 }')
+SRC_dbPass=$(echo "$SRC_DB" | awk -F\| '{ print $4 }')
+SRC_dbSID=$(echo "$SRC_DB" | awk -F\| '{ print $5 }')
+SRC_dbPort=$(echo "$SRC_DB" | awk -F\| '{ print $6 }')
+SRC_dbTable=$(echo "$SRC_DB" | awk -F\| '{ print $7 }')
+SRC_dbCred=$(echo "$SRC_DB" | awk -F\| '{ print $8 }')
+SRC_dbSecret=$(echo "$SRC_DB" | awk -F\| '{ print $9 }')
+SRC_dbConnect=$(echo "$SRC_DB" | awk -F\| '{ print $10 }')
+SRC_SCHEMA=$(echo $SRC_SCHEMA | awk -F: '{ print $1 }')
+
+echo "$STEPLIST" | egrep -qi "pom|back" && checkoutPOM
+
+INSTALLATION=$(get-installation $BRAND $ENVIRO)
+
+echo "Environment:        $BRAND $ENVIRO [$INSTALLATION]"
+#echo "Ref environment:    $REF_ENVIRO"
+echo "Source schema:      $SRC_SCHEMA"
+echo "Destination schema: $DST_SCHEMA"
+
+#STEP_LIST="$STEP_LIST backend"
+[[ -z $BACKEND ]] && BACKEND=$DST_SCHEMA
+
+for STEP in $STEPLIST
+do
+    case $STEP in 
+        *bgb*     ) 
+          updateBGB 
+          updateDeployments
+          updateECM
+          ;;
+        *pom*     ) 
+          updatePOM 
+        ;;
+        *back*    ) 
+          updateBackEnd 
+          ;;
+        *setting* ) 
+          updateSettings 
+          ;;
+        *content* ) 
+          updateGenerations 
+          ;;
+        *mfe* ) 
+          updateMFE 
+          ;;
+        *deploy*   ) 
+          deploy 
+          ;;
+        *path*   ) 
+          updateContentPath 
+          ;;
+        *cors*   ) 
+          updateCORS 
+          ;;
+        * ) BailOut "No idea what step we're in (STEP=$STEP)" ;;
+    esac
+done
+
+#eval jenkins-jnlp build update-content-paths -p Brand=$BRAND -p Environment=$ENVIRO -p Ticket=$TICKET -p TriggerDeployment=false -p AutoClose=false >/dev/null 2>&1 &
+
+eval jenkins-jnlp build generate-deployment-matrix-data -p ENV_LIST=${ENVIRO} >/dev/null 2>&1 &
+
+chkschema $BRAND $ENVIRO $TICKET 
+
+exit 0

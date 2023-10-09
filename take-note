@@ -1,0 +1,45 @@
+#!/bin/bash
+
+REPO=git@github.wsgc.com:eCommerce-Mead/mead-notes.git
+DATE=$(date +'%Y-%m-%d %H:%M')
+RUNBY=$(sed -es/a_//g <<< $LOGNAME)
+
+TMP=$(mktemp -d -t tmp.$(basename $0)XXX)
+
+BailOut() {
+  [[ -n $1 && $QUIET = "false" ]] && echo "$(basename $0): $*"  >&2
+  exit 255
+}
+
+Usage() {
+  echo "$(basename $0) -f <file> -n <note>"
+  exit 0
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  [[ $CLEAR = "true" && -n $TMP ]] && rm -rf $TMP
+}
+trap cleanUp EXIT
+
+[[ $# -eq 0 ]] && Usage
+
+while getopts "f:n:" opt 
+do
+  case ${opt} in
+    f ) FILE=$OPTARG;;
+    n ) NOTE=$OPTARG;;
+  esac
+done
+
+[[ -z $NOTE ]] && BailOut
+
+git clone -q --depth 1 $REPO $TMP || BailOut "Unable to clone $REPO"
+cd $TMP || BailOut "Unable to cd to tmp dir $TMP"
+echo "$DATE ($RUNBY): $NOTE" >> $FILE
+git add $FILE
+git commit -q -m "Update $DATE"
+git push -q
+
+exit 0
+

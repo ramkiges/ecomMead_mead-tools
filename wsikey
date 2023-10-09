@@ -1,0 +1,59 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:$HOME/bin:$PATH
+
+SSH_OPTS="-o StrictHostKeyChecking=no"
+TARGET="$1"
+shift
+[ -z "$SSH_USER" ] && SSH_USER="a_${LOGNAME}"
+
+BailOut() {
+	[ -n "$TARGET" ] && echo "$*"
+	echo "Usage: $(basename $0) <host>"
+	exit 1
+}
+
+for pdir in ~/ ~/wsgc /wsgc
+do
+	[ -f $pdir/.pass ] && export SSHPASS="$(cat $pdir/.pass)"
+done
+
+[ -z "$SSHPASS" ] && BailOut "sshpass not set"
+[ -z "$TARGET" ] && BailOut "Need target host"
+
+[ ! -d ~/.ssh ] && BailOut "Why do you not have a .ssh directory?"
+[ ! -f ~/.ssh/id_rsa.pub ] && BailOut "Why do you not have an id_rsa.pub file?"
+[ ! -f ~/.ssh/authorized_keys ] && cp ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys
+
+# check to see if the keys already work
+#ssh -i ~/.ssh/id_rsa -nq $SSH_OPTS ${SSH_USER}@$TARGET "hostname >/dev/null 2>&1 " </dev/null >/dev/null 2>&1 
+#[ $? -eq 0 -a -z "$1" ] && exit 0
+
+#echo "ssh-copy-id ssh keys on $TARGET"
+#sshpass -e ssh-copy-id -i ~/.ssh/id_rsa.pub -f $SSH_USER@$TARGET > /dev/null 2>&1 &
+
+for try in 1 2 
+do
+	sshpass -e ssh $SSH_OPTS ${SSH_USER}@$TARGET "hostname >/dev/null 2>&1 " 2>/dev/null 
+	ret=$?
+	[ $ret -eq 0 ] && break
+	sleep 10
+done
+[ $ret -ne 0 ] && BailOut "Couldn't ssh to $TARGET with your $SSH_USER creds"
+sleep 2
+
+sshpass -e scp -r $SSH_OPTS ~/.ssh/ ${SSH_USER}@$TARGET:/home/${SSH_USER} >/dev/null 2>&1 
+sleep 2
+
+#sshpass -e ssh $SSH_OPTS ${SSH_USER}@$TARGET "mkdir ~/.ssh;chmod 700 ~/.ssh" 2>/dev/null 
+#[ -f ~/.ssh/id_rsa.pub ] && sshpass -e scp $SSH_OPTS ~/.ssh/config ${SSH_USER}@$TARGET:/home/${SSH_USER}/.ssh >/dev/null 2>&1 &
+#[ -f ~/.ssh/config ] && sshpass -e scp $SSH_OPTS ~/.ssh/config ${SSH_USER}@$TARGET:/home/${SSH_USER}/.ssh >/dev/null 2>&1 &
+#[ -f ~/.ssh/authorized_keys ] && sshpass -e scp $SSH_OPTS ~/.ssh/authorized_keys ${SSH_USER}@$TARGET:/home/${SSH_USER}/.ssh >/dev/null 2>&1 &
+#sshpass -e scp $SSH_OPTS ~/.ssh/*.pub ${SSH_USER}@$TARGET:/home/${SSH_USER}/.ssh >/dev/null 2>&1 &
+
+# test it
+ssh $SSH_OPTS ${SSH_USER}@$TARGET "hostname >/dev/null 2>&1 " 2>/dev/null 
+[ $? -ne 0 ] && BailOut "Couldn't ssh to $TARGET with your $SSH_USER ssh keys"
+
+#sshpass -e ssh $SSH_OPTS ${SSH_USER}@$TARGET "touch ~/.hushlogin" 2>/dev/null &
+
+exit 0

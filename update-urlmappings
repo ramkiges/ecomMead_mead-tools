@@ -1,0 +1,57 @@
+#!/bin/bash
+# update the frontend.urlMappings with either the CNAME or hostname as appropriate
+TICKET=DEVOPS
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "Usage: $(basename $0) <env> [env] ..."
+  exit 1
+}
+[[ -z $1 ]] && BailOut
+
+cd $(cat ~/.wsi_settings)/application/frontend-2.1/qa/config/app/trunk || BailOut "can't cd to frontend directory"
+svn up -q
+
+for ENVIRO in $*
+do
+  for b in $(getbrandlist $ENVIRO)
+  do 
+    [[ -e $b/$ENVIRO/pom.xml ]] || continue
+
+    host=$(gethost $b $ENVIRO | awk -F\. '{ print $1 }')
+    [[ -z $host ]] && continue
+
+    siteid=$(getsiteid $b $ENVIRO)
+    propset -f $b/$ENVIRO/pom.xml -p frontend.siteId -v $siteid >/dev/null 2>&1
+
+    ugly=$(host $host |grep -i address | awk '{ print $1 }' | awk -F\. '{ print $1 }')
+    if [[ $host = $ugly ]]
+    then
+      ip=$(host $host | grep -i address | awk '{ print $NF }')
+      ugly=$ip
+      grep -iq "frontend.NodeName" $b/$ENVIRO/pom.xml || echo "*** need to add <frontend.NodeName></frontend.NodeName> to $b/$ENVIRO/pom.xml" 
+
+      #grep -iq frontend.NodeName $b/$ENVIRO/pom.xml && propset -f $b/$ENVIRO/pom.xml -p frontend.NodeName -v $ip
+      grep -iq frontend.NodeName $b/$ENVIRO/pom.xml && propset -f $b/$ENVIRO/pom.xml -p frontend.NodeName -v $host
+      #propset -f $b/$ENVIRO/pom.xml -p frontend.urlMappings -v 'http://${frontend.NodeName}/==https://${frontend.NodeName}/'
+      propset -f $b/$ENVIRO/pom.xml -p frontend.urlMappings -v 'http://@SHORTNAME@/==https://@SHORTNAME@.wsgc.com/,http://@SHORTNAME@.wsgc.com/==https://@SHORTNAME@.wsgc.com/'
+    else
+      #grep -iq "frontend.NodeName" $b/$ENVIRO/pom.xml && echo "*** $b/$ENVIRO/pom.xml ($ugly) does not need <frontend.NodeName>"
+      grep -iq frontend.NodeName $b/$ENVIRO/pom.xml || echo "Does $b/$ENVIRO/pom.xml need frontend.NodeName?"
+
+      #grep -iq frontend.NodeName $b/$ENVIRO/pom.xml && propset -f $b/$ENVIRO/pom.xml -p frontend.NodeName -v $ugly
+      grep -iq frontend.NodeName $b/$ENVIRO/pom.xml && propset -f $b/$ENVIRO/pom.xml -p frontend.NodeName -v $host
+
+      propset -f $b/$ENVIRO/pom.xml -p frontend.urlMappings -v 'http://@SHORTNAME@/==https://@SHORTNAME@.wsgc.com/,http://@SHORTNAME@.wsgc.com/==https://@SHORTNAME@.wsgc.com/'
+    fi
+  done
+  svn commit -q -m "[$TICKET] update frontend.urlMappings $ENVIRO" */$ENVIRO/pom.xml
+done
+
+for b in $(getbrandlist $ENVIRO)
+do 
+  jenkins-jnlp build wsgc-devops-frontend21-qa-single-env -p BRAND=$b -p ENVIRONMENT=$ENVIRO >/dev/null 2>&1 &
+done
+
+svn up -q
+

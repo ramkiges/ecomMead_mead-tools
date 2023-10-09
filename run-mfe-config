@@ -1,0 +1,99 @@
+#!/bin/bash
+# generates a jenkins-jnmlp command line for an MFE config job
+# https://confluence.wsgc.com/display/ES/MFE+Config+Automation
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/release-tools:/apps/scm-tools:/apps:/opt/homebrew/bin:~/bin
+AUTO=false
+[[ -z $DEBUG ]] && DEBUG=false
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+  echo "Usage: $(basename $0) <enviro> [brand]" >&2
+  [[ -e $DST ]] && rm -f $DST
+  exit 255
+}
+
+STRING_PROP="/project/properties/hudson.model.ParametersDefinitionProperty/parameterDefinitions/hudson.model.StringParameterDefinition"
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+
+# get creds
+JENKINS_USER="svcaecjnk"
+JENKINS_FILE=~/.credentials.d/jenkins-$JENKINS_USER-user
+[ -e $JENKINS_FILE ] || BailOut "Auth file ($JENKINS_FILE) not found"
+JENKINS_USER=$( (source "$JENKINS_FILE"; echo "$USERNAME") )
+JENKINS_PASS=$( (source "$JENKINS_FILE"; echo "$PASSWORD") )
+LOGIN="$JENKINS_USER:$JENKINS_PASS"
+[[ -n $TICKET ]] && TICKET=$(tr '[:lower:]' '[:upper:]' <<< $TICKET)
+which xmlstarlet >/dev/null 2>&1 || BailOut "Why isn't xmlstarlet installed?"
+
+[[ $1 = "-f" ]] && { FOLLOW="-f"; shift; }
+[[ $1 = "-s" ]] && { FOLLOW="-s"; shift; }
+[[ $1 = "-v" ]] && { FOLLOW="-v"; shift; }
+ENVIRO=$1
+[[ -z $ENVIRO ]] && BailOut 
+shift
+
+BRANDLIST=$(getbrandlist $ENVIRO)
+BRANDS=
+while [ $# -gt 0 ]
+do
+  if [[ $1 =~ debug ]]
+  then
+    DEBUG=true
+    shift
+    continue
+  fi
+
+  if [[ $1 =~ auto ]]
+  then
+    AUTO=true
+    TICKET=$(jira-create -p mead -s "MFE Config Build $ENVIRO" -d "Collector ticket for $ENVIRO")
+    shift
+    continue
+  fi
+
+  echo "$BRANDLIST" | egrep -iqw "$1" && { BRANDS="$(tr '[:lower:]' '[:upper:]' <<< $1),$BRANDS"; UPDATE_DATA=false; }
+
+  shift
+done
+[[ -z $BRANDS ]] && BRANDS=$(getbrandlist $ENVIRO)
+BRANDS=$(sed -es/^,//g -es/,$//g <<< $BRANDS)
+
+JOB=config-$ENVIRO-mfe
+SRC=$JENKINS_URL/job/$JOB/config.xml
+DST=/tmp/$JOB-$LOGNAME-$$.xml
+
+umask 000
+curl -s -q --user $LOGIN $SRC -o $DST
+[[ -e $DST ]] || BailOut "Unable to download $DST from $SRC"
+
+sed -es/"xml version='1.1'"/"xml version='1.0'"/g -i $DST
+COMMAND="$JENKINS build $FOLLOW $JOB -p FORCE_RUN=true"
+for param in $(xmlstarlet sel -t -c "$STRING_PROP/name" $DST 2>/dev/null | sed -es%'</name>'%%g -es'%<name>'%' '%g)
+do
+  [[ $param = "FORCE_RUN" ]] && continue
+  [[ $param = "DEBUG_LEVEL" ]] && continue
+  [[ $param = "NICE" ]] && continue
+  value=$(xmlstarlet sel -t -c "$STRING_PROP[name='$param']/defaultValue" $DST 2>/dev/null | awk -F '[<>]' '{ print $3 }' )
+
+  # if a brand is passed in on the command line, only run that single brand
+  [[ $param = "CONCEPT_LIST" && -n $BRANDS ]] && value=$BRANDS
+
+  [[ -z $value ]] && continue
+  COMMAND="$COMMAND -p $param='\"$value\"' "
+done
+COMMAND="$COMMAND -p TICKET=$TICKET"
+[[ -n $UPDATE_DATA ]] && COMMAND="$COMMAND -p UpdateData=$UPDATE_DATA"
+COMMAND="$COMMAND -p AUTO_CLOSE=$AUTO"
+[[ -n $RUNBY ]] && COMMAND="$COMMAND -p RunBy=$RUNBY"
+
+rm -f $DST
+
+[[ $DEBUG =~ true ]] && echo "$COMMAND"
+#set -x
+eval $COMMAND
+{ ret=$?; set +x; } 2>/dev/null
+
+#[[ $AUTO =~ true && $ret -eq 0 ]] && jira-close -t "$TICKET" -c "Closing on successful MFE config build"
+
+exit $ret

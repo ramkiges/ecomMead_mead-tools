@@ -1,0 +1,105 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:~/bin
+#ECOM_SETTINGS_RO/Ecomsetro123$
+
+APPSETTINGS="https://repos.wsgc.com/svn/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site"
+DEVOPS=https://repos.wsgc.com/svn/devops
+PROPERTIES=packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site
+FRONTEND=application/frontend-2.1/qa/config/app/trunk
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+TYPES="a b h i l m n p r s t"
+LOG_PORT=38666
+LOGVIEW="logview:System@111"
+TIMEOUT="--connect-timeout 20 --max-time 120"
+CLEAN_DATE='s/\[ \] //; s/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} //; s/\[[^][]*\] //'
+
+# appsetting hints expression
+HINTS="invalid.*value.*for setting|Unknown type.*for setting"
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+ICON_PLUS=" (+) "
+ICON_MINUS=" (-) "
+ICON_QUEST=" (?) "
+
+BailOut() {
+  [[ -n $1 ]] && unbuffer echo "$(basename $0): $*" 
+  echo "Usage: $(basename $0) <brand> <enviro> [ticket]"
+  rm -rf $TMP
+	exit 1
+}
+
+BRAND=$1
+ENVIRO=$2
+TICKET=$3
+
+[[ -z $ENVIRO ]] && BailOut
+
+inst=$(get-installation $BRAND $ENVIRO)
+pe=$ENVIRO
+[[ $pe = "qa" ]] && pe=qa1
+SCHEMA=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+[[ -z $SCHEMA ]] && BailOut "Unable to determine schema"
+POM="$DEVOPS/$FRONTEND/$BRAND/$pe/pom.xml"
+SERVICE=$(svn cat $POM 2>/dev/null|egrep -i "<frontend.datasource.ecomDB.url>|<xcadm.datasource.ecomDB.url>" | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z" | awk -F [/:] '{ print $NF }')
+[[ -z $SERVICE ]] && BailOut "Unable to determine db service"
+OVERRIDE_URL="$DEVOPS/$PROPERTIES/$SERVICE/$SCHEMA/$BRAND/override/override.properties"
+svn cat $OVERRIDE_URL > /dev/null || BailOut "Unable to svn cat $OVERRIDE_URL"
+
+TMP=/tmp/$(basename $0)-$BRAND-$ENVIRO
+rm -rf $TMP
+mkdir -p $TMP
+svn co -q $(dirname $OVERRIDE_URL) $TMP || BailOut "Unable to clone $OVERRIDE_URL"
+OVERRIDE=$TMP/override.properties
+MESSAGE=$TMP/problems-$BRAND-$ENVIRO.txt
+
+# look for problems in the jenkins appsetting job
+DB=$(getschema $BRAND $ENVIRO | awk -F: '{ print $2 }')
+JOB=$(get-appsetting-job $BRAND $ENVIRO)
+RESULT=$(curl -sqk $JENKINS_URL/job/$JOB/lastBuild/api/json?tree=result | jq -r .result | tr "[:upper:]" "[:lower:]")
+echo "Appsetting job $JOB result $RESULT $JENKINS_URL/job/$JOB"
+curl -sqk $JENKINS_URL/job/$JOB/lastBuild/consoleText --output $TMP/$JOB.txt
+cat $TMP/$JOB.txt | egrep -i "RuntimeException" | grep -i "\.$ENVIRO\." | 
+while read prob
+do
+  prob=$(echo "$prob" | sed -es/"java.lang.RuntimeException: "//gi -es/"\[java\]"//gi -es/'^ *'//g)
+  echo "*** $prob"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO} $BRAND $ENVIRO Appsetting validation issues {noformat:title=$OVERRIDE_URL}$prob{noformat}"
+done
+
+# check for issues in svn
+for type in $TYPES
+do
+  for setting in $(grep -i "\.${ENVIRO}\.${type}=" $OVERRIDE | awk -F\. '{ print $1 "." $2 }' | sort -u)
+  do
+    #c=$(grep "^$setting\." $OVERRIDE | grep "\.$ENVIRO\." | wc -l | awk '{ print $NF }')
+    c=$(grep -i "^$setting\.${ENVIRO}\.${type}=" $OVERRIDE | awk -F\. '{ print $1 "." $2 }' | wc -l | awk '{ print $NF }')
+    if [[ $c -gt 1 ]]
+    then 
+      rm -f $MESSAGE
+      echo "*** $(basename $0): $BRAND $ENVIRO - $setting has more than one record in svn" | tee -a $MESSAGE
+      grep "^$setting\.${ENVIRO}\.${type}=" $OVERRIDE | tee -a $MESSAGE
+      echo | tee -a $MESSAGE
+
+      [[ -e $MESSAGE && -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO} $BRAND $ENVIRO Appsetting validation issues {noformat:title=$OVERRIDE_URL}$(cat $MESSAGE){noformat}"
+    fi
+  done
+done
+
+# check for log messages
+HOST=$(gethost $BRAND $ENVIRO)
+LOG="https://$HOST:$LOG_PORT/wsgc-tomcat-frontend/application.log"
+MESSAGE=$(curl -sq --user $LOGVIEW $LOG | egrep -i "$HINTS" | sed -r "$CLEAN_DATE" | awk -F '\\[ - \\] - ' '{ print $2 }' | sort -u | tail -10 )
+if [[ -n $MESSAGE ]]
+then
+  echo "$MESSAGE"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO} $BRAND $ENVIRO Appsetting validation issues {noformat:title=$LOG}$MESSAGE{noformat}"
+fi
+
+rm -rf $TMP
+
+exit 0

@@ -1,0 +1,46 @@
+#!/bin/bash
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:~/bin
+
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "Usage: $(basename $0) <brand> <enviro>" >&2
+  exit 1
+}
+
+homogenize() {
+  prop=$1
+  prop=$(sed -es/${BRAND}imgs/'\${frontend.brand}imgs'/g <<< $prop)
+  echo "$prop"
+}
+
+BRAND=$1
+ENVIRO=$2
+TICKET=$3
+
+[[ -z $ENVIRO ]] && BailOut
+
+POM=$FRONTEND/$BRAND/$ENVIRO/pom.xml
+
+CAT_IMAGE=$(homogenize $(svn --non-interactive cat $POM | grep -i "frontend.secureCatImageBase" | awk -F '[<>]' '{ print $3 }'))
+DOC_IMAGE=$(homogenize $(svn --non-interactive cat $POM | grep -i "frontend.secureDocImageBase" | awk -F '[<>]' '{ print $3 }'))
+CNT_IMAGE=$(homogenize $(svn --non-interactive cat $POM | grep -i "frontend.secureContentImageBase" | awk -F '[<>]' '{ print $3 }'))
+
+[[ -z $CAT_IMAGE || -z $DOC_IMAGE || -z $CNT_IMAGE ]] && BailOut "Can't find image paths:
+CAT_IMAGE=$CAT_IMAGE
+DOC_IMAGE=$DOC_IMAGE
+CNT_IMAGE=$CNT_IMAGE "
+
+#set -x
+jenkins-jnlp build -s update-content-paths \
+  -p TriggerDeployment=false \
+  -p UpdateADG=true \
+  -p Brand=$BRAND \
+  -p Environment=$ENVIRO \
+  -p Custom_CatImageBase=\'$CAT_IMAGE\' \
+  -p Custom_DocImageBase=\'$DOC_IMAGE\' \
+  -p Custom_ContentImageBase=\'$CNT_IMAGE\' \
+  -p Ticket=$TICKET
+
+exit 0

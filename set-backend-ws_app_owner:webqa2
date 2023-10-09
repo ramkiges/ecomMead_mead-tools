@@ -1,0 +1,135 @@
+#!/bin/bash
+# backend setting scriptlet for eqa1
+#
+echo "/// [$(basename $0)-ws_app_owner] Backend settings for $BRAND $ENVIRO $BACKEND ///"
+
+[[ -z $BRAND || -z $ENVIRO || -z $BACKEND ]] && { echo "*** This script is not meant to be run standalone - use 'set-backend' ***"; exit 255; }
+
+#eval $SMP -s catalog-pb -p shared -v qa-shared 
+#eval $SMP -s pricing -p shared -v qa-shared 
+
+echo "* update $(basename  $VALUES)"
+#set -x
+#yq eval -i ".\"services\".\"globalMfe\".\"uri\" = \"https://ecommerce-ecom-app-global-eqa1.services.west.nonprod.wsgc.com/\"" $VALUES
+##yq eval -i ".\"services\".\"mfeConfig\".\"uri\" = \"https://ecommerce-ecom-app-config-all-$ENVIRO.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"shopMfe\".\"uri\" = \"https://ecommerce-ecom-app-shop-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"inventoryAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-uat3.services.west.nonprod.wsgc.com/api/inventory/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"catalogAppService\".\"uri\" = \"https://WS-ecommerce-ecom-svc-catalog-uat3.services.west.nonprod.wsgc.com/api/catalog/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"orderservicingMfe\".\"uri\" = \"https://ecommerce-ecom-app-order-servicing-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"customerMfe\".\"uri\" = \"https://ecommerce-ecom-app-customer-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"EcomSvcCusotmer\".\"uri\" = \"https://ecommerce-ecom-svc-customer-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"orderservicingMfe\".\"uri\" = \"https://ecommerce-ecom-app-order-servicing-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"orderServicing\".\"uri\" = \"https://ecommerce-ecom-svc-order-servicing-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"svcPhygital\".\"uri\" = \"https://ecommerce-ecom-svc-phygital-uat.services.west.nonprod.wsgc.com/api/phygital/v1/\"" $VALUES
+#yq eval -i ".\"services\".\"productMfe\".\"uri\" = \"https://ecommerce-ecom-app-product-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"registryAppService\".\"uri\" = \"https://ecommerce-ecom-svc-registry-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#yq eval -i ".\"services\".\"registryMfe\".\"uri\" = \"https://ecommerce-ecom-app-registry-uat3.services.west.nonprod.wsgc.com/\"" $VALUES
+#{ set +x; } 2>/dev/null
+
+echo "* update appsettings"
+#set -x
+
+#$UPDATE_SETTING JMSPFX.INVENTORY_RESERVATION.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.ORDER_CREATE.s=Q.WSI.STST.
+
+$UPDATE_SETTING  PRODUCT_CONFIGURATOR.SERVICE_URI.r=https://eqa1-product-configuration-service-supplychain.services.west.nonprod.wsgc.com/v1/products
+$UPDATE_SETTING INVENTORY.INVENTORY_MICROSERVICE_URI.r=https://ecommerce-inventory-service-uat.services.west.nonprod.wsgc.com/inventory/v2
+
+$UPDATE_SETTING MDM_CATALOG_DATA.PROCESS_PACK_COMPONENT_SKUS.b=true
+$UPDATE_SETTING MDM_CATALOG_DATA.PROCESS_PICKUP_SERVICE_LEVELS.b=true
+$UPDATE_SETTING MDM_PRICE_LABEL.AB_TEST_CODE.s=
+$UPDATE_SETTING MDM_PRICE_LABEL.ENABLED.b=true
+$UPDATE_SETTING MDM_PRICE_LABEL.MDM_REG_PRICE_ENABLED.b=true
+$UPDATE_SETTING MDM_PRICE_LABEL.USE_RETAIL_PRICE.b=true
+
+$UPDATE_SETTING SINGLE_PAGE_CHECKOUT.CARE_CENTER_REDIRECT_BASE_URL.r=https://eqa3-ccui.wsgc.com/oms/#/detail/order/default/
+
+$UPDATE_SETTING BRAND_CREDIT_CARD.REWARD_SUMMARY_SERVICE_URL.r=https://enterprise-credit-card-orchestration-uat.services.west.nonprod.wsgc.com/creditcard-orchestration/v1/loyaltyCards/rewardSummary/COF/
+$UPDATE_SETTING BRAND_CREDIT_CARD.CREDIT_CARD_PRE_ENROLLMENT_URL.s=https://enterprise-credit-card-orchestration-uat.services.west.nonprod.wsgc.com/creditcard-orchestration/v1/card-application/pre-enrollment
+$UPDATE_SETTING BRAND_CREDIT_CARD.CREDIT_ORCHESTRATION_CONSENTED_ACCOUNT_URL.s=https://enterprise-credit-card-orchestration-uat.services.west.nonprod.wsgc.com/creditcard-orchestration/v1/link/current-account-ids
+$UPDATE_SETTING BRAND_CREDIT_CARD.CREDIT_ORCHESTRATION_GET_CARD_DETAILS_URL.s=https://enterprise-credit-card-orchestration-uat.services.west.nonprod.wsgc.com/creditcard-orchestration/v1/card-application/account-details
+#$UPDATE_SETTING BRAND_CREDIT_CARD.CREDIT_ORCHESTRATION_LINKING_URL.s=https://enterprise-credit-card-orchestration-uat.services.west.nonprod.wsgc.com/creditcard-orchestration/v1/link/partner-accounts
+$UPDATE_SETTING BRAND_CREDIT_CARD.CREDIT_ORCHESTRATION_PRESCREEN_ACKNOWLEDGEMENT_URL.s=https://enterprise-credit-card-orchestration-uat.services.west.nonprod.wsgc.com/creditcard-orchestration/v1/prescreen/acknowledgment
+$UPDATE_SETTING BRAND_CREDIT_CARD.CREDIT_ORCHESTRATION_PRESCREEN_URL.s=https://enterprise-credit-card-orchestration-uat.services.west.nonprod.wsgc.com/creditcard-orchestration/v1/prescreen/offer-eligibility
+#$UPDATE_SETTING BRAND_CREDIT_CARD.VCN_CREDIT_ORCHESTRATION_LINKING_URL.s=https://enterprise-credit-card-orchestration-uat.services.west.nonprod.wsgc.com/creditcard-orchestration/v1/link/virtual-card
+
+$UPDATE_SETTING PRICING.PROMOTION_SERVICE_URI.r=https://pricing-qa7.wsgc.com
+$UPDATE_SETTING PRICING.PRICING.SERVICE_URI.r=https://pricing-qa7.wsgc.com
+
+$UPDATE_SETTING COMREG.REG_STS_COOKIENAME.s=${BRAND_UC}MX_REGSTS_QA
+
+$UPDATE_SETTING COMPRF.PERSISTENT_METRICS_COOKIE.s=${BRAND_UC}_PCMETRICS_COOKIE_QA
+$UPDATE_SETTING COMPRF.PRF_COOKIENAME.s=${BRAND_UC}MX_SIGNIN_QA
+$UPDATE_SETTING COMPRF.USER_PERSIST_COOKIE_NAME.s=${BRAND_UC}MX_PERSIST_COOKIE_QA
+$UPDATE_SETTING COMPRF.ACCT_COOKIENAME.s=${BRAND_UC}MX_ACCT_QA
+$UPDATE_SETTING COMPRF.TEXT_ME_OFFERS_ENABLED.b=false
+
+$UPDATE_SETTING COMSES.DATATABLE.s=${BRAND_UC}PE_SESSION_DATA
+$UPDATE_SETTING COMSES.INFOTABLE.s=${BRAND_UC}PE_SESSION_INFO
+$UPDATE_SETTING COMSES.COOKIENAME.s=${BRAND_UC}PE_SID_QA2
+$UPDATE_SETTING COMSES.POTENTIALSECURECOOKIENAME.s=${BRAND_UC}PE_PSSID_QA2
+$UPDATE_SETTING COMSES.SECURECOOKIENAME.s=${BRAND_UC}PE_SSID_QA2
+
+$UPDATE_SETTING COMCRT.SAVEDCARTCOOKIE.s=${BRAND_UC}MX_SAVEDCART_QA
+$UPDATE_SETTING COMCRT.SESSIONCARTCOOKIE.s=${BRAND_UC}MX_SESCART_QA
+$UPDATE_SETTING COMCAT.BANNERCOOKIE.s=${BRAND_UC}MX_BANNERS_QA
+$UPDATE_SETTING COMCRT.MAXSESSIONTIME.t=1,1,0,0
+
+$UPDATE_SETTING CHKT.KAFKA_TOPIC_PREFIX.s=QA1.B.
+$UPDATE_SETTING AFFIRM.EPS_TOKEN_SCHEME.s=AFP_PMNT_QA
+$UPDATE_SETTING VENMO.EPS_TOKEN_SCHEME.s=BTVT_PMNT_QA
+$UPDATE_SETTING CART_CHECKOUT.SERVICE_URI.r=https://ecommerce-cart-checkout-${REALM}.services.west.nonprod.wsgc.com/cartservice/v1/domain/
+$UPDATE_SETTING ORDER_HISTORY_SERVICE.URL.s=https://eqa1-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/orderservice/v1/history/
+$UPDATE_SETTING ORDER_SERVICE.URL.s=https://eqa1-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/orderservice/v1/orders/
+$UPDATE_SETTING SELF_SERVICE.APPOINTMENTS_URL.s=https://eqa1-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/appointment/v1/workorders/
+$UPDATE_SETTING SELF_SERVICE.RESCHEDULE_ELIGIBILITY_URL.s=https://eqa1-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/appointment/reschedule/v1/workorders/
+$UPDATE_SETTING SINGLE_PAGE_CHECKOUT.CARE_CENTER_REDIRECT_BASE_URL.r=https://eqa3-ccui.wsgc.com/oms/#/detail/order/default/
+$UPDATE_SETTING TRACKING_SERVICE.URL.s=https://eqa1-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/trackingservice/v1/
+$UPDATE_SETTING TRACKING_SERVICE.THIRD_PARTY_SERVICE_URI.r=https://eqa2-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/shipments/tracking/details
+$UPDATE_SETTING LOYALTY.KAFKA_TOPIC_PREFIX.s=QA1.L.
+$UPDATE_SETTING UPS_TRACKING_SERVICE.SERVICE_URI.r=https://tibinttstmp7p.wsgc.com:19109/v1/GetTrackingDetails
+$UPDATE_SETTING PAYMENT.TOKENIZATION_EPS_URLS.a=https://tibinttstmp7p.wsgc.com:19092/paymentservice/v1
+$UPDATE_SETTING ORDER_RETURN_DETAILS_SERVICE.SERVICE_URI.r=https://tibinttstmp7p.wsgc.com:19105/v1/GetOrderReturnEligibility
+$UPDATE_SETTING ORDERSCREENING.SERVICE_URL.s=https://tibinttstmp7p.wsgc.com:19096/ecommerce/orderfraudscreening
+$UPDATE_SETTING INVENTORY_OMS_RESERVATION_REST.SERVICE_URI.r=https://tibinttstmp7p.wsgc.com:19110
+$UPDATE_SETTING INVENTORY_OMS_REST.SERVICE_URI.r=https://tibinttstmp7p.wsgc.com:19104
+$UPDATE_SETTING PAYMENT.TOKENIZATION_EPS_SCC_SCHEME.s=WSI_SCC_QA
+{ set +x; } 2>/dev/null
+
+echo "* update $(basename $POM)"
+#set -x
+propset -f $POM -p frontend.jmsOrderCreate.password -v fastqa1
+propset -f $POM -p frontend.jmsOrderCreate.providerUrl -v tcp://tibintpprdrk1p.wsgc.com:10006
+propset -f $POM -p frontend.jmsOrderCreate.username -v appecomqa1
+propset -f $POM -p frontend.jmsOrder.password -v fastqa1
+propset -f $POM -p frontend.jmsOrderPricing.password -v fastqa1
+propset -f $POM -p frontend.jmsOrderPricing.providerUrl -v tcp://tibintpprdrk1p.wsgc.com:10008
+propset -f $POM -p frontend.jmsOrderPricing.username -v appecomqa1
+propset -f $POM -p frontend.jmsOrder.providerUrl -v tcp://tibinttstmp3p.wsgc.com:20011
+propset -f $POM -p frontend.jmsOrderReservation.password -v fastqa1
+propset -f $POM -p frontend.jmsOrderReservation.providerUrl -v tcp://tibintpprdrk1p.wsgc.com:10006
+propset -f $POM -p frontend.jmsOrderReservation.username -v appecomqa1
+propset -f $POM -p frontend.jmsOrder.username -v apptibco
+propset -f $POM -p frontend.jms.password -v fastqa1
+propset -f $POM -p frontend.jms.providerUrl -v tcp://tibintpprdrk1p.wsgc.com:10006
+propset -f $POM -p frontend.jms.subscriberClientId -v @NODENAME@
+propset -f $POM -p frontend.jms.username -v apptibco
+propset -f $POM -p frontend.jmsWismo.password -v n3tw0rk
+propset -f $POM -p frontend.jmsWismo.passwordCov2 -v n3tw0rk
+propset -f $POM -p frontend.jmsWismo.providerUrl -v tcp://tibinttstmp1p.wsgc.com:20001
+propset -f $POM -p frontend.jmsWismo.username -v apptibco
+propset -f $POM -p frontend.jmsWismo.usernameCov2 -v apptibco
+{ set +x; } 2>/dev/null
+
+if [[ $MARKET = "CAN" ]]
+then
+  echo "* update $MARKET-specific settings"
+set -x
+  #yq eval -i ".\"services\".\"shopMfe\".\"uri\" = \"https://ecommerce-ecom-app-shop-eqa1.services.west.nonprod.wsgc.com/\"" $VALUES
+
+  #$SMP -s ecom-svc-catalog -p shared -v ca4-shared
+
+  #$UPDATE_SETTING GEO_PROVINCES_API.STATES_PROVINCES_URL.s=https://ecommerce-ecom-svc-customer-eqa1.services.west.nonprod.wsgc.com/api/geo/v1/provinces.json
+{ set +x; } 2>/dev/null
+fi
+

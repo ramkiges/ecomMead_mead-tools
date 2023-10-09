@@ -1,0 +1,319 @@
+#!/bin/bash
+# deprecated - use the Jenkins job
+exit 1
+
+# script to handle cat generation, instead of using the web page
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin:$PATH
+TMP=/tmp/cat
+export SSHOPTS="-o StrictHostKeyChecking=no"
+DST_HOST=locker-dev-rk2v
+UAT_HOST=buildsystem-uat2-rk1v
+PRD_HOST=vaultprdrk1v
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <brand> <env> <generation#> [now|validate]"
+	echo
+	exit 1
+}
+
+BRAND=$1
+ENV=$2
+GEN=$3
+ACTION=$4
+
+PAUSE=4
+SLEEP=15
+
+DIR2GEN=$(which dir2gen)
+[ -z "$DIR2GEN" ] && BailOut "Can't find dir2gen"
+GEN2DIR=$(which gen2dir)
+[ -z "$GEN2DIR" ] && BailOut "Can't find gen2dir"
+
+WSI_SETTINGS=$(which wsi_settings 2>/dev/null)
+[ -z "$WSI_SETTINGS" ] && BailOut "Can't find wsi_settings"
+
+mkdir -p $TMP
+
+[ -z "$ENV" ] && BailOut 
+
+export SSHUSER="a_${LOGNAME}"
+
+for pdir in ~/ ~/wsgc /wsgc
+do
+	[ -f $pdir/.pass ] && export SSHPASS="$(cat $pdir/.pass)"
+done
+
+# translate the generation to the expected generation file name 
+# https://confluence.wsgc.com/display/ES/Stage+WCM+UAT+product+build+to+non-prod+frontend
+
+PRD_DIR=/apps/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild
+SRC_DIR="/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild"
+DST_DIR="/apps/buildsystem/wcmbuilds/${BRAND}dpcatalogdatabuild"
+WCM_HOST_QA=${BRAND}-wcm-qa1-sac1v
+WCM_HOST_UAT=${BRAND}-wcm-uat1-rk1v
+SUMMARY=$(geturls $BRAND $ENV | grep -i summary.html | awk '{ print $1 }')
+CURRENT=$(curl -s -k -H 'Cache-Control: no-cache' $SUMMARY 2>/dev/null |grep -iw "cat" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{print $1 }')
+#ENDECA=$(curl -s -k -H 'Cache-Control: no-cache' $SUMMARY 2>/dev/null |grep -w "endeca" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{print $1 }')
+
+if [ -z "$GEN" -o "$GEN" = "latest" -o "$GEN" = "latest-qa" -o "$GEN" = "latest-prod" ] 
+then
+	[ -n "$CURRENT" ] && echo "Current Generation $BRAND $ENV: $CURRENT"
+	[ -n "$ENDECA" ] && echo "Current Endeca  $BRAND $ENV: $ENDECA"
+
+	latest_qa=$(ssh $SSHOPTS $SSHUSER@$UAT_HOST "ls -t $SRC_DIR/| grep -- '-4[0-9][0-9]' | head -1 " 2>/dev/null)
+	latest_qa=$($DIR2GEN "$latest_qa")
+	latest_prod=$(ssh $SSHOPTS $SSHUSER@$PRD_HOST "ls -t $PRD_DIR/| grep -- '-3[0-9][0-9]' | head -1 " 2>/dev/null)
+	latest_prod=$($DIR2GEN "$latest_prod")
+
+	if [ -z "$GEN" ]
+	then
+		echo
+		echo "Latest QA: $latest_qa"
+		echo "Available Generations - QA:"
+		sleep $PAUSE
+		for file in $(ssh $SSHOPTS $SSHUSER@$UAT_HOST "ls -t $SRC_DIR/| head -3 " 2>/dev/null)
+		do
+			echo "	$($DIR2GEN $file)"
+		done
+		echo
+
+		sleep $PAUSE
+		echo "Latest Prod: $latest_prod"
+		echo "Available Generations - prod:"
+		sleep $PAUSE
+		#for file in $(ssh $SSHOPTS $SSHUSER@$PRD_HOST "ls -t $PRD_DIR/ " 2>/dev/null)
+		for file in $(ssh $SSHOPTS $SSHUSER@$PRD_HOST "ls -t $PRD_DIR/| head -3 " 2>/dev/null)
+		do
+			echo "	$($DIR2GEN $file) [$file]"
+		done
+		exit 0
+	fi
+
+	if [ "$GEN" = "latest" -o "$GEN" = "latest-qa" ]
+	then
+		echo "Using $latest_qa from qa"
+		eval $0 $BRAND $ENV $latest_qa $ACTION
+		exit 0
+	fi
+
+	if [ "$GEN" = "latest-prod" ]
+	then
+		echo "Using $latest_prod from prod"
+		eval $0 $BRAND $ENV $latest_prod $ACTION
+		exit 0
+	fi
+
+	echo
+	[ -z "$3" ] && BailOut
+fi
+
+#echo "GEN=$GEN"
+#G="${GEN:0:1}"
+#S="${GEN:(-2)}"
+#B="${GEN:0:${#GEN}-2}"
+#B="${B:1}"
+#BUILD="wcm-build-20${B}-${G}${S}"
+BUILD=$($GEN2DIR $GEN)
+[ -z "$BUILD" ] && BailOut "Build is blank!"
+ZIP=/tmp/${BUILD}.zip
+rm -rf $TMP/$BUILD $ZIP $TMP/$GEN
+
+# these are used for testing
+#sshpass -e ssh $SSHOPTS $SSHUSER@$DST_HOST "ls -lt $DST_DIR"
+#sshpass -e ssh $SSHOPTS $SSHUSER@$UAT_HOST "ls -lt $SRC_DIR/| head " 2>/dev/null
+#sshpass -e ssh $SSHOPTS $SSHUSER@$UAT_HOST "ls -lt $SRC_DIR/${BUILD}*" 2>/dev/null
+
+SOURCE=${GEN:0:1}
+if [ "$SOURCE" = 3 ] # production
+then
+	CAT=$(ssh $SSHOPTS $SSHUSER@$PRD_HOST "ls -1dt $PRD_DIR/${BUILD}" 2>/dev/null)
+    scp -q $SSHOPTS -qr $SSHUSER@$PRD_HOST:$CAT $TMP 2>/dev/null
+	sleep $PAUSE
+else
+	CAT=$(ssh $SSHOPTS $SSHUSER@$UAT_HOST "ls -1dt $SRC_DIR/${BUILD}" 2>/dev/null)
+fi
+
+##[ -z "$CAT" ] && CAT=$(sshpass -e ssh $SSHOPTS $SSHUSER@$PRD_HOST "ls -1dt $PRD_DIR/${BUILD}* | head -1 " 2>/dev/null)
+##[ -z "$CAT" ] && CAT=$(sshpass -e ssh $SSHOPTS $SSHUSER@$UAT_HOST "ls -1dt $SRC_DIR/${BUILD}* | head -1 " 2>/dev/null)
+[ -z "$CAT" ] && CAT=$(ssh $SSHOPTS $SSHUSER@$UAT_HOST "ls -1dt $SRC_DIR/${BUILD}* | head -1 " 2>/dev/null)
+if [ -z "$CAT" ]
+then
+	LCAT=$(ssh $SSHOPTS $SSHUSER@$DST_HOST "ls -1dt $DST_DIR/${BUILD}" 2>/dev/null)
+	# this means the file has already been staged
+	if [ -n "$LCAT" ] 
+	then
+		STAGED=1
+		echo "$BUILD already staged on $DST_HOST"
+		scp $SSHOPTS -qr $SSHUSER@$DST_HOST:$DST_DIR/$BUILD $TMP/$CAT 2>/dev/null
+	    scp $SSHOPTS -qr $TMP/$CAT $SSHUSER@$DST_HOST:$DST_DIR/${BUILD} 2>/dev/null
+		sleep $PAUSE
+	fi
+fi
+[ -z "$CAT" -a -z "$LCAT" ] && BailOut "Couldn't find $BUILD @ $UAT_HOST:$SRC_DIR/$BUILD or $DST_HOST:$DST_DIR/$BUILD "
+
+# if the file hasn't been staged, stage it
+if [ -z "$STAGED" ]
+then
+	echo "Staging $CAT to localhost"
+	scp $SSHOPTS -qr $SSHUSER@$UAT_HOST:$CAT $TMP 2>/dev/null
+	sleep $PAUSE
+	CAT=$(basename $CAT)
+	[ -d $TMP/$CAT ] || BailOut "Unable to copy $CAT"
+
+	find $TMP/$CAT -type d -exec chmod ugo+rwx {} \;
+	find $TMP/$CAT -type f -exec chmod ugo+rw {} \;
+
+	echo "Copying $CAT to $DST_HOST:$DST_DIR"
+	scp $SSHOPTS -qr $TMP/$CAT $SSHUSER@$DST_HOST:$DST_DIR 2>/dev/null
+	sleep $PAUSE
+	D=$(ssh $SSHOPTS $SSHUSER@$DST_HOST "ls -d $DST_DIR/$CAT" 2>/dev/null)
+	#echo "D: $D"
+	if [ ! "$D" ]
+	then
+		echo "Couldn't copy $CAT to $UAT_HOST:$SRC_DIR"
+		exit 1
+	fi
+fi
+
+# make a local copy using the generation number as the name
+cp -r $TMP/$BUILD $TMP/$GEN 
+find $TMP/$GEN -type d -exec chmod ugo+rwx {} \;
+find $TMP/$GEN -type f -exec chmod ugo+rw {} \;
+
+## create zip fle
+#pushd $TMP/$GEN
+#zip $ZIP *
+#popd
+#chmod 666 $ZIP
+
+# stage that on the WCM host - there are cases where people need to import it directly to /wcm/publish/exports/ (but as the tomcat user)
+#scp $SSHOPTS -qr $TMP/$GEN $SSHUSER@$WCM_HOST_QA:/tmp #2>/dev/null &
+#ssh $SSHOPTS $SSHUSER@$WCM_HOST_QA "ls -l /tmp/$GEN 2>/dev/null" 
+
+POM=$($WSI_SETTINGS --brand $BRAND --env $ENV get pom | grep -i "path:" | awk -F: '{ print $2 }')
+[ -z "$POM" ] && BailOut "Can't get POM for $BRAND $ENV"
+OVERRIDE=$($WSI_SETTINGS --brand $BRAND --env $ENV get override | grep -i "path:" | awk -F: '{ print $2 }')
+[ -z "$OVERRIDE" ] && BailOut "Can't get OVERRIDE for $BRAND $ENV"
+SCHEMA=$(echo "$OVERRIDE" | awk -F/ '{ print $(NF-4) }')
+OWNER=$(echo "$OVERRIDE" | awk -F/ '{ print $(NF-3) }')
+#echo "POM: $POM"
+
+SCRIPT=/tmp/setcat-$BRAND-$ENV-$GEN.sh
+SCRIPT_OUT=/tmp/setcat-$BRAND-$ENV-$GEN.out
+
+# translations because our naming isn't consistent
+DB_ENV=$(get-installation $BRAND $ENV)
+#[ "$ENV"  = "qa1" ] && DB_ENV="qa"
+#[ "$ENV"  = "rgs1" ] && DB_ENV="regression"
+#[ "$ENV"  = "int" ] && DB_ENV="integration"
+#[ "$ENV"  = "int1" ] && DB_ENV="integration"
+#[ "$ENV"  = "int2" ] && DB_ENV="integration2"
+
+DIR="/apps/bgb/apps/biggreenbutton/scripts/automated-staging"
+[ "$SCHEMA" = "webqa2" ] && CMD="./clientside-singleton-stageActivate-wcm.sh $BRAND $GEN $DB_ENV"
+[ "$SCHEMA" = "webqa1" ] && CMD="./clientside-singleton-stageActivate-wcm_webqa1_d1_app_owner.sh $BRAND $GEN $DB_ENV"
+[ "$OWNER" = "r1_app_owner" ] && CMD="./clientside-singleton-stageActivate-wcm_webqa1_r1_app_owner.sh $BRAND $GEN $DB_ENV"
+[ -z "$CMD" ] && BailOut "Don't have a match for schema $SCHEMA"
+
+# create a scriptlet to run on the builder machine
+cat > $SCRIPT << EOF
+#!/bin/bash
+BUILD="$BUILD"
+WCM_HOST_QA="$WCM_HOST_QA"
+WCM_HOST_UAT="$WCM_HOST_UAT"
+SSHOPTS="$SSHOPTS"
+DST_DIR="$DST_DIR"
+BRAND=$BRAND
+GEN=$GEN
+DB_ENV=$DB_ENV
+
+BailOut() {
+	[ -n "\$1" ] && echo "\$*"
+	echo "Usage: \$(basename \$0)"
+	echo
+	exit 1
+}
+
+
+if [ "\$LOGNAME" != 'imageuser' ]
+then
+	echo "Please run this as 'imaguser' instead of \$(whoami)"
+	exit 1
+fi
+
+cd $DIR || BailOut "Fail: can't cd to $DIR"
+$CMD
+ret=\$?
+echo "Activate return: \$ret"
+
+find \$DST_DIR/\$BUILD -type d -exec chmod ugo+rwx {} \; 2>/dev/null
+find \$DST_DIR/\$BUILD -type f -exec chmod ugo+rw {} \; 2>/dev/null
+
+#echo "Copying \$GEN to \$WCM_HOST_QA:\$DST_DIR/\$BUILD"
+#scp -qr \$SSHOPTS \$DST_DIR/\$BUILD \$WCM_HOST_QA:/wcm/publish/exports/\$GEN
+
+#echo "Copying \$GEN to \$WCM_HOST_UAT:\$DST_DIR/\$BUILD"
+#scp -qr \$SSHOPTS \$DST_DIR/\$BUILD \$WCM_HOST_UAT:/wcm/publish/exports/\$GEN
+
+# /wsgc/svn/devops/application/wcm/qa/config/cm/trunk/pom.xml - contains installation ID
+# for WCM RapidBuild, determine 'installation_id' from http://$WCM_HOST_QA:38600/system/console/configMgr 
+# look under .StandardActiveGenerationFetcher. installation id/installation.value
+# eg wcm-qa1 installattion_id = qa5
+# assign the ID below, un-comment, and run this script
+# 2018-06-10
+#UAT#ECOM_INSTALLATION_ID=qa3 - regression now?  MEAD-6402
+#QA#ECOM_INSTALLATION_ID=qa5
+#./clientside-all-stageActivate-wcm.sh \$BRAND \$GEN \$ECOM_INSTALLATION_ID
+
+exit \$ret
+
+EOF
+
+chmod 777 $SCRIPT
+
+wsikey $WCM_HOST_QA </dev/null >/dev/null 2>&1
+wsikey $PRD_HOST </dev/null >/dev/null 2>&1
+wsikey $DST_HOST </dev/null >/dev/null 2>&1
+
+scp $SSHOPTS -qr $SCRIPT $SSHUSER@$DST_HOST:/tmp 2>/dev/null
+sleep $PAUSE
+ssh $SSHOPTS $SCRIPT $SSHUSER@$DST_HOST "chgrp webadmin $SCRIPT" 2>/dev/null
+sleep $PAUSE
+
+#[ -n "$CURRENT" ] && echo "Current Generation $BRAND $ENV: $CURRENT"
+
+# requires ssh key 
+if [ "$ACTION" = "validate" -o "$ACTION" = "now" ] 
+then
+	ssh imageuser@$DST_HOST "sh $SCRIPT > $SCRIPT_OUT 2>&1;echo Upload result: $?"
+
+	if [ "$ACTION" = "validate" ]
+	then
+		for x in 1 2 3 4 5 6 7 8 9 A
+		do
+			CURRENT=$(curl -s -k -H 'Cache-Control: no-cache' $SUMMARY 2>/dev/null |grep -iw "cat" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{print $1 }')
+			[ "$CURRENT" = "$GEN" ] && break
+			#[ -n "$CURRENT" ] && echo "	Validate: Current Generation $BRAND $ENV: $CURRENT"
+			#echo "Waiting ${SLEEP}s "
+			sleep $SLEEP
+			SLEEP=$(expr $SLEEP + 2)
+		done
+	fi
+else
+	echo "Log into $DST_HOST, su to 'imageuser' and run $SCRIPT or ssh imageuser@artrck-vdcn002 'sh $SCRIPT' "
+	#echo "log into WCM host ($WCM_HOST_QA) as 'tomcat' and cp -r /tmp/$GEN /wcm/publish/exports "
+	#echo "log into WCM host ($WCM_HOST_QA) as 'tomcat' and cp -r $ZIP /wcm/publish/exports "
+fi
+
+echo "WCM QA Console: http://$WCM_HOST_QA:38600/system/console/configMgr "
+echo "WCM QA RapidBuild: http://$WCM_HOST_QA:38600/etc/rapidBuild/rapidBuildImportExport.html"
+echo "WCM UAT Console: http://$WCM_HOST_UAT:38600/system/console/configMgr "
+echo "WCM UAT RapidBuild: http://$WCM_HOST_UAT:38600/etc/rapidBuild/rapidBuildImportExport.html"
+
+echo "Validation Link: $SUMMARY"
+CURRENT=$(curl -s -k -H 'Cache-Control: no-cache' $SUMMARY 2>/dev/null |grep -iw "cat" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{print $1 }')
+[ -n "$CURRENT" ] && echo "Current Generation $BRAND $ENV: $CURRENT"
+
+echo
+

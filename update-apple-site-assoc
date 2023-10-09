@@ -1,0 +1,117 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/apps/maven/latest/bin:/apps/java/bin:/apps/emacs-nox-24.5/bin:/home/mavenbuild/bin/devscripts:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/puppetlabs/bin:/home/mavenbuild/bin:~/bin
+export PATH
+
+WSGC=/tmp/wsgc-$(basename $0)
+DEVOPS=https://repos.wsgc.com/svn/devops
+FRONTEND=application/frontend-2.1/qa/config/app/trunk
+ASSOC=src/main/resources/tomcat/conf/apple-app-site-association
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+LOGIN="ptqaenv:ta8PoLe"
+[ -z "$JENKINS" ] && BailOut "Can't find jenkins-jnlp on $(hostname)"
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+	[[ -n $1 ]] && echo "***
+$(basename $0): $*
+***" 
+    cd /tmp
+    #rm -rf $WSGC/$(dirname $FRONTEND)
+
+    exit 1
+}
+
+while getopts ":b:e:f:t:r:" opt 
+do
+    case ${opt} in
+        b ) BRAND=$(echo $OPTARG | tr "A-Z" "a-z") ;;
+        e ) ENV=$(echo $OPTARG | tr "A-Z" "a-z") ;;
+        t ) TICKET=$(tr "a-z" "A-Z" <<< $OPTARG) ;;
+        f ) FILE=$OPTARG ;;
+        r ) RESTART=$OPTARG ;;
+    esac
+
+done
+
+[ -z "$BRAND" ] && BailOut "Need brand"
+[ -z "$ENV" ] && BailOut "Need environment"
+[[ -n $TICKET ]] && MSG=$TICKET || MSG="DEVOPS"
+
+which jq > /dev/null 2>&1 || BailOut "Can't find jq on $(hostname)"
+
+/bin/echo -ne "### Checking out frontend... "
+rm -rf $WSGC/$(dirname $FRONTEND)
+mkdir -p $WSGC/$(dirname $FRONTEND)
+cd $WSGC/$(dirname $FRONTEND) 
+svn -q co $DEVOPS/$FRONTEND $(basename $FRONTEND) || BailOut "Unable checkout frontend"
+echo "Done"
+
+if [[ -n $FILE ]]
+then
+  # install the new association file
+  cd $WSGC/$(dirname $FRONTEND)/trunk/$BRAND/$ENV || BailOut "Could not cd to $(dirname $FRONTEND)/trunk/$BRAND"
+
+  # create the conf directory if it doesn't exist
+  [ -e src/main/resources/tomcat/conf ] || svn mkdir --parents src/main/resources/tomcat/conf
+  echo "$FILE" > $ASSOC
+
+  # convert to unix format
+  echo "### Convert to unix format"
+  dos2unix $ASSOC
+
+  # validate with jq
+  echo "### Validate JSON format"
+  jq -r . $ASSOC >/dev/null || BailOut "Invalid json file"
+
+  echo "### Check into SVN"
+  svn add $ASSOC > /dev/null 2>&1
+  svn propset svn:mime-type text/plain $ASSOC
+  svn propset svn:eol-style native $ASSOC
+  svn propset svn:keywords "Id Author LastChangedDate LastChangedBy" $ASSOC
+  svn commit -q -m "[$MSG] update apple-app-site-association ($BUILD_USER_ID)"
+
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): apple-app-site-association updated for $BRAND $ENV ($BUILD_USER_ID)
+$URL"
+
+  if [[ $RESTART = "true" ]]
+  then
+    echo "### Rebuild frontend config for $BRAND $ENV"
+    eval $JENKINS build -s wsgc-devops-frontend21-qa-single-env -p BRAND=$BRAND -p ENVIRONMENT=$ENV
+    echo "### Re-Deploy frontend for $BRAND $ENV"
+    eval $JENKINS build -s checkenv -p Brand=$BRAND -p Environment=$ENV -p Ticket=$TICKET Options=Deploy-War -p Options=Rebuild-Config 
+  else
+    echo "### Restart not selected"
+  fi
+else
+  echo "### No new file provided"
+fi
+
+echo "### Validate Deployed File ***"
+AKAMAI=$(geturls $BRAND $ENV | grep -i akamai | awk '{ print $NF }')
+URL="$AKAMAI/.well-known/apple-app-site-association"
+SVN="$DEVOPS/$FRONTEND/$BRAND/$ENV/$ASSOC"
+
+svn cat $SVN > /tmp/$BRAND-$ENV-apple-site-assoc-svn.txt
+curl -sqk --user "$LOGIN" $URL > /tmp/$BRAND-$ENV-apple-site-assoc-url.txt
+diff /tmp/$BRAND-$ENV-apple-site-assoc-svn.txt /tmp/$BRAND-$ENV-apple-site-assoc-url.txt >/dev/null 
+if [[ $? -eq 0 ]]
+then
+  echo "*** File 'apple-app-site-association' in SVN and frontend matches ***"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): apple-app-site-association file for $BRAND $ENV deployed and ready for verification"
+else
+  echo "*** File 'apple-app-site-association' in SVN and frontend does not match ***"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}$(basename $0): deployed apple-app-site-association file for $BRAND $ENV does not match SVN"
+fi
+
+echo "### Validation URL: $URL"
+echo "### SVN URL: $SVN"
+
+cd /tmp
+rm -rf $WSGC/$(dirname $FRONTEND)
+
+exit 0
+

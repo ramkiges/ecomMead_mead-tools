@@ -1,0 +1,462 @@
+#!/bin/bash
+# https://confluence.wsgc.com/display/ES/MFE+Config+Automation
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps/mead-tools:/apps/release-tools:/apps/scm-tools:/apps
+#renice -n +20 $$ >/dev/null 2>&1
+
+# time to wait between attempts of various ops
+SLEEP=30
+
+umask 000
+
+# default list of MFEs
+DEFAULT_MFE_FEATURE_LIST="shop global registry customer phygital product order-servicing content checkout"
+
+# constants
+TIMEOUT_PROP="/project/buildWrappers/hudson.plugins.build__timeout.BuildTimeoutWrapper/strategy/timeoutMinutes"
+BOOLEAN_PROP="/project/properties/hudson.model.ParametersDefinitionProperty/parameterDefinitions/hudson.model.BooleanParameterDefinition"
+HIDDEN_PROP="/project/properties/hudson.model.ParametersDefinitionProperty/parameterDefinitions/com.wangyin.parameter.WHideParameterDefinition"
+STRING_PROP="/project/properties/hudson.model.ParametersDefinitionProperty/parameterDefinitions/hudson.model.StringParameterDefinition"
+TRIGGER_PROP="/project/triggers/hudson.triggers.TimerTrigger/spec"
+POLL_PROP="/project/triggers/hudson.triggers.SCMTrigger/spec"
+FLOW_PROP="/flow-definition/properties/EnvInjectJobProperty/info/propertiesContent"
+SLACK_PROP="/project/publishers/jenkins.plugins.slack.SlackNotifier/room"
+#EMAIL_PROP_1="/project/publishers/hudson.tasks.Mailer/recipients"
+EMAIL_PROP_2="/project/publishers/hudson.plugins.emailext.ExtendedEmailPublisher/configuredTriggers/hudson.plugins.emailext.plugins.trigger.FailureTrigger/email/recipientList"
+EMAIL_PROP_3="/project/publishers/hudson.plugins.emailext.ExtendedEmailPublisher/recipientList"
+GHE_PROP_URL="/project/scm/userRemoteConfigs/hudson.plugins.git.UserRemoteConfig"
+GHE_PROP_BRANCH=
+
+JENKINS_JOBS=git@github.wsgc.com:eCommerce-DevOps/jenkins-jobs.git
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+JENKINS_TEMPLATES=git@github.wsgc.com:eCommerce-DevOps/jenkins-templates.git
+JENKINS_K8S=$JENKINS_URL/job/k8s-deployers/job/ecom/job
+DATE=$(date +'%Y-%m-%d %H:%M')
+DISABLED=false
+
+export GIT_MERGE_AUTOEDIT=no
+
+BailOut() {
+  echo
+	[[ -n $1 ]] && echo ">>> ERROR: $*" >&2
+  echo
+  rm -rf $TMP 
+  exit 255
+}
+
+# this function tries to parse the helm org/repo from the Jenkins static deployer
+fetchJenkins() {
+  app=$1
+
+  ENV_LIST="$ENVIRO"
+  [[ $ENVIRO = "rgs1" || $ENVIRO = "regression" ]] && ENV_LIST="rgs1 regression"
+  [[ $ENVIRO = "uat1" || $ENVIRO = "uat" ]] && ENV_LIST="uat uat1"
+  [[ $ENVIRO = "qa" || $ENVIRO = "qa1" ]] && ENV_LIST="qa qa1"
+
+  for env in $ENV_LIST
+  do
+    STATIC="$JENKINS_K8S/$app/job/$env/config.xml"
+    curl --user "$LOGIN" -fsqk $STATIC >/dev/null 2>&1 && break
+  done
+
+  curl --user "$LOGIN" -fsqk $STATIC >/dev/null 2>&1
+  if [[ $? -ne 0 ]]   
+  then
+    #echo "/// No static deployer for $app [$ENV_LIST] /info only/ ///"; 
+    MFE_ORG="eCommerce-Bedrock"
+    MFE_BRANCH="release"
+    return
+  fi
+
+  # display the link to the static deployer
+  #curl --user "$LOGIN" -fsqk $STATIC >/dev/null 2>&1 && echo "/// Static deployer for $app: $STATIC ///" | sed -es%/config.xml%%g
+
+  HELM=$(curl --user "$LOGIN" -sfqk $STATIC \
+    | sed -es/"xml version='1.1'"/"xml version='1.0'"/g \
+    | xmlstarlet sel -t -c "$FLOW_PROP" 2>/dev/null \
+    | grep "PROJECT_APP_JOB="  \
+    | awk -F= '{ print $2 }' \
+    | sed -es%'<propertiesContent>'%%g -es%'</propertiesContent>'%%g
+   )
+
+  if [[ $HELM =~ http ]]
+  then
+    HELM=$(sed -es%https://%%g <<< $HELM)
+    HELM=$(sed -es%/tree%%g <<< $HELM)
+    HELM=$(sed -es%github.wsgc.com/%%g <<< $HELM)
+    #echo "HELM: $HELM"
+  fi
+
+  MFE_ORG=$(echo $HELM | awk -F/ '{ print $1 }')
+  MFE_BRANCH=$(echo $HELM | awk -F/ '{ print $3 }')
+
+  # if org/branch are empty, set a reasonable default
+  [[ -z $MFE_ORG ]] && MFE_ORG="eCommerce-Bedrock"
+  [[ -z $MFE_BRANCH ]] && MFE_BRANCH="release"
+
+  echo "$FUNCNAME: $app/$MFE_ORG/$MFE_BRANCH"
+}
+
+updateManifest() {
+  app_branch=$1
+  #[[ $MANIFEST =~ true ]] && { echo "MANIFEST is true - skipping"; return; }
+  echo "
+>>> $FUNCNAME $app_branch <<<"
+
+  # extract the app name/org/branch
+  local org=$(awk -F/ '{ print $1 }' <<< $app_branch) 
+  local app=$(awk -F/ '{ print $2 }' <<< $app_branch) 
+  local bch=$(awk -F/ '{ print $3 }' <<< $app_branch) 
+  local ver=$(awk -F/ '{ print $4 }' <<< $app_branch) 
+  [[ $app =~ ecom-app-config ]] && { echo "Skipping $app"; continue; }
+
+  [[ -n $BUILD_USER_ID ]] && RUNBY=$BUILD_USER_ID
+  [[ -n $EMAIL ]] && RUNBY=$EMAIL
+
+  # the manifest update has been moved to a separate job
+  if [[ -n $ver ]]
+  then
+#set -x
+    echo jenkins-jnlp build -f adhoc-manifest -p Environments=$ENVIRO -p Application=$app  -p AppSpec=$ver -p Ticket=$TICKET -p RunBy=$RUNBY
+{ set +x; } 2>/dev/null
+  else
+#set -x
+    echo jenkins-jnlp build -f adhoc-manifest -p Environments=$ENVIRO -p Application=$app  -p AppSpec=$org/$bch -p Ticket=$TICKET -p RunBy=$RUNBY
+{ set +x; } 2>/dev/null
+  fi
+}
+
+# get creds
+AUTH_USER="svcaecjnk"
+AUTH_FILE=~/.credentials.d/jenkins-$AUTH_USER-user
+[ -e $AUTH_FILE ] || BailOut "Auth file ($AUTH_FILE) not found"
+AUTH_USER=$( (source "$AUTH_FILE"; echo "$USERNAME") )
+AUTH_PASS=$( (source "$AUTH_FILE"; echo "$PASSWORD") )
+[[ -z $AUTH_USER || -z $AUTH_PASS ]] && BailOut "Missing creds for $AUTH_USER"
+LOGIN="$AUTH_USER:$AUTH_PASS"
+
+TMP=/tmp/$(basename $0)
+find /tmp -name "$(basename $0)-*" -maxdepth 1 -type d -mmin +60 -exec rm -rf {} \; 2>/dev/null
+#MFE_UPDATE=update-mfe-config.xml
+
+# set template jobs
+[[ $MANIFEST =~ true ]] && MFE_TEMPLATE=config-mfe-template-manifest.xml || MFE_TEMPLATE=config-mfe-template.xml
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+
+for app in xmlstarlet yq jq get-etcd-port hub
+do
+  which $app >/dev/null 2>&1 || BailOut "Why isn't $app installed?"
+done
+
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+if [[ -n $TICKET ]]
+then
+  TICKET=$(sed -es%https://jira.wsgc.com/browse/%%gi <<< $TICKET)
+  TICKET=$(tr '[:lower:]' '[:upper:]' <<< $TICKET)
+fi
+
+if [[ -z $MFE_FEATURE_LIST ]]
+then
+  echo "Using default feature list"
+  MFE_FEATURE_LIST=$DEFAULT_MFE_FEATURE_LIST
+fi
+MFE_FEATURE_LIST=$(sed -es/','/' '/g <<< "$MFE_FEATURE_LIST")
+
+echo "=== Environment:$ENVIRO ==="
+
+echo "=== MFE_TEMPLATE:$MFE_TEMPLATE ==="
+
+echo "=== Manifest:$MANIFEST ==="
+
+# it's safer to just do all brands
+[[ -z $CONCEPT_LIST ]] && CONCEPT_LIST=$(getbrandlist -d, -p -a $ENVIRO | tr '[:lower:]' '[:upper:]')
+echo "=== CONCEPT_LIST:$(sed -es/','/' '/g -es/'\.'/' '/g <<< $CONCEPT_LIST) ==="
+echo "=== FEATURE_LIST:$MFE_FEATURE_LIST ==="
+
+rm -rf $TMP
+
+export GITHUB_TOKEN=$(grep "ciuser_org_owner_token" $HOME/.credentials | awk '{ print $NF }')
+[[ -z $GITHUB_TOKEN ]] && { echo "Can't get GHE Token - skipping"; return; }
+
+#echo "*** Clone Jenkins job repo ***"
+git clone --depth 1 -q $JENKINS_JOBS $TMP/jenkins || BailOut "Unable to clone $JENKINS_JOBS"
+cd $TMP/jenkins/devops-mfe || BailOut "Unable to cd to $TMP/jenkins/devops-mfe"
+
+VIEW=$(ls $TMP/jenkins | grep -i "deploy" | grep -iw "$ENVIRO" | head -1)
+[[ $ENVIRO =~ jukebox ]] && VIEW=jukebox
+[[ $ENVIRO = "regression" ]] && VIEW=rgs1
+[[ -z $VIEW ]] && BailOut "What is the Jenkins view for $ENVIRO?"
+echo "=== Jenkins view: $VIEW ==="
+
+#echo "*** Create new job ***"
+# disable template job - just in came someone enabled it
+# set XML version to 1.0 - xmlstarlet doesn't like 1.1
+sed -es/'version="1.1"'/'version="1.0"'/g -i $MFE_TEMPLATE 
+xmlstarlet ed --inplace -u "project/disabled" -v "true" $MFE_TEMPLATE
+
+# copy template jobs to new jobs
+MFE_NEW=$TMP/jenkins/devops-mfe/config-${ENVIRO}-mfe.xml
+# if we have an existing file, grab the enabled/disabled status
+[[ -e $MFE_NEW ]] && DISABLED=$(xmlstarlet sel -t -c "project/disabled" $MFE_NEW | awk -F '[<>]' '{ print $3 }')
+rm -f $MFE_NEW $TMP/jenkins/$VIEW/config-${ENVIRO}-mfe.xml
+git rm $TMP/jenkins/$VIEW/$(basename $MFE_NEW) >/dev/null 2>&1
+git rm $MFE_NEW >/dev/null 2>&1
+cp $MFE_TEMPLATE $MFE_NEW || BailOut "Unable to copy mfe template job to $(dirname $MFE_NEW)"
+
+# eventually we need to remove this, as we're not doing a separate cleanup job any longer
+#CLEANUP_NEW=$TMP/jenkins/devops-mfe/cleanup-etcd-${ENVIRO}.xml
+#git rm $TMP/jenkins/$VIEW/$(basename $CLEANUP_NEW)>/dev/null 2>&1
+#git rm $CLEANUP_NEW >/dev/null 2>&1
+
+# this dumps out all of the xml tags
+xmlstarlet el $MFE_NEW > /tmp/mfe-config-template.txt
+
+git add $MFE_NEW 
+
+[[ -z $DEBUG_LEVEL ]] && DEBUG_LEVEL=1
+[[ -z $INTERVAL ]] && INTERVAL=4h
+[[ -z $MARKET ]] && MARKET=US
+
+ETCD=$(get-etcd-env $ENVIRO)
+[[ -z $ETCD ]] && BailOut "Can't figure out ETCD_ENV for $ENVIRO"
+ETCD_ENV=ecommerce-etcd-$ETCD
+
+# snowflake environments
+[[ $ENVIRO = "qa1" ]] && ENVIRO=qa1
+
+if [[ $ENVIRO =~ uat || $ENVIRO =~ bpb ]]
+then
+  m1=$(shuf -i0-29 -n1)
+  m2=$(expr $m1 + 30)
+else
+  m1=$(shuf -i0-59 -n1)
+fi
+
+# convert interval to timespec
+if [[ $INTERVAL =~ h ]]
+then
+  min=$(shuf -i0-59 -n1)
+  hour=$(sed -es/h//gi <<< $INTERVAL)
+  [[ $hour -lt 2 ]] && SPEC="H/60 * * * *" || SPEC="$min H/$hour * * *"
+fi
+[[ $INTERVAL = "none" ]] && SPEC=
+
+xmlstarlet ed --inplace -u "$TRIGGER_PROP" -v "${SPEC}" $MFE_NEW
+#xmlstarlet ed --inplace -u "$POLL_PROP" -v "H/15 * * * *" $MFE_NEW
+
+if [[ -n $SLACK ]]
+then 
+  echo "+++ update Slack property +++"
+  xmlstarlet ed --inplace -u "$SLACK_PROP" -v "${SLACK}" $MFE_NEW
+  #xmlstarlet ed --inplace -u "$STRING_PROP[name='SLACK']/defaultValue" -v "${SLACK}" $MFE_NEW
+fi
+xmlstarlet ed --inplace -u "$STRING_PROP[name='DEBUG_LEVEL']/defaultValue" -v "${DEBUG_LEVEL}" $MFE_NEW
+
+# set environment name
+xmlstarlet ed --inplace -u "$HIDDEN_PROP[name='ETCD_PREFIX']/defaultValue" -v "${ENVIRO}" $MFE_NEW
+#xmlstarlet ed --inplace -u "$STRING_PROP[name='APP_ENVIRONMENT']/defaultValue" -v "${ENVIRO}" 
+
+BUILD_TOOL_ORG=$(awk -F/ '{ print $1 }' <<< $BUILD_TOOL)
+BUILD_TOOL_BRANCH=$(awk -F/ '{ print $NF }' <<< $BUILD_TOOL)
+[[ -z $BUILD_TOOL_ORG ]] && BUILD_TOOL_ORG="eCommerce-Bedrock"
+[[ -z $BUILD_TOOL_BRANCH ]] && BUILD_TOOL_BRANCH="release"
+xmlstarlet ed --inplace -u "$STRING_PROP[name='BUILD_TOOL']/defaultValue" -v "${BUILD_TOOL_ORG}/${BUILD_TOOL_BRANCH}" $MFE_NEW
+
+BRAND_CONFIG_ORG=$(awk -F/ '{ print $1 }' <<< $BRAND_CONFIG)
+BRAND_CONFIG_BRANCH=$(awk -F/ '{ print $2 }' <<< $BRAND_CONFIG)
+[[ -z $BRAND_CONFIG_ORG ]] && BRAND_CONFIG_ORG="eCommerce-Bedrock"
+[[ -z $BRAND_CONFIG_BRANCH ]] && BRAND_CONFIG_BRANCH="release"
+xmlstarlet ed --inplace -u "$STRING_PROP[name='BRAND_CONFIG']/defaultValue" -v "${BRAND_CONFIG_ORG}/${BRAND_CONFIG_BRANCH}" $MFE_NEW
+
+#for mfe in config $DEFAULT_MFE_FEATURE_LIST
+for mfe in config checkout
+do
+  repo_list=
+  UPDATE_STATIC=
+
+  #[[ $MANIFEST =~ true ]] && break
+
+  echo ""
+  # try to parse org and branch from paramters passed in with the form
+  var=$(echo "app_${mfe}" | tr 'a-z' 'A-Z' | tr '-' '_')
+  echo "--- $mfe ($var) ---"
+  org=$(env | grep "${var}" | awk -F= '{ print $2 }' | awk -F/ '{ print $1 }')
+  branch=$(env | grep "${var}" | awk -F= '{ print $2 }' | awk -F/ '{ print $2 }')
+
+  # this is to allow us to spec a release version instead of an org/branch combo
+  [[ $org =~ ^[0-9]+\.[0-9]+ ]] && { branch=$org; org="eCommerce-Bedrock"; }
+
+  if [[ -n $org || -n $branch ]]
+  then
+    [[ -z $org || -z $branch ]] && BailOut "$mfe: Need both Org and Branch"
+    MFE_ORG=$org
+    MFE_BRANCH=$branch
+    APP_VERSION=
+
+    # 
+    if [[ $mfe != "config" ]]
+    then
+      if [[ $MFE_BRANCH =~ ^[0-9]+\.[0-9]+ ]]
+      then 
+        echo "^^^ MFE_BRANCH is a static version ^^^"
+        APP_DEPLOY="APP_DEPLOY_TAG=$MFE_BRANCH"
+        APP_VERSION=$MFE_BRANCH
+        MFE_BRANCH=release
+      else
+        APP_DEPLOY="APP_DEPLOY_BRANCH=${MFE_ORG}/ecom-app-$mfe/${MFE_BRANCH}"
+      fi
+    fi
+#  else
+#    fetchJenkins ecom-app-$mfe
+  fi
+
+  # sanity check on repo
+  if [[ $mfe = "config" ]]
+  then 
+    for b in $(echo ${CONCEPT_LIST} | tr ',' ' ' | tr 'A-Z' 'a-z')
+    do
+      repo_list="$repo_list ${MFE_ORG}/ecom-app-$mfe-$b"
+    done
+  else
+    repo_list="${MFE_ORG}/ecom-app-$mfe"
+  fi
+
+  if [[ $MANIFEST =~ false ]]
+  then
+    for repo in $repo_list
+    do
+      url="https://github.wsgc.com/$repo/tree/${MFE_BRANCH}"
+      echo "%%% Clone $url to verify %%%"
+      #git ls-remote git@github.wsgc.com:$repo refs/heads/$MFE_BRANCH
+      git clone -q --depth 1 -b ${MFE_BRANCH} git@github.wsgc.com:$repo $TMP/$(basename $repo) >/dev/null 2>&1 || BailOut "Unable to clone $url"
+      commit-clear TAG=$ENVIRO ${MFE_ORG}/ecom-app-$mfe/${MFE_BRANCH}
+    done
+  fi
+
+  xmlstarlet ed --inplace -u "$STRING_PROP[name='${var}']/defaultValue" -v "${MFE_ORG}/${MFE_BRANCH}" $MFE_NEW
+
+  # this is for the experiment with using commit triggers to invoke the job
+  #ghe="${MFE_ORG}/ecom-app-$mfe"
+  #for some reason, I can't get xmlstarlet to work for this parameter
+  #echo xmlstarlet ed --inplace -u "$GHE_PROP_URL[name='${var}']/url" -v "git@github.wsgc.com:$ghe" $MFE_NEW
+  # using sed until I can get xmlstarlet working
+  sed -es%"@${var}_URL@"%"git@github.wsgc.com:${MFE_ORG}/ecom-app-$mfe"%g -i $MFE_NEW
+  sed -es%"@${var}_REF@"%"+refs/heads/${MFE_BRANCH}:refs/remotes/origin/${MFE_BRANCH}"%g -i $MFE_NEW
+
+#  if [[ -n $APP_VERSION ]]
+#  then
+#    updateManifest "${MFE_ORG}/ecom-app-$mfe/${APP_VERSION}"
+#  else
+#    updateManifest "${MFE_ORG}/ecom-app-$mfe/${MFE_BRANCH}"
+#  fi
+done
+
+xmlstarlet ed --inplace -u "$STRING_PROP[name='SYNCAPPCONFIG']/defaultValue" -v "${SYNCAPPCONFIG}" $MFE_NEW
+
+# set these props here in case they get overwritten by the RunDeck config
+xmlstarlet ed --inplace -u "$STRING_PROP[name='MARKET']/defaultValue" -v "${MARKET}" $MFE_NEW
+xmlstarlet ed --inplace -u "$HIDDEN_PROP[name='ETCD_ENV']/defaultValue" -v "${ETCD_ENV}" $MFE_NEW
+if [[ -n $EMAIL ]]
+then 
+  echo "=== EMAIL: $EMAIL ==="
+  xmlstarlet ed --inplace -u "$EMAIL_PROP_2" -v "${EMAIL}" $MFE_NEW
+  xmlstarlet ed --inplace -u "$STRING_PROP[name='EMAIL']/defaultValue" -v "${EMAIL}" $MFE_NEW
+fi
+
+MFE_FEATURE_LIST=$(sed -es/','/' '/g <<< $MFE_FEATURE_LIST)
+MFE_FEATURE_LIST=$(echo "$MFE_FEATURE_LIST" | xargs -n1 | sort -u | tr '\n' ' ') 
+echo "=== MFE_FEATURE_LIST: $MFE_FEATURE_LIST ==="
+xmlstarlet ed --inplace -u "$STRING_PROP[name='MFE_FEATURE_LIST']/defaultValue" -v "${MFE_FEATURE_LIST}" $MFE_NEW
+
+xmlstarlet ed --inplace -u "$STRING_PROP[name='CONCEPT_LIST']/defaultValue" -v "${CONCEPT_LIST}" $MFE_NEW
+
+# find an etcd port
+[[ -z $ETCD_PORT ]] && ETCD_PORT=$(get-etcd-port)
+[[ -z $ETCD_PORT ]] && BailOut "Need etcd port"
+xmlstarlet ed --inplace -u "$HIDDEN_PROP[name='ETCD_PORT']/defaultValue" -v "${ETCD_PORT}" $MFE_NEW
+echo "=== ETCD_PORT: $ETCD_PORT ==="
+
+# timeout
+echo "*** Set timeoutMinutes to '$TIMEOUT' ***"
+xmlstarlet ed --inplace -u "$TIMEOUT_PROP" -v "$TIMEOUT" $MFE_NEW
+
+ASSIGNED_NODE=$(sed -es/ecom-jenkins-agent-//gi <<< $ASSIGNED_NODE)
+[[ -n $ASSIGNED_NODE ]] && ASSIGNED_NODE=ecom-jenkins-agent-$ASSIGNED_NODE || ASSIGNED_NODE=mfe-all
+echo "*** Set assignedNode to '$ASSIGNED_NODE' ***"
+xmlstarlet ed --inplace -u "project/assignedNode" -v "$ASSIGNED_NODE" $MFE_NEW
+
+# UpdateData flag 
+[[ $ENVIRO =~ uat || $ENVIRO =~ bpv ]] && UPDATE_DATA=true || UPDATE_DATA=false
+echo "*** Set UpdateData default to '$UPDATE_DATA' ***"
+xmlstarlet ed --inplace -u "$BOOLEAN_PROP[name='UpdateData']/defaultValue" -v 'false' $MFE_NEW
+
+# enable job
+echo "*** Set job-disabled state to '$DISABLED' ***"
+xmlstarlet ed --inplace -u "project/disabled" -v "$DISABLED" $MFE_NEW
+
+# set concurrency/parallelism
+echo "*** Set job ParallelJobs to '$PARALLEL' ***"
+xmlstarlet ed --inplace -u "project/ParallelJobs" -v "$PARALLEL" $MFE_NEW
+# leaving this false until we sort out the etc-cleanup issue
+#xmlstarlet ed --inplace -u "project/concurrentBuild" -v "false" $MFE_NEW
+xmlstarlet ed --inplace -u "project/concurrentBuild" -v "$PARALLEL" $MFE_NEW
+
+# generate URLs for this build
+JOB_URL="$JENKINS_URL/job/$(basename $MFE_NEW | sed -es/\.xml//g)"
+CONFIG_URL="$JENKINS_URL/job/update-mfe-config/$BUILD_NUMBER/"
+
+# update timestamp and description
+echo "*** Update misc variables ***"
+sed -es/"@DATE@"/"$DATE by $BUILD_USER_ID"/g -i $MFE_NEW 
+sed -es%"@CONFIG_URL@"%"$CONFIG_URL"%g -i $MFE_NEW
+
+# various variable substitution
+sed -es/"@ENVIRO@"/"$ENVIRO"/g -i $MFE_NEW
+
+echo "*** Create symlinks ***"
+# create a symlink to the devops-mfe view
+cd $TMP/jenkins/$VIEW
+ln -sf ../devops-mfe/$(basename $MFE_NEW) .
+
+#if [[ $MANIFEST =~ true ]]
+#then
+#  echo "*** Convert to manifest ***"
+#  #sed -es/mfe-config-template/mfe-config-template-manifest/g -i $MFE_NEW
+#fi
+
+echo "*** Commit new job ***"
+[[ -n $TICKET ]] && REASON=$TICKET || REASON=DEVOPS
+cd $TMP/jenkins
+git config http.sslVerify "false"
+#git add .
+git commit -q -a -m "[$REASON] dynamically create mfe config job for $ENVIRO" 
+git pull >/dev/null 2>&1
+git push -q --force
+
+#echo eval jenkins-jnlp create-job --deleteFirst $MFE_NEW
+
+unbuffer echo "*** Trigger JenkinsJobMgr ***" && eval $JENKINS build JenkinsJobMgr >/dev/null 2>&1 &
+
+[[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}$(basename $0 | sed -es/\.xml//g) - update $ENVIRO MFE
+CONCEPT_LIST=$CONCEPT_LIST
+FEATURE_LIST=$MFE_FEATURE_LIST
+$CONFIG_URL 
+$JOB_URL "
+
+unbuffer echo "*** New job: $JOB_URL ***"
+unbuffer echo "*** Updated config URL: $BUILD_URL ***"
+
+#unbuffer echo "*** Run new MFE config ***"
+#TICKET=$TICKET /apps/mead-tools/run-mfe-config $ENVIRO >/dev/null 2>&1 &
+
+cd /tmp
+#rm -rf $TMP &
+
+exit 0

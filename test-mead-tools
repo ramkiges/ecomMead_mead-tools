@@ -1,0 +1,80 @@
+#!/bin/bash
+# this script tests various functionality to make sure the mead-tools pkg is working correctly
+PATH=/apps/mead-tools:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin:~/.rd/bin:$PATH
+
+MEAD_TOOLS=git@github.wsgc.com:eCommerce-Mead/mead-tools.git
+FRONTEND=https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/
+SVR_LIST="ecombuild rundeck tlsrck-vdcn005 bgb-uat1-rk1v"
+CRED_LIST="jira:admin_cli_user jenkins:svcaecjnk artifactory_nonprod:ci_ro"
+CRED_FILE=$HOME/.credentials
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  exit 255
+}
+
+Notation() { echo;echo ">>> $* "; }
+
+TMP=/tmp/$(basename $0)
+rm -rf $TMP
+
+[[ -e $HOME/bin ]] || BailOut "$HOME/bin doesn't exist"
+
+Notation "Test various utilities"
+for util in yq jq kubectl hub xmlstarlet gsed awk gnutls
+do
+  which $util > /dev/null 2>&1 || brew install $util
+  which $util > /dev/null 2>&1 || BailOut "Need to install $util"
+done
+
+#Notation "Check for SSHUSER"
+#[[ -n $SSHUSER ]] || BailOut "Need to set SSHUSER to a_${LOGNAME}"
+[[ -z $SSHUSER ]] && SSHUSER=$(sed -es/a_//g <<< $LOGNAME)
+
+#
+Notation "Test ssh key"
+[[ -e $HOME/.ssh/id_rsa ]] || BailOut "Need to setup ssh keys"
+
+# test ssh keys
+Notation "Test ssh keys"
+for svr in $SVR_LIST
+do
+  echo "-> $svr"
+  ssh-copy-id -i ~/.ssh/id_rsa.pub -f $SSHUSER@$svr
+  ssh -q $svr "hostname" </dev/null || echo "Passwordless ssh to $svr doesn't work"
+  echo
+done
+
+# test cloning mead-tools
+Notation "Clone mead-tools"
+git clone -q --depth 1 $MEAD_TOOLS $TMP/mead-tools || BailOut "Unable to clone $MEAD_TOOLS"
+
+# refresh our installation
+Notation "Installing mead-tools"
+cd $TMP/mead-tools && ./install-local
+
+# test .wsi_settings
+Notation "Check wsi_settings"
+[[ -e $HOME/.wsi_settings ]] || BailOut "Unable to find $HOME/.wsi_settings"
+WSI=$(cat $HOME/.wsi_settings)
+Notation "Check $WSI"
+cd $WSI || BailOut "Unable to cd to $WSI"
+svn info || BailOut "Unable to svn info at $WSI"
+
+# test cred file
+Notation "Test $CRED_FILE"
+[[ -e $CRED_FILE ]] || BailOut "Can't find $CRED_FILE - ask another Mead team member for guidance"
+for cred in $CRED_LIST
+do
+  app=$(awk -F: '{ print $1 }' <<< $cred)
+  usr=$(awk -F: '{ print $1 }' <<< $cred)
+  echo "-> $app/$usr"
+  grep -A+3 "[$app]" $CRED_FILE | grep -iq "$usr" || BailOut "Can't find [$app] $usr in $CRED_FILE"
+  echo
+done
+
+# test jenkins jnlp
+Notation "Check jenkins-jnlp"
+jenkins-jnlp list-jobs | head -5 || BailOut "jenkins-jnlp didn't work"
+
+exit 0

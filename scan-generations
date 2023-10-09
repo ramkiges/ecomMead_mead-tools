@@ -1,0 +1,58 @@
+#!/bin/bash
+# scans ECM logs for nre buildds
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:$PATH
+
+SUBSYS_LIST="ECMMSG ECMPAGES ECMCS ECMHOMEPAGE CAT RECIPE ECMPROMOS PROMOS ODIS TMPL MISC MSG HOMEPAGE MSG MISC TMPL"
+USER_AGENT="--user-agent $(basename $0)"
+DATA=$HOME/.$(basename $0)
+LOG=$DATA/$(basename $0).log
+DATE=$(date +'%Y-%m-%d %H:%M')
+UPDATE=
+
+# oracle variables
+export ORACLE_HOME=/opt/oracle/product/11.2.0/client_1/
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib
+PATH=$PATH:$ORACLE_HOME/bin
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+  echo "$DATE,$ECMAGENT,$*" >> $LOG
+  exit 255
+}
+
+# create the data storage directory
+[[ -d $DATA ]] || mkdir -p $DATA
+
+# the only param is the schema
+SCHEMA=$(tr '[:upper:]' '[:lower:]' <<< $1)
+SCHEMA=ws_app_owner
+[[ -z $SCHEMA ]] && BailOut "Need ecm server name"
+echo "SCHEMA: $SCHEMA"
+
+set -x
+DB=$(getdb $SCHEMA)
+[[ -z $DB ]] && BailOut "Can't get creds for $SCHEMA"
+dbHost=$(awk -F\| '{ print $1 }' <<< $DB)
+dbOwner=$(awk -F\| '{ print $2 }' <<< $DB| tr "a-z" "A-Z")
+dbUser=$(awk -F\| '{ print $3 }' <<< $DB)
+dbPass=$(awk -F\| '{ print $4 }' <<< $DB)
+dbSID=$(awk -F\| '{ print $5 }' <<< $DB | tr "a-z" "A-Z")
+dbPort=$(awk -F\| '{ print $6 }' <<< $DB)
+dbConnect=$(awk -F\| '{ print $10 }' <<< $DB)
+
+CONNECT="${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=($dbConnect=${dbSID})))"
+
+#Q="set heading off; 
+#SELECT DISTINCT SUBSYSTEM FROM ${dbOwner}.WW_GENERATION_SCHEDULE ORDER BY SUBSYSTEM;"
+#echo "$Q" | sqlplus -S "$CONNECT"
+
+for SUBSYS in $SUBSYS_LIST
+do
+	OG_SQL="set heading off; 
+select * from 
+(SELECT GENERATION FROM ${dbOwner}.WW_GENERATION_SCHEDULE WHERE (SITE = '$DST_SITE' and installation = '$DST_INST' and subsystem = '$SUBSYS') order by START_TIME desc)
+where rownum = 1;"
+  echo "$OG_SQL" | sqlplus -S "$CONNECT"
+done
+
+exit 0

@@ -1,0 +1,200 @@
+#!/bin/bash
+# sets jmx bean values
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/opt/homebrew/bin:~/bin:/apps/jdk8/bin:/apps/java/bin:$PATH
+export PATH
+
+# this no longer works because JMX is blocked
+#exit 0
+
+DEFAULT_LEVEL="makeLevelDebug"
+JMX_PORT="39667"
+LOG_PORT="38667"
+
+# option to clear log levels
+echo $(basename $0) | grep -iq "clear" && PARAM_LIST="com.wsgc.ecommerce:info"
+
+# saving this off while I'm experimenting
+#com.wsgc \
+#com.wsgc.ecommerce \
+
+#com.wsgc.ecommerce \
+#com.wsgc.ecommerce.freemarker.service.zip \
+#com.wsgc.ordernumber \
+DEFAULT_LIST=" \
+com.wsgc.ecommerce.ui.interceptors \
+com.wsgc.ecommerce.profile.mashery \
+com.wsgc.ecommerce.mg \
+com.wsgc.ecommerce.pb \
+com.wsgc.ecommerce.pk \
+com.wsgc.ecommerce.pt \
+com.wsgc.ecommerce.we \
+com.wsgc.ecommerce.ws \
+com.wsgc.ecommerce.mvc \
+com.wsgc.ecommerce.checkout \
+com.wsgc.ecommerce.payment \
+com.wsgc.ecommerce.ec \
+com.wsgc.ecommerce.loyalty \
+com.wsgc.ecommerce.registryclient \
+com.wsgc.ecommerce.customerservice \
+com.wsgc.ecommerce.wishlist \
+com.wsgc.ecommerce.jms \
+com.wsgc.payment.client \
+com.wsgc.loyalty.client \
+com.wsgc.ecommerce.loyalty \
+com.wsgc.ecommerce.promotion \
+com.wsgc.ecommerce.admin \
+com.wsgc.ecommerce.targeting \
+com.wsgc.ecommerce.eventnotification.impl \
+com.wsgc.inventory.reservation.service \
+com.wsgc.inventory.service.consumer \
+"
+
+for bean in $DEFAULT_LIST
+do		
+	case $(basename $0) in
+		set-clear ) PARAM_LIST="$PARAM_LIST $bean:error" ;;
+		set-trace ) PARAM_LIST="$PARAM_LIST $bean:trace" ;;
+		set-debug ) PARAM_LIST="$PARAM_LIST $bean:debug" ;;
+		set-error ) PARAM_LIST="$PARAM_LIST $bean:error" ;;
+		set-info ) PARAM_LIST="$PARAM_LIST $bean:info" ;;
+		set-warn ) PARAM_LIST="$PARAM_LIST $bean:warn" ;;
+	esac
+done
+
+# save these off for now
+#com.wsgc.ecommerce.profile:error \
+#com.wsgc.ecommerce.shop:error \
+
+# auto-add these beans because we probably don't care about them:
+IGNORE_LIST="\
+com.wsgc.ecommerce.mg.controllers.PromoController:info \
+com.wsgc.ecommerce.pb.controllers.PromoController:info \
+com.wsgc.ecommerce.pk.controllers.PromoController:info \
+com.wsgc.ecommerce.pt.controllers.PromoController:info \
+com.wsgc.ecommerce.we.controllers.PromoController:info \
+com.wsgc.ecommerce.ws.controllers.PromoController:info \
+com.wsgc.ecommerce.shop.navigation.activity.StandardGlobalNavigationActivity:info \
+com.wsgc.ecommerce.product.caching.PipDataFactory:info \
+com.wsgc.ecommerce.customerservice.dao.StandardReviewsDAO:info \
+com.wsgc.ecommerce.scheduling:info \
+com.wsgc.inventory.service.impl.InventoryStateEntryRowMapper:info \
+com.wsgc.ecommerce.flags:info \
+com.wsgc.ecommerce.configuration:info \
+com.wsgc.ecommerce.caching:info \
+com.wsgc.ecommerce.mvc:info \
+com.wsgc.ecommerce.banner:info \
+com.wsgc.ecommerce.geolocation:info \
+com.wsgc.ecommerce.scheduling:info \
+com.wsgc.ecommerce.utilities:info \
+com.wsgc.ecommerce.content:info \
+com.wsgc.ecommerce.endeca:info \
+com.wsgc.ecommerce.session:info \
+com.wsgc.ecommerce.common:info \
+com.wsgc.ecommerce.catalogdata:info \
+com.wsgc.ecommerce.productcatalog:info \
+com.wsgc.ecommerce.http:info \
+com.wsgc.ecommerce.address:info \
+com.wsgc.ecommerce.ui:info \
+com.wsgc.ecommerce.security:info \
+com.wsgc.ecommerce.shop.category.activity:info \
+com.wsgc.ecommerce.bloomreach:info \
+com.wsgc.ecommerce.specification:info 
+com.wsgc.ecommerce.freemarker:info \
+com.wsgc.ecommerce.context:info \
+com.wsgc.ecommerce.ui.controllers:info \
+com.wsgc.ecommerce.geolocation:info \
+com.wsgc.ecommerce.context.cookies:info \
+com.wsgc.ecommerce.ordermanagement.service.impl:info \
+com.wsgc.ecommerce.context.cookies.manager.DummyCookieManager:info \
+"
+#com.wsgc.ecommerce.targeting:info \
+
+BailOut() {
+	[ -n "$1" ] && echo "$1" 
+	echo "
+Usage: 
+	$(basename $0) <brand> <env> [class:debugLevel] ...
+	$(basename $0) <hostname> [class:debuglevel]
+Debug levels: Error Warn Info Debug Trace
+
+Multiple class:debuglevels can be specified on the same command line
+
+Examples:
+	$(basename $0) mg qa15 com.wsgc.ecommerce.artifact:debug com.wsgc.ecommerce.catalogdata:trace
+"
+	exit 1
+}
+
+[ $# -eq 0 ] && BailOut
+
+# find the jmx jar
+for dir in /wsgc/bin/ ~/bin /apps/mead-tools /apps
+do
+	[ -f "$dir/jmxclient.jar" ] && JMX_JAR="$dir/jmxclient.jar"
+done
+[ -z "$JMX_JAR" ] && BailOut "Can't find $JMX_JAR"
+
+GETURLS=$(which geturls 2>/dev/null)
+[ -z "$GETURLS" ] && BailOut "Can't find geturls"
+
+if [ $# -gt 1 ]
+then
+	BRAND=$1
+	shift
+	ENV=$1
+	shift
+	LOG4J="com.wsgc.ecommerce.$BRAND"
+# will work on this later
+else
+	echo "Please note: the 'host' option doesn't really work yet :("
+	HOST=$1
+	shift
+fi
+
+[ -z "$HOST" ] && HOST=$($GETURLS $BRAND $ENV|grep -i "host:" | awk -F: '{ print $2 }' | awk '{ print $1 }')
+[ -z "$HOST" ] && BailOut "Can't figure out host for $BRAND $ENV"
+
+# set beans passed in on command line, and _then_ override
+if [ -n "$1" ] 
+then
+    PARAM_LIST="$* "
+else
+    PARAM_LIST="$PARAM_LIST $IGNORE_LIST"
+fi
+
+#nc -w 5 -v $HOST $JMX_PORT </dev/null >/dev/null 2>&1 || exit 1
+
+for param in $PARAM_LIST 
+do
+	K=$(echo "$param" | awk -F: '{ print $1 }')
+	V=$(echo "$param" | awk -F: '{ print $2 }')
+
+	# default level
+	[ -z "$V" ] && V="$DEFAULT_LEVEL"
+
+	echo "$V" | grep -iq "debug" && V="makeLevelDebug"
+	echo "$V" | grep -iq "trace" && V="makeLevelTrace"
+	echo "$V" | grep -iq "error" && V="makeLevelError"
+	echo "$V" | grep -iq "info" && V="makeLevelInfo"
+	echo "$V" | grep -iq "warn" && V="makeLevelWarn"
+
+	# this is a basic log4j "usage" message
+	#java -jar $JMX_JAR - $HOST:$JMX_PORT $LOG4J:type=Log4jConfigurator,name=log4jConfigurator 
+
+    if [ "$BRAND" = "admin" ]
+    then
+      for b in $(getbrandlist -a)
+        do
+            LOG4J="com.wsgc.ecommerce.$b"
+	        java -jar $JMX_JAR - $HOST:$JMX_PORT $LOG4J:type=Log4jConfigurator,name=log4jConfigurator $V=$K
+        done
+    else
+      set -x
+	    java -jar $JMX_JAR - $HOST:$JMX_PORT $LOG4J:type=Log4jConfigurator,name=log4jConfigurator $V=$K
+      set +x
+    fi
+done
+
+#echo "http://$HOST:$LOG_PORT"
+
+exit 0

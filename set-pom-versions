@@ -1,0 +1,41 @@
+#!/bin/bash
+# sets the project and parent versions in a pom 
+# this is useful when forking a config repo to a team org
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin:~/bin
+NS="http://maven.apache.org/POM/4.0.0"
+
+BailOut() {
+    [ -n "$1" ] && echo "Error: $*" >&2
+    echo "Sets project and parent pom version properties in pom files
+Usage: $(basename $0) <version> [pom]..."
+    exit 1        
+}
+
+NEW_VERSION=$1
+NEW_VERSION=$(echo "$NEW_VERSION" | sed -es/snapshot/SNAPSHOT/g)
+shift
+
+which xmlstarlet >/dev/null || BailOut "Need to install xmlstarlet"
+[ -z "$NEW_VERSION" ] && BailOut "Need new version"
+[ -z "$1" ] && BailOut "Need pom filename(s)"
+
+for pom in $*
+do
+    [ -f "$pom" ] || { echo "'$pom' is not a valid file"; continue; }
+
+    # if there is a current version then change it
+    CURRENT_PARENT_VERSION=$(xmlstarlet sel -N pom=$NS -t -v "/pom:project/pom:parent/pom:version" $pom)
+    if [ -n "$CURRENT_PARENT_VERSION" ] 
+    then
+        xmlstarlet ed -L -O -P -N pom=$NS -u "/pom:project/pom:parent/pom:version" -v "$NEW_VERSION" $pom || BailOut "Couldn't change parent version in $pom"
+    fi
+
+    # if there is a current version then change it
+    CURRENT_PROJECT_VERSION=$(xmlstarlet sel -N pom=$NS -t -v "/pom:project/pom:version" $pom)
+    if [ -n "$CURRENT_PROJECT_VERSION" ] 
+    then
+        xmlstarlet ed -L -O -P -N pom=$NS -u "/pom:project/pom:version" -v "$NEW_VERSION" $pom || BailOut "Couldn't change project version in $pom"
+    fi
+done
+
+exit 0

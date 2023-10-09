@@ -1,0 +1,16 @@
+# sets environment variables for mead-tools
+
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:$HOME/bin:$PATH
+
+for dir in /opt/homebrew/bin /usr/local/bin /apps/mead-tools
+do
+  [[ -e $dir ]] && PATH=$dir:$PATH
+done
+
+for gnu in grep gsed
+do
+  [[ -e /usr/local/opt/$gnu/libexec/gnubin ]] && PATH=/usr/local/opt/$gnu/libexec/gnubin:$PATH
+done
+
+export PATH
+

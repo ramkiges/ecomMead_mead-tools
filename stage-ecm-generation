@@ -1,0 +1,263 @@
+#!/bin/bash
+# returns ECM generation info
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/bgb/apps/biggreenbutton/bin
+export PATH
+ECM_REPO=$HOME/.ecm-env.d
+umask 000
+
+IMG_HOST=img-qa-rk1v.wsgc.com
+BGB_HOST=locker-dev-rk2v.wsgc.com
+MARKET_LIST="ca"
+EXCLUDE_ENV="qa2|perf|dev"
+USER_AGENT="--user-agent $(basename $0)"
+
+BailOut() {
+  [[ -n $1 ]] && echo "
+***
+$(basename $0): $*
+***
+" >&2
+  echo "Usage: $(basename $0) -b <brand> -e <env> [-g <generation>] [-s <subsystem>]" >&2
+  [[ -n $TMP ]] && rm -rf $TMP
+  exit 255
+}
+
+Notation() { unbuffer echo "### $(basename $0) - $* "; }
+
+for util in jq xmlstarlet getschema getdb get-market
+do
+  which $util > /dev/null 2>&1 || BailOut "need to install $util"
+done
+
+[[ $(hostname --short) = "artrck-vdcn002" ]] || BailOut "Must be run on artrck-vdcn002"
+
+[[ $# -eq 0 ]] && BailOut
+
+# parse options
+while getopts "b:e:g:s:t:h" opt 
+do
+    case ${opt} in
+      b ) BRAND=$(echo $OPTARG | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]');;
+      e ) ENVIRO=$(echo $OPTARG | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]');;
+      g ) GENERATION=$(echo $OPTARG | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]');;
+      t ) TICKET=$(echo $OPTARG | tr '[:lower:]' '[:upper:]' | sed -es/','/' '/g);;
+      s ) SUBSYS=$(echo $OPTARG | tr '[:lower:]' '[:upper:]' | sed -es/','/' '/g);;
+      h ) BailOut; exit 0;;
+    esac
+done
+
+[[ -z $BRAND ]] && BailOut "Need brand"
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+[[ -z $SUBSYS && -z $GENERATION ]] && BailOut "Need either subsystem or generation"
+
+[[ -e $ECM_REPO ]] || get-ecm-env $BRAND $ENVIRO >/dev/null 2>&1
+
+SCHEMA=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+DB=$(getschema $BRAND $ENVIRO | awk -F: '{ print $2 }')
+SITE=$(getsiteid $BRAND $ENVIRO)
+CREDS=$(getdb $(getschema $BRAND $ENVIRO) | awk -F\| '{ print $8 }')
+MARKET=$(get-market $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+
+# set the default source 
+if [[ $MARKET = "us" ]] 
+then
+  MARKET=
+  SOURCE_LIST="ecmagent-service-prdrk-config ecmagent-service-uat1-config ecmagent-service-rgs1-config ecmagent-service-qa3-config"
+  MPATH=
+else
+  MARKET=ca
+  SOURCE_LIST="ecmagent-service-${MARKET}-prdrk-config ecmagent-service-${MARKET}-uat1-config ecmagent-service-${MARKET}-rgs1-config ecmagent-service-${MARKET}-qa3-config"
+  MPATH="/CAN"
+fi
+[[ -z $SOURCE_LIST ]] && BailOut "Why is SOURCE_LIST empty?"
+
+# figure out the asset directory based on the subsystem
+if [[ -n $SUBSYS ]]
+then
+  case $SUBSYS in
+    ECMHOMEPAGE)  dir="ecm-homepage" ;;
+    ECMPAGES)     dir="ecm-pages" ;;
+    ECMPROMOS)    dir="ecm-promos" ;;
+    ECMCS )       dir="ecm-cs" ;;
+    ECMMSG)       dir="ecm-msg" ;;
+    *) BailOut "Can't xlate $SUBSYS to a ecmbuilds directory" ;;
+  esac 
+  [[ -z $dir ]] && BailOut "No 'dir' for $SUBSYS"
+fi
+
+if [[ -n $GENERATION ]]
+then
+  Notation "Hunt down generation $GENERATION "
+  [[ ${#GENERATION} != 9 ]] && BailOut "Generation $GENERATION should be 9 digits long"
+
+  for SVC_SOURCE in $SOURCE_LIST
+  do
+    SOURCE_HOST=$(grep -ihr "<ecmagent.serverId>" $ECM_REPO/$SVC_SOURCE | awk -F '[<>]' '{ print $3 }' | awk -F\. '{ print $1 }')
+    [[ $SOURCE_HOST = "ecmagent-prd-rk1v" ]] && SOURCE_HOST="ecmagentprdrk1v"
+
+    # create a ecmbuilds URL for the brand
+    for ecmbuilds in http://$SOURCE_HOST.wsgc.com/ecmbuilds/$BRAND http://$SOURCE_HOST.wsgc.com/ecmbuilds/$BRAND/archive 
+    do
+#echo "ecmbuilds: $ecmbuilds"
+      for ecm in $(curl $USER_AGENT -fsqk "$ecmbuilds/" | grep "ecm-" | awk -F 'a href=' '{ print $2 }' | awk -F\" '{ print $2 }' | awk -F/ '{ print $1 }' )
+      do
+        g=$(curl $USER_AGENT -fsqk "$ecmbuilds/$ecm/importinfo.txt" | grep -i PROVIDES | awk -F- '{ print $NF }')
+#echo "$g/$GENERATION $ecmbuilds"
+        if [[ $g = $GENERATION ]] 
+        then
+          ecmbuilds="$ecmbuilds/$ecm"
+          break 
+        else
+          g=
+        fi
+      done
+      [[ $g = "$GENERATION" ]] && break || g=
+    done
+    [[ $g = "$GENERATION" ]] && break || g=
+  done
+  [[ -z $g ]] && BailOut "Unable to find a source for ECM generation $GENERATION "
+
+  SUBSYS=$(curl $USER_AGENT -fsqk $ecmbuilds/ecminfo.txt | grep -i "subsystem" | awk '{ print $NF }')
+  Notation "Found ECM $SUBSYS generation $GENERATION on $SOURCE_HOST "
+fi
+
+if [[ -z $GENERATION ]]
+then
+  Notation "Hunt down generation for $SUBSYS"
+
+  # cycle through the sources and stop at the 1st example we find
+  for SVC_SOURCE in $SOURCE_LIST
+  do
+    SOURCE_HOST=$(grep -ihr "<ecmagent.serverId>" $ECM_REPO/$SVC_SOURCE | awk -F '[<>]' '{ print $3 }' | awk -F\. '{ print $1 }')
+    [[ $SOURCE_HOST = "ecmagent-prd-rk1v" ]] && SOURCE_HOST="ecmagentprdrk1v"
+
+    for ecmbuilds in http://$SOURCE_HOST.wsgc.com/ecmbuilds/$BRAND http://$SOURCE_HOST.wsgc.com/ecmbuilds/$BRAND/archive
+    do
+      # grab the most recent directory
+      d=$(curl $USER_AGENT -fsqk "$ecmbuilds/" | grep "$dir" | awk -F 'a href=' '{ print $2 }' | awk -F\" '{ print $2 }' | awk -F/ '{ print $1 }' | sort -r | head -1)
+
+      # tack the directory name onto the ecmbuilds URL
+      ecmbuilds="${ecmbuilds}/${d}"
+
+      # extract the generation from importinfo.txt
+      GENERATION=$(curl $USER_AGENT -fsqk "$ecmbuilds/importinfo.txt" | grep -i PROVIDES | awk -F- '{ print $NF }')
+      [[ -n $GENERATION ]] && break      
+    done
+    [[ -n $GENERATION ]] && break      
+  done
+
+  [[ -z $GENERATION ]] && BailOut "Unable to find a generation on $SOURCE_HOST"
+  Notation "Found a usable ECM $SUBSYS generation on $SOURCE_HOST ($GENERATION)"
+fi
+
+# figure out the ECM BGB instance
+BGB_SOURCE=$(sed -es/service/bgb/g <<< $SVC_SOURCE)
+[[ -z $SOURCE_HOST ]] && BailOut "Can't figure out SOURCE_HOST"
+
+# find the BGB config file
+XML=$(find $ECM_REPO/$BGB_SOURCE -name environmentConfig.xml)
+
+[[ -z $GENERATION ]] && BailOut "Can't find a suitable ECM generation on $SOURCE_HOST"
+
+TMP=/tmp/$(basename $0)/$SUBSYS-$GENERATION
+rm -rf $TMP
+mkdir -p $TMP || BailOut "Unable to create $TMP"
+
+find $(dirname $TMP) -maxdepth 1 -type d -mmin +180 -exec rm -rf {} \;
+
+DEST_ECIMAGES=$(xmlstarlet el -v $XML | grep -i "contents='ecmimages'" | grep "/$BRAND/" | awk -F 'hostRoot=' '{ print $2 }' | awk -F\' '{ print $2 }' | egrep -vi "/rk/|/ab/")
+[[ -z $DEST_ECIMAGES ]] && echo "DEST_ECIMAGES is blank"
+DOC=$(sed -es%/images/ecom-images/%%g <<< $DEST_ECIMAGES)
+
+echo "+ Enviro:      $BRAND $ENVIRO"
+[[ -n $SUBSYS ]] && echo "+ Subsystem:   $SUBSYS"
+[[ -n $GENERATION ]] && echo "+ Generation:  $GENERATION"
+echo "+ ECM Source:  $SVC_SOURCE"
+echo "+ URL:         $ecmbuilds"
+echo "+ DocImage:    $DOC"
+
+# copy the assets - if needed - to the image server
+for asset in $(curl $USER_AGENT -fsqk "$ecmbuilds/importinfo.txt" | egrep -i "REQUIRES" | awk '{ print $NF }' | sort -u)
+do
+  url=
+  url2=
+  type=$(curl $USER_AGENT -fsqk "$ecmbuilds/importinfo.txt" | grep "$asset" | awk '{ print $2 }')
+  [[ -z $type ]] && BailOut "No type for $asset?"
+
+  #echo "asset: $asset ($type)"
+  dir=$(awk -F/ '{ print $2 }' <<< $asset)
+  zip=$(awk -F/ '{ print $(NF-1) "/" $NF }' <<< $asset)
+  [[ $type =~ ecmimages ]] && { url=http://$SOURCE_HOST.wsgc.com/ecmassets/$zip; url2=http://$SOURCE_HOST.wsgc.com/ecmassets/${BRAND}/archive/$(basename $zip); }
+  [[ $type =~ ecmcontent ]] && { url=http://$SOURCE_HOST.wsgc.com/ecmbuilds/$BRAND/$zip; url2=http://$SOURCE_HOST.wsgc.com/ecmbuilds/$BRAND/archive/$zip; }
+  [[ $type =~ ecmdata ]] && { url=http://$SOURCE_HOST.wsgc.com/ecmbuilds/$BRAND/$zip; url2=http://$SOURCE_HOST.wsgc.com/ecmbuilds/$BRAND/archive/$zip; }
+  [[ -z $url ]] && BailOut "Url for $asset is blank"
+  stage="$TMP/$(sed -es/\.zip//g <<< $zip)"
+  rm -rf $stage
+  mkdir -p $stage
+
+  # copy the zip file locally
+  for try in {1..3}
+  do
+    curl -fsqk $USER_AGENT $url -o $stage/$(basename $zip) || curl $USER_AGENT -fsqk $url2 -o $stage/$(basename $zip) 
+    [[ -e $stage/$(basename $zip) ]] && break 
+    sleep 15
+  done
+  [[ -e $stage/$(basename $zip) ]] || { echo "! unable to download $type asset $url or $url2"; continue; }
+
+  # test the zip file
+  unzip -tq $stage/$(basename $zip) >/dev/null || { echo "! $stage/$(basename $zip) is corrupted?"; continue; }
+
+  if [[ $type =~ ecmcontent || $type =~ ecmdata ]]
+  then 
+    #TODO: /internal/ecm-non-prod-builds/internal
+    DEST=internal${MPATH}/tmpl/ecm \
+    path=$(basename $zip)
+    IMG="https://$IMG_HOST/$DEST/$path"
+    curl $USER_AGENT -fsqk $IMG -o /dev/null && { echo "/ skip $type $IMG"; rm -rf $stage; continue; }
+
+    echo "> copy $type ftlzipsync $asset $IMG"
+#set -x
+    sudo -u builder \
+      /apps/bgb/apps/biggreenbutton/bin/launcher \
+      /apps/bgb/apps/biggreenbutton \
+      ftlzipsync@$BGB_HOST \
+      --source=$stage/$(basename $zip) \
+      --host=$IMG_HOST \
+      --destination=/images/ecom-images/$DEST \
+      --credentials=imageuser \
+      deploy
+{ set +x; } 2>/dev/null
+    continue
+  fi
+
+  if [[ $type =~ ecmimages ]]
+  then 
+    echo
+    # unzip the file
+    unzip -qo $stage/$(basename $zip) -d $stage && rm $stage/$(basename $zip)
+
+    path=$(ls -1d $stage/ecm/*/*/* 2>/dev/null | sed -es%$stage/ecm/%%g)
+    IMG="https://$IMG_HOST/${DOC}/ecm/$path"
+    curl $USER_AGENT --head -fsqk $IMG -o /dev/null && { echo "/ skip $type $IMG"; rm -rf $stage; continue; }
+
+    copy "> $type dirtreesync $asset"
+
+    echo
+    sudo -u builder \
+      /apps/bgb/apps/biggreenbutton/bin/launcher \
+      /apps/bgb/apps/biggreenbutton \
+      dirtreesync@$BGB_HOST \
+      --source=$stage \
+      --host=$IMG_HOST \
+      --destination=$DEST_ECIMAGES \
+      --credentials=imageuser \
+      deploy
+    continue
+  fi
+
+  echo "*** $type $type fell through!"
+done
+
+rm -rf $TMP
+exit 0
+

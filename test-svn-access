@@ -1,0 +1,26 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+MODE=$(basename $0)
+ORG=eCommerce-DevOps
+LOG=$HOME/$(basename $0.log)
+
+[[ $LOGNAME =~ jenkins ]] || exit 0
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(hostname --short) $(basename $0): $*" >&2
+  echo "fail: $(hostname --short) $(date -d "$DATE" +'%Y-%m-%d %H:%M') $*" >> $LOG
+  exit 128
+}
+
+# test svn access
+svn --non-interactive ls https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk >/dev/null 2>&1
+if [[ $? -ne 0 ]]
+then
+  echo "update: $(hostname --short) $(date -d "$DATE" +'%Y-%m-%d %H:%M')" >> $LOG
+  #echo "??? svn on $(hostname) isn't working ???" >&2
+  cd $HOME
+  [[ -e svn-creds.tar ]] && tar xf svn-creds.tar || BailOut "No backup credfile"
+  svn --non-interactive ls https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk >/dev/null 2>&1 || BailOut "SVN is broken"
+fi
+
+exit 0

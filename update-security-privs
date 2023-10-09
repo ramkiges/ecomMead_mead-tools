@@ -1,0 +1,326 @@
+#!/bin/bash
+# updates 
+source /apps/buildsystem/bin/env.sh
+PATH=/apps/mead-tools:/apps:/bin:/usr/bin:/sbin:/usr/sbin:/apps/jdk8/bin:/apps/java/bin:/apps/jdk7/bin:/usr/local/bin:~/bin:$ORACLE_HOME/bin:$PATH
+#PATH=/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:/opt/oracle/product/11.2.0/client_1/bin:/usr/lib/oracle/11.2/client64/bin/
+export PATH
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+ORACLE_HIDE="complete|unique constraint|violated|found|^\*|ERROR at line|insert"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(hostname --short)/$(basename $0): $*"
+	exit 1
+}
+
+showPrivs() {
+  echo "Groups for $USER:"
+  sql="set heading off;
+set pagesize 0;
+select GROUP_NAME from $SCHEMA.SECURITY_USER_GROUP where user_name='$USER';"
+  echo "$sql" | sqlplus -S "$SQLCMD" | sort
+
+  echo "Roles for $USER:"
+  sql="set heading off;
+set pagesize 0;
+select AUTHORITY_NAME from $SCHEMA.SECURITY_USER_AUTHORITY where user_name='$USER';"
+  echo "$sql" | sqlplus -S "$SQLCMD" | sort
+}
+
+
+USER=$(echo "$1" | tr "A-Z" "a-z" | tr -cd "'[:alnum:] ")
+ROLE=$(echo "$2" | tr "A-Z" "a-z")
+SCHEMA=$(echo "$3" | tr "a-z" "A-Z")
+[[ -n $4 ]] && TICKET=$(echo "$4" |  tr "a-z" "A-Z")
+
+[[ -z $USER ]] && BailOut "Need user"
+[[ -z $SCHEMA ]] && BailOut "Need schema"
+[[ -n $TICKET ]] && TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+[[ -z $RUNBY ]] && RUNBY=${BUILD_USER_ID}
+
+[[ $ROLE = "regadmin" ]] && SCHEMA=CMXQA_BUILD_OWNER
+[[ $ROLE = "admintool" ]] && SCHEMA=CMXQA_BUILD_OWNER
+#[[ $ROLE = "promoadmin-it" ]] && SCHEMA=CMXQA_BUILD_OWNER
+#[[ $ROLE = "promoadmin-non-it" ]] && SCHEMA=CMXQA_BUILD_OWNER
+
+case $SCHEMA in 
+  JUKEBOX )
+    dbUser=jukebox
+    dbPass='JB##2019'
+    dbSID=webqa2
+    ;;
+
+  CA_QA1_BGB_BUILD_OWNER )
+    dbUser=CA_QA1_BGB_BUILD_OWNER
+    dbPass=CA_QA1_BGB_BUILD_OWNER9
+    dbSID=webqa2
+    ;;
+
+  QACMX_BUILD_OWNER )
+    dbUser=cmxqa_build_owner
+    dbPass=cmxqabuildowner
+    dbSID=webqa2
+    ;;
+
+  CMXQA_BUILD_OWNER )
+    dbUser=cmxqa_build_owner
+    dbPass=cmxqabuildowner
+    dbSID=webqa2
+    ;;
+
+  SAC_QA_BUILD_OWNER )
+    dbUser=SAC_QA_BUILD_OWNER
+    dbPass=Sac_Qa_2020
+    dbSID=webqa2
+    ;;
+
+  SAC_RGS_USA_BUILD_OWNER )
+    dbUser=SAC_RGS_USA_BUILD_OWNER
+    dbPass=SAC_RGS_USA_BUILD_OWNER9
+    dbSID=webqa2
+  ;;
+
+  SAC_RGS_CAN_BUILD_OWNER )
+    dbUser=SAC_RGS_CAN_BUILD_OWNER
+    dbPass=SAC_RGS_CAN_BUILD_OWNER9
+    dbSID=webqa2
+  ;;
+
+  * )
+    dbUser=$(getdb $SCHEMA | awk -F\| '{ print $3 }')
+    dbPass=$(getdb $SCHEMA | awk -F\| '{ print $4 }')
+    dbSID=$(getdb $SCHEMA | awk -F\| '{ print $5 }')
+  ;;
+
+esac
+
+[[ -z $dbUser || -z $dbPass ]] && BailOut "Unable to get creds for $SCHEMA schema"
+[[ -z $dbOwner ]] && dbOwner=$dbUser
+[[ -z $dbHost ]] && dbHost=webqark2p.wsgc.com
+dbPort=3800
+
+[[ -z $ROLE ]] && { showPrivs; BailOut "Need user Role"; }
+
+SQLCMD="${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+case $ROLE in 
+  regadmin )
+    GROUP_LIST="REGTOOL_ADMIN"
+    ROLE_LIST="ROLE_USER ROLE_REGTOOL_ADMIN ROLE_GRP_ADMIN_REGTOOL_ADMIN ROLE_ECOM_REG_INQUIRY"
+   ;;
+
+  datafeeds )
+    GROUP_LIST="DF_USER DF_ADMIN"
+    ROLE_LIST="ROLE_USER ROLE_DF_ACCESS ROLE_DF_ADMIN ROLE_DF_ALL_ADMIN"
+    ;;
+
+  promoadmin-non-it )
+    GROUP_LIST="\
+PROMO_@@_ADMIN \
+PROMO_@@_APPROVER \
+PROMO_@@_AUTHOR \
+PROMO_@@_VIEWER \
+PROMO_@@_CODEREQER "
+    ROLE_LIST="\
+ROLE_USER \
+ROLE_PROMO_ITAUTHOR_REVOKE \
+ROLE_PROMO_ACCESS \
+ROLE_PROMO_IT_AUTHOR \
+ROLE_PROMO_@@_VIEW \
+ROLE_PROMO_@@_AUTHOR \
+ROLE_PROMO_@@_APPROVE \
+ROLE_PROMO_@@_CODEREQ \
+ROLE_PROMO_@@_REVOKE "
+    DELETE_GROUPS="\
+PROMO_ITAUTHOR_ADMIN \
+PROMO_ITAUTHOR_CODEREQER \
+PROMO_ITAUTHOR_VIEWER \
+PROMO_IT_ADMIN \
+PROMO_IT_AUTHOR \
+PROMO_IT_READER"
+    DELETE_ROLES="\
+ROLE_PROMO_ITAUTHOR_VIEW \
+ROLE_PROMO_ITAUTHOR_AUTHOR \
+ROLE_PROMO_ITAUTHOR_REVOKE \
+ROLE_PROMO_ITAUTHOR_CODEREQ"
+    ;;
+
+  promoadmin-it )
+    GROUP_LIST="\
+PROMO_ITAUTHOR_ADMIN \
+PROMO_ITAUTHOR_CODEREQER \
+PROMO_ITAUTHOR_VIEWER \
+PROMO_IT_ADMIN \
+PROMO_IT_AUTHOR \
+PROMO_IT_READER"
+    ROLE_LIST="\
+ROLE_USER \
+ROLE_PROMO_ACCESS \
+ROLE_PROMO_ITAUTHOR_VIEW \
+ROLE_PROMO_ITAUTHOR_AUTHOR \
+ROLE_PROMO_ITAUTHOR_REVOKE \
+ROLE_PROMO_ITAUTHOR_CODEREQ\
+"
+    DELETE_GROUPS="\
+PROMO_@@_ADMIN \
+PROMO_@@_APPROVER \
+PROMO_@@_AUTHOR \
+PROMO_@@_VIEWER \
+PROMO_@@_CODEREQER "
+    DELETE_ROLES="\
+ROLE_PROMO_ACCESS \
+ROLE_PROMO_@@_VIEW \
+ROLE_PROMO_@@_AUTHOR \
+ROLE_PROMO_@@_APPROVE \
+ROLE_PROMO_@@_REVOKE \
+ROLE_PROMO_@@_CODEREQ "
+    ;;
+
+  bgb | buildsystem )
+    GROUP_LIST="\
+BGB_USER \
+BGB_ADMIN \
+BGB_@@_ADMIN \
+@@_ADMIN"
+    ROLE_LIST="\
+ROLE_USER \
+ROLE_BGB_ACCESS \
+ROLE_BGB_ADMIN \
+ROLE_BGB_QA_CTRL \
+ROLE_BGB_DEV_CTRL \
+ROLE_BGB_ALLINST_ACCESS \
+ROLE_BGB_CAT_ACTIVATE \
+ROLE_BGB_CAT_RESTAGE \
+ROLE_BGB_CAT_STAGE \
+ROLE_BGB_CORPADMIN_ACCESS \
+ROLE_BGB_CORP_ACCESS \
+ROLE_BGB_DISPLAY_SEASON \
+ROLE_BGB_DOC_ACTIVATE \
+ROLE_BGB_DOC_RESTAGE \
+ROLE_BGB_DOC_STAGE \
+ROLE_BGB_@@_ACCESS \
+ROLE_GRP_ADMIN_BGB_@@_ADMIN"
+    DELETE_ROLES=
+    ;;
+
+  admintool )
+    GROUP_LIST="\
+ECOM_ADMIN \
+ECOM_QA \
+ECOM_@@_ADMIN"
+    ROLE_LIST="ROLE_USER ROLE_ECOM_ALL_ADMIN ROLE_GRP_ADMIN ROLE_CSITE_ADMIN"
+    DELETE_ROLES=
+    ;;
+  * ) BailOut "Unknown ROLE $ROLE" ;;
+esac
+
+echo "Running on $(hostname)"
+
+#showPrivs
+
+[[ -z $GROUP_LIST ]] && BailOut "No groups defined for $ROLE"
+
+sql="insert into $SCHEMA.SECURITY_USERS (USER_NAME, DISPLAY_NAME, EMAIL_ADDRESS) VALUES ('$USER', '$USER', '$USER@wsgc.com');
+commit;"
+echo "$sql" | sqlplus -S "$SQLCMD" >/dev/null 2>&1
+
+if [[ $ROLE = "bgb" || $ROLE = "buildsystem" ]]
+then
+  echo "* BGB/BuildSystem *"
+  echo "+ BUILD_USERS"
+  sql="insert into $SCHEMA.BUILD_USERS (USER_NAME, USER_DESC, USER_EMAIL) VALUES ('$USER', '$USER', '$USER@wsgc.com');"
+  echo "$sql" | sqlplus -S "$SQLCMD" >/dev/null 2>&1
+
+#  echo "+ BUILD_USER_ROLES"
+#  echo "insert into $SCHEMA.BUILD_USER_ROLES (USER_NAME, ROLE_CONTEXT, ROLE_SET, ROLE_NAME) VALUES ('$USER', '*', 'BUILDSELECT');" | sqlplus -S "$SQLCMD" #>/dev/null 2>&1
+#  echo "insert into $SCHEMA.BUILD_USER_ROLES (USER_NAME, ROLE_CONTEXT, ROLE_SET, ROLE_NAME) VALUES ('$USER', '*', 'SITEMGR');" | sqlplus -S "$SQLCMD" #>/dev/null 2>&1
+
+  echo "commit;" | sqlplus -S "$SQLCMD" >/dev/null 2>&1
+fi
+
+if [[ $ROLE = "admintool" ]]
+then
+  echo "commit;" | sqlplus -S "$SQLCMD" >/dev/null 2>&1
+fi
+
+[[ -n $DELETE_ROLES ]] && /bin/echo -ne "Remove roles "
+for role in $DELETE_ROLES
+do
+  /bin/echo -ne "$role "
+  for b in $(getbrandlist | tr '[:lower:]' '[:upper:]')
+  do
+    r=$(sed -es/@@/$b/gi <<< $role)
+    sql="delete from $SCHEMA.SECURITY_USER_AUTHORITY  where USER_NAME='$USER' and AUTHORITY_NAME='$r';
+commit;"
+    echo "$sql" | sqlplus -S "$SQLCMD" >/dev/null 2>&1
+    [[ $role =~ @@ ]] || continue
+  done
+done
+echo
+
+[[ -n $DELETE_GROUPS ]] && /bin/echo -ne "Remove groups "
+for grp in $DELETE_GROUPS
+do
+  /bin/echo -ne "$grp "
+  for b in $(getbrandlist | tr '[:lower:]' '[:upper:]')
+  do
+    g=$(sed -es/@@/$b/gi <<< $grp)
+    sql="delete from $SCHEMA.SECURITY_USER_GROUP where USER_NAME='$USER' and GROUP_NAME='$g';
+commit;"
+    echo "$sql" | sqlplus -S "$SQLCMD" >/dev/null 2>&1
+    [[ $grp =~ @@ ]] || continue
+  done
+done
+echo
+
+echo "Add groups "
+for grp in $GROUP_LIST
+do
+    echo "$grp "
+    for b in $(getbrandlist | tr '[:lower:]' '[:upper:]')
+    do
+      g=$(sed -es/@@/$b/gi <<< $grp)
+      sql="insert into $SCHEMA.SECURITY_USER_GROUP  (USER_NAME, GROUP_NAME) VALUES ('$USER', '$g');
+commit;"
+      #echo "$sql"
+      echo "$sql" | sqlplus -S "$SQLCMD" | egrep -iv "$ORACLE_HIDE"
+      [[ $grp =~ @@ ]] || continue
+    done
+done
+echo
+
+echo "Add roles "
+for role in $ROLE_LIST
+do
+    echo "$role "
+    for b in $(getbrandlist | tr '[:lower:]' '[:upper:]')
+    do
+      r=$(sed -es/@@/$b/gi <<< $role)
+      sql="insert into $SCHEMA.SECURITY_USER_AUTHORITY  (USER_NAME, AUTHORITY_NAME) VALUES ('$USER', '$r');
+commit;"
+      #echo "$sql"
+      echo "$sql" | sqlplus -S "$SQLCMD" | egrep -iv "$ORACLE_HIDE"
+      [[ $role =~ @@ ]] || continue
+    done
+done
+echo
+
+#echo "commit;" | sqlplus -S "$SQLCMD"
+showPrivs
+
+if [[ -n $TICKET ]] 
+then
+  showPrivs > /tmp/showprivs.out
+
+  jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): $USER added to $ROLE role for schema $SCHEMA [$RUNBY]"
+  #rm -f /tmp/showprivs.out
+else
+  echo "No Ticket"
+fi
+
+exit 0

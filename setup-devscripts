@@ -1,0 +1,12 @@
+#!/bin/bash
+export TMPDIR=/tmp/devscripts
+
+cd /tmp
+
+git clone git@github.wsgc.com:eCommerce-DevOps/devscripts.git
+
+cd $TMPDIR
+./setupdevscripts
+
+rm -rf /tmp/devscripts
+

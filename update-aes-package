@@ -1,0 +1,164 @@
+#!/bin/bash
+
+# this is a work-in-progress
+PATH=/apps/mead-tools:/apps:/apps/maven/latest/bin:/apps/java/bin:/apps/emacs-nox-24.5/bin:/home/mavenbuild/bin/devscripts:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/puppetlabs/bin:/home/mavenbuild/bin:/apps:~/bin
+export PATH
+
+# generic constants
+SCM_HOST=tlsrck-vdcn005.wsgc.com
+RELEASE_TOOLS_CONFIGS="git@github.wsgc.com:eCommerce-DevOps/release-tools-configs.git"
+ARTIFACTORY="https://artifactory.wsgc.com/artifactory/wsgc-releases/com/wsgc"
+SNAPSHOT="https://snapshotrepo.wsgc.com/artifactory/snapshotrepo/com/wsgc"
+SUBVERSION="https://repos.wsgc.com/svn/"
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+GITHUB="git@github.wsgc.com"
+MAVENHOME=/home/mavenbuild/mavenrelease
+NS="http://maven.apache.org/POM/4.0.0"
+[[ -z $BUILD_USER_ID ]] && BUILD_USER_ID="$LOGNAME"
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+####
+
+# generic error-and-exit function
+BailOut() {
+  { ret=$?; set +x; } 2>/dev/null
+	echo 
+	if [ -n "$1" ] 
+	then
+		echo "Error: $*" 
+		timeStamp "Failed"
+        echo
+	fi
+  exit 1
+}
+
+timeStamp() { echo ">>> $* $(date +'%Y-%m-%d %H:%M') <<<"; }
+
+listEnvironments() {
+    echo
+    echo "Available environments:"
+    for project in $(grep "CONFIG_.*=[a-z].*" $PROJECT_FILE | egrep -vi "_prd|_com|_rerun|_tomcat" | awk -F= '{ print $1 }' | sed -es/CONFIG_//g | sort)
+    do
+        echo "      - $project"
+    done
+    echo
+} 
+
+# change to the temp working directory for a given config package
+getConfig() {
+	CFG=$1
+	cd $TMP || BailOut "Why can't we cd to $TMP?"
+  CFG_DIR=$(basename $(echo "$CFG" | awk -F\# '{ print $1 }') | sed -es!/trunk!!g -es!/config!!g -es!/\$!!g -es/\.git//g)
+
+	[ -z "$CFG_DIR" ] && BailOut "Couldn't figure out dir for $CFG"
+
+	# check out the config
+	checkOut $CFG $TMP/$CFG_DIR || BailOut "Couldn't checkOut $config"
+}
+
+# check out a repo
+checkOut() {
+	REPO="$1"
+	DIR="$2"
+
+	/bin/echo -ne "~~~ Checking out $REPO to $DIR "
+	rm -rf $DIR
+
+  # this branch business is a work-in-progress
+  REPO_URL=$(echo $REPO | awk -F\# '{ print $1 }' 2>/dev/null)
+  REPO_BRANCH=$(basename $(echo $REPO | awk -F\# '{ print $2 }') 2>/dev/null | sed -e s!branch/!!g )
+  #echo "ARTIFACT: $REPO_BRANCH"
+  if [ -n "$REPO_BRANCH" ]
+  then
+    git clone -b $REPO_BRANCH $REPO_URL $DIR >/dev/null 2>&1 || BailOut "Couldn't git clone $REPO $DIR"
+  else
+    git clone $REPO $DIR >/dev/null 2>&1 || BailOut "Couldn't git clone $REPO $DIR"
+  fi
+}
+
+# parse arguments
+while [ $# -gt 0 ]
+do
+	case $1 in
+		-e | --env | --environment )  
+			$(echo "$2" | grep -q -- "^-") || { ENVIRONMENT="$2"; } 
+			shift;;
+    -b | --brand )
+			$(echo "$2" | grep -q -- "^-") || { BRAND="$2"; } 
+			shift;;
+    -v | --version )
+			$(echo "$2" | grep -q -- "^-") || { VERSION="$2"; } 
+			shift;;
+#		-p|--project )  
+#			$(echo "$2" | grep -q -- "^-") || { PROJECT="$2"; } 
+#			shift;;
+		-c|--comments )  
+			$(echo "$2" | grep -q -- "^-") || { COMMENTS="$2"; } 
+			shift ;;
+		-t|--ticket )  
+			$(echo "$2" | grep -q -- "^-") || { TICKET="$2"; } 
+			shift;;
+		-m|--maven_opts ) 
+			MAVEN_EXTRA="$(echo $2 | sed -e s/'depversion '/'depversion='/g)";
+			shift ;;
+		* ) shift ;;
+	esac
+done
+
+[ -z "$VERSION" ] && BailOut "Need version!"
+[ -z "$BRAND" ] && BailOut "Need brand!"
+#[ -z "$TICKET" ] && BailOut "Need ticket!"
+PROJECT="assortment-export-service-$BRAND"
+#[ -n "$MAVEN_EXTRA" ] && MAVEN_EXTRA="-m \"$MAVEN_EXTRA\""
+
+# fetch project file from release-tools-configs
+TMP=/tmp/$(basename $0)-$LOGNAME
+rm -rf $TMP/release-tools-configs
+git clone $RELEASE_TOOLS_CONFIGS $TMP/release-tools-configs >/dev/null 2>&1 || BailOut "Can't clone $RELEASE_TOOLS_CONFIGS"
+cd $TMP/release-tools-configs
+PROJECT_FILE="$TMP/release-tools-configs/$PROJECT.project"
+[ ! -f "$PROJECT_FILE" ] && BailOut "Can't find project file for $PROJECT ($PROJECT_FILE)"
+
+# source project - read it into our shell namespace
+. $PROJECT_FILE
+[ -n "$DEBUG" ] && cat $PROJECT_FILE | egrep -iv "^$|^#"
+
+# build a list of configs to update
+#echo "### Building config list " 
+set -x
+CONFIG_LIST=$(grep -i "CONFIG_${ENVIRONMENT}=" $PROJECT_FILE | awk -F= '{ print $2 }')
+
+# if they haven't provided an environment, show them the list
+[[ -z $CONFIG_LIST ]] && BailOut "Need environment$(listEnvironments)"
+
+# update each of the configs in turn
+for config in $CONFIG_LIST
+do
+	echo "### Update config $config " 
+	getConfig $config
+done
+
+[[ -n $TICKET ]] && LABEL=$TICKET || LABEL="JENKINS"
+
+cd $TMP/$CFG_DIR || BailOut "Can't cd to $TMP/$CFG_DIR"
+OLD_VERSION=$(propget -f pom.xml -p $ARTIFACT_JAR_PROP)
+MESSAGE="[$LABEL] update $PROJECT $OLD_VERSION -> $VERSION $COMMENTS ($BUILD_USER_ID)"
+
+propset -f pom.xml -p $ARTIFACT_JAR_PROP -v $VERSION
+git diff pom.xml
+git add pom.xml
+git commit pom.xml -m "$MESSAGE" 
+git push
+ret=$?
+
+[[ $ret != 0 ]] && BailOut "Failed"
+[[ -n $TICKET ]] && jira-comment "$TICKET" "$ICON_SUCC update $PROJECT $OLD_VERSION -> $VERSION ($BUILD_USER_ID)
+$COMMENTS 
+"
+
+exit $ret
+

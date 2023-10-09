@@ -1,0 +1,36 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/opt/homebrew/bin:~/bin
+
+BRAND=$(tr '[:lower:]' '[:upper:]' <<< $1)
+[[ -z $BRAND ]] && exit 1
+
+case $BRAND in
+	66 ) echo "mg" ;;
+	76 ) echo "camg" ;;
+
+	63 ) echo "pb" ;;
+	73 ) echo "capb" ;;
+
+	65 ) echo "pk" ;;
+	75 ) echo "capk" ;;
+
+	67 ) echo "pt" ;;
+	77 ) echo "capt" ;;
+
+	69 ) echo "we" ;;
+	79 ) echo "cawe" ;;
+
+	61 ) echo "ws" ;;
+	71 ) echo "caws" ;;
+
+	62 ) echo "rj" ;;
+	72 ) echo "carj" ;;
+
+	68 ) echo "gr" ;;
+	78 ) echo "cagr" ;;
+
+	600 ) echo "admin" ;;
+	* ) exit 1 ;;
+esac
+
+exit 0

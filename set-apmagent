@@ -1,0 +1,85 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/opt/homebrew/bin:~/bin:$PATH
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+
+BRAND=$1
+ENVIRO=$2
+ACTION=$3
+TICKET=$4
+CFG_DIR="application/frontend-2.1/qa/config/app/trunk/"
+CFG="require-devops-appdynamics-support.cfg"
+[[ -n $TICKET ]] && MESSAGE="[$TICKET]" || MESSAGE="[DEVOPS]"
+
+BailOut() {
+	[[ -n $1 ]] && echo "$*" 
+	echo "$(basename $0): <brand> <env> <enable|disable> [ticket]"
+	echo 
+	exit 1
+}
+
+[[ -z $ACTION ]] && BailOut
+
+if [[ $BRAND = "all" ]]
+then
+  for BRAND in $(getbrandlist $ENVIRO)
+	do
+		eval $0 $BRAND $ENVIRO $ACTION $TICKET
+	done
+	exit 1
+fi
+
+WSI_SETTINGS=$HOME/.wsi_settings
+[ -f "$WSI_SETTINGS" ] || BailOut "Can't find $HOME/.wsi_settings"
+
+WSI_SETTINGS_DIR=$(cat $HOME/.wsi_settings)
+[ -n "$WSI_SETTINGS_DIR" ] || BailOut "Why is $HOME/.wsi_settings empty?"
+
+cd $WSI_SETTINGS_DIR || BailOut "Could not cd to $WSI_SETTINGS_DIR" 
+
+cd $CFG_DIR || BailOut "Could not cd to $WSI_SETTINGS_DIR/$CFG_DIR"
+
+cd $BRAND/$ENVIRO || BailOut "Couldn't cd to $(pwd)/$BRAND/$ENVIRO"
+#svn cleanup
+svn up
+
+if [ ! -d src/main ]
+then
+	svn mkdir --parents $BRAND/$ENVIRO/src/main
+  svn commit -q $BRAND/$ENVIRO/src $BRAND/$ENVIRO/src/main -m "$MESSAGE $(basename $0): enable apmagent"
+fi
+
+cd src/main || BailOut "Couldn not cd to $CFG_DIR/$BRAND/$ENVIRO/src/main"
+
+case $ACTION in
+	enable|on|start )
+		touch $CFG
+		svn add $CFG 
+		svn propset svn:mime-type "text/plain" $CFG
+		svn propset svn:eol-style "native" $CFG
+		svn propset svn:keywords "Id Author LastChangedDate LastChangedBy" $CFG
+    svn commit -q -m "$MESSAGE $(basename $0): enable apmagent"
+	;;
+	
+	disable|off|stop )
+		svn rm $CFG
+    svn commit -q -m "$MESSAGE $(basename $0): disable apmagent"
+	;;
+
+	* ) BailOut "No idea what \"$ACTION\" means"
+esac 
+
+svn up
+
+[[ -n $TICKET ]] && jira-comment $TICKET "${ICON_INFO} $(basename $0): $ACTION AppDynamics for $BRAND $ENVIRO"
+
+jenkins-jnlp build checkenv -p Brand=$BRAND -p Environment=$ENVIRO -p Options=Rebuild-Config -p Options=Deploy-War -p Options=Clear-Logs -p RunBy=$LOGNAME -p Ticket=$TICKET
+
+exit 0
+
+

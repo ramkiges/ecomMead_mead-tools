@@ -1,0 +1,134 @@
+#!/bin/bash
+# backend setting scriptlet for eqa3/veqa3
+#
+echo "/// [$(basename $0)-veqa3] Backend settings for $BRAND $ENVIRO $BACKEND ///"
+
+[[ -z $BRAND || -z $ENVIRO || -z $BACKEND ]] && { echo "*** This script is not meant to be run standalone - use 'set-backend' ***"; exit 255; }
+
+echo "* update manifest $BRAND $ENVIRO"
+set -x
+#eval $SMP -p shared -v $BACKEND-shared -s pricing 
+#eval $SMP -p shared -v $BACKEND-shared -s pricing-singleuse-batch-generator
+#eval $SMP -p shared -v $BACKEND-shared -s promo-publisher 
+#eval $SMP -p shared -v $BACKEND-shared -s cart-checkout 
+#eval $SMP -p shared -v $BACKEND-shared -s inventory-service
+#eval $SMP -p shared -v $BACKEND-shared -s ecom-svc-catalog 
+#eval $SMP -p shared -v $BACKEND-shared -s catalog-pb 
+#eval $SMP -p shared -v $BACKEND-shared -s registryv2
+#eval $SMP -p shared -v $BACKEND-shared -s registryv3
+#eval $SMP -p shared -v $BACKEND-shared -s membership-service
+#eval $SMP -p shared -v $BACKEND-shared -s ecom-svc-registry
+#eval $SMP -p shared -v $BACKEND-shared -s ecom-app-registry
+#eval $SMP -p shared -v $BACKEND-shared -s ecom-app-phygital
+{ set +x; } 2>/dev/null
+
+cd $TMP
+echo "* update appsettings $BRAND $ENVIRO"
+domkey=$(get-domain $BRAND $ENVIRO | awk -F\. '{ print $1 }' | sed -es/-//g)
+#set -x
+
+$UPDATE_SETTING GEO_PROVINCES_API.STATES_PROVINCES_URL.s=https://ecommerce-ecom-svc-customer-eqa3.services.west.nonprod.wsgc.com/api/geo/v1/provinces.json
+
+$UPDATE_SETTING "ECOMSERV.STORE_ESTIMATE_SERVICE_URI.r=https://retailordersqa.wsgc.com/UISCOM/api/v1/estimate/"
+$UPDATE_SETTING "ECOMSERV.STORE_ESTIMATE_REST_REDIRECT_URI.r=https://retailordersqa3.wsgc.com/UISCOM/Estimates/CSORedirect.aspx?estimateId="
+
+$UPDATE_SETTING COMAVS.AVS_REST_SERVICE_URL.s=https://ecommerce-avs-service-qa.services.west.nonprod.wsgc.com/address-verification-service/v1/
+$UPDATE_SETTING APPLE_PAY.EPS_TOKEN_SCHEME.s=BTVT_PMNT_QA3 
+$UPDATE_SETTING APPLE_PAY.MERCHANT_IDENTIFIER.s=merchant.com.williams-sonoma.sandbox
+
+$UPDATE_SETTING PAYPAL.EPS_TOKEN_SCHEME.s=BTPP_PMNT_QA2
+$UPDATE_SETTING PAYMENT.TOKENIZATION_EPS_URLS.a=https://tibintdevsac5p.wsgc.com:19092/paymentservice/v1
+
+$UPDATE_SETTING SINGLE_PAGE_CHECKOUT.COUNTDOWN_TIMER_AB_ENABLED.b=true
+$UPDATE_SETTING PIP_ASSORTMENT_CONFIGURATION.BUNDLESET_EXPLODING_ENABLED.b=true 
+
+$UPDATE_SETTING AB_TESTS.GLOBAL_AB_TESTS_ENABLED.b=false
+[[ $BRAND = "we" ]] && wsi_settings.sh "$COMMENTS" --brand we     --env $ENVIRO -v --bulk AB_TESTS.GLOBAL_AB_TESTS_ENABLED.b=true
+
+$UPDATE_SETTING BIZSALES.SERVICE_URI.r=https://ecommerce-salesforceconnector-qa.services.west.nonprod.wsgc.com/designer-service/v2/designer/
+$UPDATE_SETTING PRICING.PROMOTION_SERVICE_URI.r=https://ecommerce-pricing-veqa3.services.west.nonprod.wsgc.com
+$UPDATE_SETTING PRICING.SERVICE_URI.r=https://ecommerce-pricing-veqa3.services.west.nonprod.wsgc.com
+$UPDATE_SETTING INVENTORY.INVENTORY_MICROSERVICE_URI.r=https://ecommerce-inventory-service-veqa3.services.west.nonprod.wsgc.com/inventory/v2
+$UPDATE_SETTING ECOMSERV.STORE_ORDER_CONFIRMATION_URL.s=https://retailordersqa2.wsgc.com/UIScom/Estimates/OrderUpdate.aspx
+$UPDATE_SETTING PRODUCT_CONFIGURATOR.SERVICE_URI.r=https://eqa3-product-configuration-service-supplychain.services.west.nonprod.wsgc.com/v1/products
+
+$UPDATE_SETTING DOMAIN_PUBLISHER_CLIENT.DOMAIN_PUBLISHER_OVERRIDE_KEY.s=${domkey}_${REALM}
+
+#$UPDATE_SETTING JMSPFX.ABANDONED_ORDERS_CAPTURE.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.DEFAULTPREFIX.s=Q.WSI.INT2.GIZMO.
+#$UPDATE_SETTING JMSPFX.INVENTORY_RESERVATION.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.MOBILE_CAPTURE.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.OMS_INVENTORY.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.OMS_ORDER_CREATE_ACK_CLE.s=Q1.WSI.STST.
+#$UPDATE_SETTING JMSPFX.OMS_ORDER_CREATE_ACK.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.ORDER_CREATE.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.PRICING_SERVICE.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.PROMOTION_SERVICE.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.RELEASE_PROMOTION.s=Q.WSI.STST.
+#$UPDATE_SETTING JMSPFX.WISMO.s=Q.WSI.STST.
+
+$UPDATE_SETTING COMCRT.SAVEDCARTCOOKIE.s=${BRAND_UC}MX_SAVEDCART_QA2
+$UPDATE_SETTING COMCRT.SESSIONCARTCOOKIE.s=${BRAND_UC}MX_SESCART_QA2
+$UPDATE_SETTING COMCAT.BANNERCOOKIE.s=${BRAND_UC}MX_BANNERS_QA2
+
+#$UPDATE_SETTING COMSES.DATATABLE.s=${BRAND_UC}PE_SESSION_DATA
+#$UPDATE_SETTING COMSES.INFOTABLE.s=${BRAND_UC}PE_SESSION_INFO
+$UPDATE_SETTING COMSES.POTENTIALSECURECOOKIENAME.s=${BRAND_UC}PE_PSSID_QA2
+$UPDATE_SETTING COMSES.SECURECOOKIENAME.s=${BRAND_UC}PE_SSID_QA2
+$UPDATE_SETTING COMSES.COOKIENAME.s=${BRAND_UC}PE_SID_QA2
+
+#$UPDATE_SETTING COMREG.REG_STS_COOKIENAME.s=${BRAND_UC}MX_REGSTS_QA
+
+$UPDATE_SETTING CHKT.KAFKA_TOPIC_PREFIX.s=QA3.B.
+$UPDATE_SETTING AFFIRM.EPS_TOKEN_SCHEME.s=AFP_PMNT_QA3
+$UPDATE_SETTING VENMO.EPS_TOKEN_SCHEME.s=BTVT_PMNT_QA3
+$UPDATE_SETTING CART_CHECKOUT.SERVICE_URI.r=https://ecommerce-cart-checkout-veqa3.services.west.nonprod.wsgc.com/cartservice/v1/domain/
+$UPDATE_SETTING ORDER_HISTORY_SERVICE.URL.s=https://eqa3-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/orderservice/v1/history
+$UPDATE_SETTING ORDER_SERVICE.URL.s=https://eqa3-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/orderservice/v1/orders/
+$UPDATE_SETTING SELF_SERVICE.APPOINTMENTS_URL.s=https://eqa3-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/appointment/v1/workorders/
+$UPDATE_SETTING SELF_SERVICE.RESCHEDULE_ELIGIBILITY_URL.s=https://eqa3-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/appointment/reschedule/v1/workorders/
+$UPDATE_SETTING SINGLE_PAGE_CHECKOUT.CARE_CENTER_REDIRECT_BASE_URL.r=https://eqa3-ccui.wsgc.com/oms/#/detail/order/default/
+$UPDATE_SETTING TRACKING_SERVICE.URL.s=https://eqa3-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/trackingservice/v1/
+$UPDATE_SETTING TRACKING_SERVICE.THIRD_PARTY_SERVICE_URI.r=https://eqa3-wsi-gateway-supplychain.services.west.nonprod.wsgc.com/gateway/process/shipments/tracking/details
+$UPDATE_SETTING LOYALTY.KAFKA_TOPIC_PREFIX.s=QA3.L.
+$UPDATE_SETTING GEO_PROVINCES_API.STATES_PROVINCES_URL.s=https://ecommerce-ecom-svc-customer-eqa3.services.west.nonprod.wsgc.com/api/geo/v1/provinces.json
+$UPDATE_SETTING PAYMENT.TOKENIZATION_EPS_SCC_SCHEME.s=WSI_SCC_QA3
+$UPDATE_SETTING CREATE_ONLINE_RETURN_SERVICE.SERVICE_URI.r=https://TIBINTTSTSAC5P.wsgc.com:19106/v1/CreateOnlineReturn
+$UPDATE_SETTING INVENTORY_OMS_RESERVATION_REST.SERVICE_URI.r=https://tibintdevmp3p.wsgc.com:19110
+$UPDATE_SETTING INVENTORY_OMS_REST.SERVICE_URI.r=https://tibintdevmp3p.wsgc.com:19104
+$UPDATE_SETTING ORDER_RETURN_DETAILS_SERVICE.SERVICE_URI.r=https://tibintdevmp3p.wsgc.com:19105/v1/GetOrderReturnEligibility
+$UPDATE_SETTING ORDERSCREENING.SERVICE_URL.s=https://tibintdevmp5p.wsgc.com:19096/ecommerce/orderfraudscreening
+$UPDATE_SETTING UPS_TRACKING_SERVICE.SERVICE_URI.r=https://tibinttstmp7p.wsgc.com:19109/v1/GetTrackingDetails
+{ set +x; } 2>/dev/null
+
+echo "* update $(basename $POM)"
+#set -x
+propset -f $POM -p frontend.jmsOrder.providerUrl -v tcp://tibintdevmp1p.wsgc.com:30002 
+propset -f $POM -p frontend.jmsOrder.username -v apptibco  
+propset -f $POM -p frontend.jmsOrder.password -v n3tw0rk 
+propset -f $POM -p frontend.jmsOrderPricing.providerUrl -v tcp://tibintdevmp1p.wsgc.com:30002 
+propset -f $POM -p frontend.jmsOrderPricing.username -v apptibco 
+propset -f $POM -p frontend.jmsOrderPricing.password -v n3tw0rk 
+propset -f $POM -p frontend.jmsOrderCreate.providerUrl -v tcp://tibintdevmp1p.wsgc.com:30002 
+propset -f $POM -p frontend.jmsOrderCreate.username -v apptibco 
+propset -f $POM -p frontend.jmsOrderCreate.password -v n3tw0rk 
+propset -f $POM -p frontend.jmsOrderReservation.providerUrl -v tcp://tibintdevmp1p.wsgc.com:30002 
+propset -f $POM -p frontend.jmsOrderReservation.username -v apptibco 
+propset -f $POM -p frontend.jmsOrderReservation.password -v n3tw0rk 
+propset -f $POM -p frontend.jms.providerUrl -v tcp://tibintdevmp1p.wsgc.com:30002
+propset -f $POM -p frontend.jms.username -v apptibco
+propset -f $POM -p frontend.jms.password -v n3tw0rk
+propset -f $POM -p frontend.jms.subscriberClientId -v @NODENAME@
+propset -f $POM -p frontend.jmsWismo.providerUrl -v tcp://tibintdevmp1p.wsgc.com:30002
+propset -f $POM -p frontend.jmsWismo.username -v apptibco
+propset -f $POM -p frontend.jmsWismo.password -v n3tw0rk
+propset -f $POM -p frontend.jmsWismo.usernameCov2 -v apptibco
+propset -f $POM -p frontend.jmsWismo.passwordCov2 -v n3tw0rk
+{ set +x; } 2>/dev/null
+
+if [[ $MARKET = "CAN" ]]
+then
+  echo "* update $MARKET-specific settings"
+{ set +x; } 2>/dev/null
+fi
+

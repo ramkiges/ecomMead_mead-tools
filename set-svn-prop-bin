@@ -1,0 +1,14 @@
+#!/bin/bash
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin:~/bin
+# set SVN properties for text files
+
+exit
+for file in $*
+do
+	svn add $file 
+	svn propset svn:mime-type application/zip $file
+	svn propset svn:eol-style native $file
+	svn propset svn:keywords "Id Author LastChangedDate LastChangedBy" $file
+	svn commit -m "[DEVOPS] set text file properties"
+done
+

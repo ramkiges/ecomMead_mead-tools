@@ -1,0 +1,24 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin::/apps:~/bin:/wsgc/bin:$PATH
+
+BailOut() {
+    [ -n "$1" ] && (>&2 echo "$*")
+    (>&2 echo "Usage: $(basename $0) <file> <string>")
+    exit 1
+}
+
+FILE=$1
+STRING=$2
+
+[ -z "$STRING" ] && BailOut "Need string to search for"
+
+if svn status $FILE
+then
+    svn blame "$FILE" | grep -iE "$STRING" | awk '{ print $1 }' | 
+    while read COMMIT
+    do
+        svn log $FILE | grep -i -A+3 -B+1 "$COMMIT"
+    done
+fi
+
+exit 0

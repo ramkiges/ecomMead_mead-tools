@@ -1,0 +1,78 @@
+#!/bin/bash
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/apps/mead-tools
+# https://confluence.wsgc.com/display/ES/Jenkins+Restart+Automation
+
+CNAME="ecombuild"
+MODE=$1
+
+# only run on the Jenkins master
+[[ $(hostname) = "jnkrck-vdcn001" ]] || exit 1
+
+# sanity check to make sure we don't accidently run this
+captcha "$(basename $0) safety check" || { echo "CAPTCHA failed - will not restart"; exit 1; }
+
+MSG="The stakeholders in this channel have been identified as having an interest in Jenkins restart events"
+
+if [[ ! $MODE =~ quiet ]]
+then
+  #CHANNELS=$(cd $HOME/.credentials.d;ls slack-* 2>/dev/null | sed -es/slack-//g)
+  CHANNELS="team-devops-notice team-ecom-engineering team-esre-ecom pri-enterprise-devops-internal pri-enterprise-devops-mead pri-gr-feature-lab"
+  for ch in $CHANNELS
+  do
+    slack-comment -f Jenkins -c $ch -m "Jenkins ($CNAME) is being restarted." -s "Jenkins Restart"
+  done
+fi
+
+#set -x
+
+# turn off Tanium so it doesn't slow down our restart
+sudo systemctl stop taniumclient.service 
+sudo systemctl disable taniumclient.service
+
+sudo service httpd stop
+
+sleep 10 || true
+
+sudo service jenkins stop
+
+sleep 10 || true
+
+sudo kill $(ps -ef|egrep -i "jenkins|httpd|helm|kubedog|java" | egrep -iv "grep|$(basename $0)" | awk '{ print $2 }') >/dev/null 2>&1
+
+sleep 5 || true
+
+sudo kill -9 $(ps -ef|egrep -i "jenkins|httpd|helm|kubedog|java" | egrep -iv "grep|$(basename $0)" | awk '{ print $2 }') >/dev/null 2>&1
+
+# rotate logs
+sudo mv /var/log/weblogs/jenkins/jenkins.log /var/log/weblogs/jenkins/jenkins.log-$(date +'%Y%m%d%H%M')
+sudo touch /var/log/weblogs/jenkins/jenkins.log
+sudo chown jenkins:jenkins /var/log/weblogs/jenkins/jenkins.log
+sudo chmod 644 /var/log/weblogs/jenkins/jenkins.log
+
+#/bin/echo -ne "Please hit <ENTER> when you're ready to continue (this is your chance to take a look at things, make changes)"; read junk
+
+# turn off Tanium so it doesn't slow down our restart
+sudo systemctl stop taniumclient.service 
+sudo systemctl disable taniumclient.service
+
+sudo service jenkins start || exit 1
+
+sleep 90 || true
+
+sudo service httpd start || exit 1
+
+sleep 90 || true
+
+sudo service wsgc-machineagent restart || true
+
+if [[ ! $MODE =~ quiet ]]
+then
+  for ch in $CHANNELS
+  do
+    slack-comment -f Jenkins -c $ch -m "Jenkins ($CNAME) restart complete." -s "Jenkins Restart"
+  done
+fi
+
+sudo renice -n -10 $(ps -ef|grep -i '/usr/lib/jenkins/jenkins.war'|grep -iv 'grep'|awk '{ print $2 }')
+
+exit 0

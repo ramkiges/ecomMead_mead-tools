@@ -1,0 +1,66 @@
+#!/bin/bash
+# script to refresh the mead-tools executables - assumes privilege escalation is not available
+
+PATH=/usr/local/bin:/opt/homebrew/bin:/apps/mead-tools:/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+FILES=
+[[ $(whoami) = "jenkins" ]] || SUDO=$(which sudo)
+
+REPO=git@github.wsgc.com:ecommerce-Mead/mead-tools.git
+TMP=$(mktemp -d -t tmp.$(basename $0).XXX)
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  cd /tmp
+  exit 255
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  cd /tmp
+  [[ -n $TMP ]] && rm -rf $TMP
+  $SUDO rm -f /tmp/$(basename $0)
+}
+trap cleanUp EXIT
+
+git clone -q --depth 1 $REPO $TMP || BailOut "Unable to clone $REPO"
+cd $TMP || BailOut "Unable to cd to $TMP"
+
+if [[ $(uname) = "Darwin" ]]
+then 
+  ./install-local 
+  exit 0
+fi
+
+$SUDO cp $0 /tmp
+
+echo "$(basename $0) $(date +'%Y-%m-%d %H:%M')"
+type=$(hostname --short | awk -F- '{ print $1 }')
+
+[[ $type =~ jnkrck ]] && FILES=$(grep FILES= install-jenkins | awk -F= '{ print $2 }' | sed -es/\"//g)
+[[ $type =~ artrck ]] && FILES=$(grep FILES= install-lockerdev | awk -F= '{ print $2 }' | sed -es/\"//g)
+
+[[ -z $FILES ]] && exit 128
+
+for file in $(ls $FILES)
+do
+	echo "$file" | egrep -iq "generate-|txt$" && continue
+  f=$(basename $file)
+
+	$SUDO cp -du $file /apps/mead-tools
+done
+
+# update MFE matrix stuff
+git clone -q --depth 1 git@github.wsgc.com:eCommerce-Mead/mfe-matrix.git $TMP/mfe-matrix
+cd $TMP/mfe-matrix
+./install
+{ set +x; } 2>/dev/null
+
+#echo "* Reset *"
+/apps/mead-tools/get-etcd-env clean
+/apps/mead-tools/get-ecm-info clean
+/apps/mead-tools/get-adg-info clean
+
+echo "* Done *"
+
+exit 0

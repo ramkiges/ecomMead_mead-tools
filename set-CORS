@@ -1,0 +1,194 @@
+#!/bin/bash
+# hack of a script to configure CORS settings
+PATH=/opt/homebrew/bin:/usr/local/bin::/apps/mead-tools::/bin:/sbin:/usr/bin:/usr/sbin:$HOME/bin:$PATH
+export PATH
+
+# pre-loaded lists
+CCUI="\
+https://trn1-ccui.wsgc.com \
+https://home.trn1-ccui.wsgc.com \
+https://home.eqa1-ccui.wsgc.com \
+https://home.eqa2-ccui.wsgc.com \
+https://home.eqa3-ccui.wsgc.com \
+https://eqa1-ccui.wsgc.com \
+https://eqa2-ccui.wsgc.com \
+https://eqa3-ccui.wsgc.com"
+
+STRWEB="\
+https://retailordersqa1.wsgc.com \
+https://retailordersqa2.wsgc.com \
+https://retailordersqa3.wsgc.com \
+https://retailordersqa4.wsgc.com \
+https://retailordersqa5.wsgc.com \
+https://strwebappsqa1.wsgc.com \
+http://ssprck-vdwn008.wsgcdev.local \
+https://strwebappsqa2.wsgc.com \
+https://strwebappsqa3.wsgc.com \
+https://strwebappsqa4.wsgc.com \
+https://storeordersqa1.wsgc.com \
+https://storeordersqa2.wsgc.com \
+https://storeordersqa3.wsgc.com \
+https://storeordersqa4.wsgc.com \
+https://storeordersqa5.wsgc.com \
+https://rkscomqaweb1.wsgc.com \
+http://sptrck-vdwn001.wsgcdev.local \
+http://swwrck-vdwn006.nonprod.wsgc \
+"
+
+IMAGE="\
+https://img-qa-rk1v.wsgc.com \
+https://qark-images.grimgs.com \
+https://qark-images.mgimgs.com \
+https://qark-images.pbimgs.com \
+https://qark-images.pkimgs.com \
+https://qark-images.ptimgs.com \
+https://qark-images.rjimgs.com \
+https://qark-images.weimgs.com \
+https://qark-images.wsimgs.com \
+https://img-prd-rk1v.wsgc.com:49190 \
+https://invadj-prd-rk1v.wsgc.com \
+https://imgproc-rgs2-sac1v.wsgc.com \
+https://imgproc-qa7-sac1v.wsgc.com \
+https://imgproc-ca1-rk1v.wsgc.com \
+https://imgproc-perf-rk1v.wsgc.com \
+https://imgproc-rgs-sac1v.wsgc.com \
+https://imgproc-prd-rk1v.wsgc.com \
+"
+
+EXTERNAL="\
+https://fonts.gstatic.com \
+https://fonts.googleapis.com \
+https://cuat.comenity.net \
+https://retailuat.alldata.net \
+https://ccsorck-vdwn001.uat.comenity.net \
+https://www.affirm.com \
+https://sandbox.affirm.com \
+https://axes.alldata.net \
+https://westelm.quiq-api.com \
+https://api-2.curalate.com"
+
+LOCAL="\
+http://csorck-vdwn001.wsgcdev.local \
+http://csorck-vdwn002.wsgcdev.local \
+http://csorck-vdwn003.wsgcdev.local \
+http://storeordersdev.wsgcdev.local
+https://localhost:8469 \
+https://localhost:8465 \
+https://localhost:8461 \
+https://localhost:8463"
+
+MISC="https://stylestages.westelm.com,https://mobile-beta.westelm.com"
+
+OUTWARD="\
+https://designcrew-roomplanner-pb-uat.outwardinc.com \
+https://designcrew-roomplanner-we-uat.outwardinc.com \
+https://designcrew-roomplanner-ws-uat.outwardinc.com \
+https://designcrew-roomplanner-pb-staging.outwardinc.com \
+https://designcrew-roomplanner-we-staging.outwardinc.com \
+https://designcrew-roomplanner-ws-staging.outwardinc.com"
+
+AOS="https://ecommerce-aos-login-uat.services.west.nonprod.wsgc.com \
+https://ecommerce-aos-login-qa11.services.west.nonprod.wsgc.com \
+https://ecomrain-aos-login-wshomeca.services.west.nonprod.wsgc.com"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "Usge: $(basename $0) <brand> <env> [TICKET]"
+  exit 1  
+}
+
+BRAND=$1
+ENVIRO=$2
+TICKET=$3
+
+[[ -n $TICKET ]] && REASON="[$TICKET] set CORS for $BRAND $ENVIRO" || REASON="[DEVOPS] set CORS for $BRAND $ENVIRO"
+[[ -z $ENVIRO ]] && BailOut 
+
+CNAME=$(get-host $BRAND $ENVIRO)
+HOST=$(host $CNAME |grep -i addres | awk '{ print $1 }')
+
+TMP=/tmp/$(basename $0)
+ADG_REPO=git@github.wsgc.com:eCommerce-DevOps/delivery-gateway-helm-config.git
+ADG_DIR=$(get-adg-env $ENVIRO 2>/dev/null)
+
+# add the imagebase
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+POM=$FRONTEND/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+IB="https://qark-images.${BRAND}imgs.com https://img-qa-rk1v.wsgc.com"
+for i in $(svn --non-interactive cat $POM | \
+  egrep -i "imagebase|remoteContentArchiveUrlBases" | \
+  awk -F '[<>]' '{ print $3 }' | \
+  tr ',' '\n' | \
+  sed -es/'\${frontend.brand}'/$BRAND/g | \
+  awk -F/ '{ print $3 }' | \
+  sort -u )
+do
+  IB="$IB https://$i"
+done
+IB=$(echo "$IB" | xargs -n1 | sort -u | tr '\n' ' ') 
+
+# add the public URLs - this needs work
+for brand in $(getbrandlist)
+do
+  CORS_FE_PUB="https://www.$(getdomain $brand),$CORS_FE_PUB" 
+  CORS_FE_PRV="$(get-akamai $brand $ENVIRO),$CORS_FE_PRV"
+done
+
+CORS_FE_PUB=$(sed -es/,$//g <<< $CORS_FE_PUB)
+CORS_FE_PRV=$(sed -es/,$//g <<< $CORS_FE_PRV)
+
+#CORS_SVN="https://$CNAME,https://$HOST,$FRONTEND,$CCUI,$AOS,$STRWEB,$IB,$IMAGE,$EXTERNAL,$LOCAL,$MISC"
+#CORS_SVN="https://$CNAME,https://$HOST,$CORS_FE_PRV,$CORS_FE_PUB,$CCUI,$AOS,$STRWEB,$IB,$EXTERNAL,$LOCAL,$MISC"
+#CORS_SVN="https://$CNAME,https://$HOST,$CORS_FE_PRV,$CCUI,$AOS,$STRWEB,$IB,$EXTERNAL,$LOCAL,$MISC,https://$ENVIRO-$BRAND.wsgc.com"
+CORS_SVN="$CORS_FE_PRV,$CCUI,$AOS,$STRWEB,$IB,$EXTERNAL,$LOCAL,$MISC,https://$ENVIRO-$BRAND.wsgc.com"
+[[ $BRAND = we || $BRAND = pb || $BRAND = ws ]] && CORS_SVN="$CORS_SVN,$OUTWARD"
+CORS_SVN=$(sed -es/' \+'/','/g -es/,$//g -es/,,/,/g <<< $CORS_SVN)
+
+CORS_MFE="$CORS_FE_PRV,$AOS,$STRWEB"
+
+OLD_SETTING=$(get-dp-setting $BRAND $ENVIRO CORS.ALLOWED_ORIGINS)
+echo "Current CORS.ALLOWED_ORIGINS:
+$OLD_SETTING"
+
+echo "new CORS.ALLOWED_ORIGINS:
+$CORS_SVN"
+
+CBBU=
+for b in $(get-brand-list | tr '[:lower:]' '[:upper:]') 
+do
+  CBBU="$b=$(get-akamai $BRAND $ENVIRO),$CBBU"
+done
+CBBU=$(sed -es/,$//g <<< $CBBU)
+
+OVERRIDE=$(geturls $BRAND $ENVIRO | grep -i override.properties)
+[[ -z $OVERRIDE ]] && { echo "Can't find override for $BRAND $ENVIRO"; continue; }
+svn --non-interactive -q up $OVERRIDE
+#set -x
+wsi_settings --brand $BRAND --env $ENVIRO update CORS.ALLOWED_ORIGINS --type s "$CORS_SVN"
+wsi_settings --brand $BRAND --env $ENVIRO update CROSS_BRAND.BASE_URLS --type p "$CBBU"
+{ set +x; } 2>/dev/null
+#echo "wsi_settings --brand $BRAND --env $ENVIRO update CORS.ALLOWED_ORIGINS --type s \"$CORS_SVN\"" > /tmp/cors.sh
+cd $(dirname $OVERRIDE) || BailOut "Can't cd to $(dirname $OVERRIDE)"
+svn -q --non-interactive commit -m "$REASON"
+
+rm -rf $TMP/adg || BailOut "Can't cleanup prior execution"
+git clone -b nonprod-v3 -q $ADG_REPO $TMP/adg || BailOut "Unable to clone $ADG_REPO/nonprod"
+cd $TMP/adg || BailOut "Unable to cd to $TMP/adg"
+cd config/$ADG_DIR || BailOut "Unable to cd to src/main/helm/config/$ADG_DIR"
+
+CORS_MFE="[\\\"$(sed -es/' '/','/g -es/','/'\\",\\"'/g <<< $CORS_MFE)\\\"]"
+echo "CORS_MFE: $CORS_MFE"
+
+exp="(.environments.[] | select (has(\"name\")) | select(.name == \"$ENVIRO\")).cors.path = \"/**\""
+yq eval -i "$exp" values.yaml
+
+exp="(.environments.[] | select (has(\"name\")) | select(.name == \"$ENVIRO\")).cors.allowedOrigins = \"$CORS_MFE\""
+yq eval -i "$exp" values.yaml
+
+git diff
+git add values.yaml
+git commit -q -m "$REASON"
+git push -q
+
+#yq eval values.yaml | grep -A+20 "name: $ENVIRO" | grep -A+5 "cors:"
+

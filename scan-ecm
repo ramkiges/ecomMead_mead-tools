@@ -1,0 +1,129 @@
+#!/bin/bash
+# scans ECM logs for nre buildds
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:$PATH
+
+USER_AGENT="--user-agent scan-ecm"
+DATA=$HOME/.$(basename $0)
+LOG=$DATA/$(basename $0).log
+DATE=$(date +'%Y-%m-%d %H:%M')
+UPDATE=
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+  echo "$DATE,$ECMAGENT,$*" >> $LOG
+  exit 255
+}
+
+# the only param is the ECM agent server name, for which we will use the short name
+ECMAGENT=$(awk -F\. '{ print $1 }' <<< $1)
+[[ -z $ECMAGENT ]] && BailOut "Need ecm server name"
+echo "ECM: $ECMAGENT"
+
+# create the data storage directory
+[[ -d $DATA ]] || mkdir -p $DATA
+
+# figure out which log directory ecmagent is using
+for dir in wsgc-tomcat-ecmagent ecmagent
+do
+  URL=http://$ECMAGENT.wsgc.com:38667/$dir
+  curl $USER_AGENT -fsql -o /dev/null $URL/ && LOG_URL=$URL
+done
+[[ -z $LOG_URL ]] && BailOut "Can't figure out log directory for http://$ECMAGENT.wsgc.com:38667"
+
+# try to predict the name of the current log file
+for file in application.log application.log.$(date +'%Y-%m-%d') application.log-$(date +'%Y%m%d')
+do
+  CL=$(curl -s -L -I $LOG_URL/$file | grep Content-Length | awk '{print $2}' | tr -d $'\r')
+  [[ $CL -gt 0 ]] && { name=$file; break; }
+done
+
+# if that didn't work, try to get it from the directory listing
+if [[ -z $name ]] 
+then
+  name=$(curl $USER_AGENT -fsqk "$LOG_URL/?C=M;O=D" |grep "application.log" | 
+  while read line
+  do
+    # find te most recent log file that is not zero bytes
+    name=$(awk -F '[<>]' '{ print $12 }' <<< $line | awk -F= '{ print $2 }' | sed -es/\"//g)
+    size=$(awk -F '[<>]' '{ print $23 }' <<< $line | awk '{ print $1 }')
+    [[ $size != "0" ]] && { echo "$name"; break; }
+  done)
+fi
+
+[[ -z $name ]] && BailOut "Can't figure out log file name for $LOG_URL"
+
+# here is our shiny new log URL!
+LOG_URL="$LOG_URL/$name"
+echo "ECM Agent log: $LOG_URL"
+
+# grab a list of installations (environments)
+# this is th emost tenuous part of this logic - the log patterns are different for each version
+INST_LIST=$(curl $USER_AGENT -fsqk $LOG_URL | grep -i "Activating Generation" | awk '{ print $17 }' | sort -u | egrep -iv "aktest|prod|prd")
+[[ -z $INST_LIST ]] && INST_LIST=$(curl $USER_AGENT -fsqk $LOG_URL | grep -i "Activating Generation" | awk '{ print $13 }' | sort -u | egrep -iv "aktest|prod|prd")
+[[ -z $INST_LIST ]] && INST_LIST=$(curl $USER_AGENT -fsqk $LOG_URL | grep -i "Generation.*is activated" | awk '{ print $17 }' | sort -u | egrep -iv "aktest|prod|prd")
+[[ -z $INST_LIST ]] && INST_LIST=$(curl $USER_AGENT -fsqk $LOG_URL | grep -i "Generation.*is activated" | awk '{ print $13 }' | sort -u | egrep -iv "aktest|prod|prd")
+[[ -z $INST_LIST ]] && echo "$DATE,$ECMAGENT,<no installations>" >> $LOG
+
+[[ $FORCE =~ true ]] && FORCE="(force)" || FORCE=
+
+echo 
+for i in $INST_LIST
+do
+  #echo "i: $i"
+  FILE=$DATA/ecm-generations-$i.txt
+  [[ -e $FILE ]] || touch $FILE
+
+  # different versions of the app have different log formats
+  for line in \
+    $(curl $USER_AGENT -fsqk $LOG_URL | grep -i "Activating Generation.* $i " | awk '{ print $9 "," $13 }' | tail -1) \
+    $(curl $USER_AGENT -fsqk $LOG_URL | grep -i "Activating Generation.* $i " | awk '{ print $13 "," $17 }' | tail -1) \
+    $(curl $USER_AGENT -fsqk $LOG_URL | grep -i "Generation.*is activated.* $i .*installation" | awk '{ print $12 "," $17 }' | tail -1) \
+    $(curl $USER_AGENT -fsqk $LOG_URL | grep -i "Generation.*is activated.* $i .*installation" | awk '{ print $8 "," $13 }' | tail -1)
+  do
+    gen=$(awk -F, '{ print $1 }' <<< $line)
+    env=$(awk -F, '{ print $2 }' <<< $line)
+#echo "activation: $gen $env"
+
+    [[ $env = "uat" ]] && env="uat1"
+    [[ $gen =~ ^8 ]] || continue
+    [[ -z $env ]] && continue
+    [[ $env =~ ^8 ]] && continue
+    [[ $env = "dev" || $env = "qa" ]] && { echo " * ignore $env"; continue; }
+
+    # ignore decom'd environments
+    [[ $env = "staging" ]] && { echo " * decom'd $env"; continue; }
+    [[ $env = "qa58" || $env = "qa59" ]] && { echo " * decom'd $env"; continue; }
+    [[ $env = "qa60" || $env = "qa61" || $env = "qa62" ]] && { echo " * decom'd $env"; continue; }
+
+    X=$(grep -i "$gen,$env" $FILE)
+    [[ -n $X && -z $FORCE ]] && { echo " - skip $env $gen"; continue; } 
+
+    echo " + sync $env $gen $FORCE"
+    jenkins-jnlp build sync-mfe-generations -p APP_ENVIRONMENT=$env -p UpdateData=false -p RunBy=$(basename $0) >/dev/null 2>&1 || { echo "$DATE,$ECMAGENT,$gen,$env,fail" >> $LOG; continue; }
+    echo "$DATE,$ECMAGENT,$gen,$env,$FORCE" >> $LOG
+    echo "$DATE,$ECMAGENT,$gen,$env,$FORCE" >> $FILE
+    UPDATE=true
+  done
+
+  # create a log entry if we didn't find anything new
+  [[ -z $line ]] && echo "$DATE,$ECMAGENT,<no generations for $env>" >> $LOG
+
+  # a little bit of housekeeping
+  if [[ -n $UPDATE ]]
+  then
+    sort -u $LOG | tail -5000 > $LOG.new
+    mv $LOG.new $LOG
+
+    sort -u $FILE | tail -200 > $FILE.new
+    mv $FILE.new $FILE
+  fi
+done
+
+echo
+echo "*** last 15 log entries for debugging ***"
+tail -15 $LOG
+
+[[ -z $INST_LIST ]] && exit 128
+[[ -z $UPDATE ]] && exit 128
+
+exit 0

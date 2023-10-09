@@ -1,0 +1,5 @@
+#!/bin/bash
+
+#./ecom-app-shop-global -e uat5 -v 2.9.3 -o Mead -b update-preprd
+./ecom-app-shop-global -e uat5 -o Mead -b update-preprd
+

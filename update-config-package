@@ -1,0 +1,461 @@
+#!/bin/bash
+# TODO: look for sub-poms that need an artifact version updated
+# this is a work-in-progress
+PATH=/apps:/apps/mead-tools:/apps/maven/latest/bin:/apps/java/bin:/apps/emacs-nox-24.5/bin:/home/mavenbuild/bin/devscripts:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/puppetlabs/bin:/home/mavenbuild/bin:/apps:~/bin
+export PATH
+
+# generic constants
+SCM_HOST=tlsrck-vdcn005.wsgc.com
+RELEASE_TOOLS_CONFIGS="git@github.wsgc.com:eCommerce-DevOps/release-tools-configs.git"
+ARTIFACTORY="https://artifactory.wsgc.com/artifactory/wsgc-releases/com/wsgc"
+SNAPSHOT="https://snapshotrepo.wsgc.com/artifactory/snapshotrepo/com/wsgc"
+SUBVERSION="https://repos.wsgc.com/svn/"
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+GITHUB="git@github.wsgc.com"
+MAVENHOME=/home/mavenbuild/mavenrelease
+NS="http://maven.apache.org/POM/4.0.0"
+
+PARENT_ARTIFACTS="wsgc-devops-application wsgc-devops-root wsgc-rerun-modules-parent" # wsgc-tomcat-parent deliberately left out
+
+umask 000
+export KEEPALIVE=true
+export BUILD_USER_ID
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+####
+
+# generic error-and-exit function
+BailOut() {
+  { ret=$?; set +x; } 2>/dev/null
+	echo 
+	if [ -n "$1" ] 
+	then
+		echo "Error: $*" 
+		timeStamp "Failed"
+        echo
+	fi
+
+	#echo "Usage: $(basename $0) -p <project> -c <comments> -t [ticket] "
+	rm -rf /tmp/release-tools-configs 
+
+    [ -n "$JIRA" ] && jira-comment "$JIRA" "${ICON_FAIL}$(basename $0): Fail - $BUILD_URL
+    $*" 
+
+	exit 1
+}
+
+timeStamp() { echo ">>> $* $(date +'%Y-%m-%d %H:%M') <<<"; }
+
+listProperties() {
+    echo
+    echo "Available properties:"
+    for prop in $(propget -f $POM -l | sort -u)
+    do
+        echo "      - $prop"
+    done
+    echo
+}
+
+listEnvironments() {
+    echo
+    echo "Available environments:"
+    for project in $(grep "CONFIG_.*=[a-z].*" $PROJECT_FILE | egrep -vi "_prd|_com|_rerun|_tomcat" | awk -F= '{ print $1 }' | sed -es/CONFIG_//g | sort)
+    do
+        echo "      - $project"
+    done
+    echo
+} 
+
+# increment the version number of a thing
+incrementVersion() {
+	oldversion="$1"
+	MINOR=$(echo "$oldversion" | awk -F\. '{ print $1 "." $2}' )
+	PATCH=$(echo "$oldversion" | awk -F\. '{ print $NF }')
+	PATCH=$(expr "$PATCH" + 1)
+	echo "$MINOR.$PATCH"
+}
+
+# check out a repo
+checkOut() {
+	REPO="$1"
+	DIR="$2"
+	unset SCM_TYPE	# clear this in case we're working with different repo types
+
+	/bin/echo -ne "~~~ Checking out $REPO to $DIR "
+	echo "$REPO" | egrep -iq "git@|github" && SCM_TYPE="git"
+	echo "$REPO" | egrep -iq "//repos" && SCM_TYPE="svn"
+	[ -z "$SCM_TYPE" ] && BailOut "$FUNCNAME: Can't figure out SCM type from $REPO"
+	rm -rf $DIR
+
+	case $SCM_TYPE in
+		git )
+            # this branch business is a work-in-progress
+            REPO_URL=$(echo $REPO | awk -F\# '{ print $1 }' 2>/dev/null)
+            REPO_BRANCH=$(basename $(echo $REPO | awk -F\# '{ print $2 }') 2>/dev/null | sed -e s!branch/!!g )
+            #echo "ARTIFACT: $REPO_BRANCH"
+            if [ -n "$REPO_BRANCH" ]
+            then
+			    git clone -b $REPO_BRANCH $REPO_URL $DIR >/dev/null 2>&1 || BailOut "Couldn't git clone $REPO $DIR"
+            else
+			    git clone $REPO $DIR >/dev/null 2>&1 || BailOut "Couldn't git clone $REPO $DIR"
+            fi
+		;;
+
+		svn )
+			svn co -q $REPO $DIR || BailOut "Couldn't svn co $REPO $DIR"
+		;;
+
+		* )
+			BailOut "Unknow SCM type for $REPO"
+		;;
+	esac 
+	echo " Done"
+}
+
+commitPOM() {
+	FILE="$1"
+	MESSAGE="$2"
+	unset SCM_TYPE	# clear this in case we're working with a mix of repo types
+
+	#echo "^^^ Committing $FILE - $MESSAGE ^^^"
+
+	if [ -d .svn ] 
+	then
+		svn up
+		svn diff | egrep "^-|^\+" | grep -iv "pom.xml"
+        svn commit -q $FILE -m "[$TICKET] $MESSAGE ($BUILD_USER_ID)"
+	fi
+
+	if [ -d .git ] 
+	then
+		git pull >/dev/null 2>&1
+		git diff | egrep "^-|^\+" | grep -iv "pom.xml" | sort -k2
+		git add $FILE
+        git commit -q $FILE -m "[$TICKET] $MESSAGE ($BUILD_USER_ID)"
+		git push
+	fi
+}
+
+# change to the temp working directory for a given config package
+getConfig() {
+	CFG=$1
+	cd $TMP || BailOut "Why can't we cd to $TMP?"
+
+	# create a unique directory name into which to checkout the configs.  This is sorta convoluted because oour repos are not consistent
+	if echo "$CFG" | grep -iq git
+	then
+        CFG_DIR=$(basename $(echo "$CFG" | awk -F\# '{ print $1 }') | sed -es!/trunk!!g -es!/config!!g -es!/\$!!g -es/\.git//g)
+	else
+		CFG_DIR=$(echo "$CFG" | sed -es!$SUBVERSION!!g -es!devops/application/!!g -es!/trunk!!g -es!/config!!g -es!/\$!!g -es!^/!!g )
+	fi
+	[ -z "$CFG_DIR" ] && BailOut "Couldn't figure out dir for $CFG"
+
+	# check out the config
+	checkOut $CFG $TMP/$CFG_DIR || BailOut "Couldn't checkOut $config"
+
+	# create a symlink to 'common' if the repo path doesn't have it, so we don't have to guess as where the common pom lives
+	if echo "$CFG" | egrep -iq "common.*config|config.*common" 
+	then
+		COMMON_DIR=$(find $TMP -type d -name "*common*")
+        [ -z "$COMMON_DIR" ] && BailOut "Can't find common directory ($CFG)"
+		COMMON_POM=$(find $COMMON_DIR -name pom.xml)
+		[ -z "$COMMON_POM" ] && BailOut "Can't find pom.xml in $COMMON_DIR"
+	fi
+
+	cd $TMP/$CFG_DIR || BailOut "Can't cd to $TMP/$CFG_DIR ($CFG)"
+
+	[ -d .git ] && git pull >/dev/null 2>&1
+	[ -d .svn ] && svn up >/dev/null 2>&1
+}
+
+# basic sanity checks
+[ "$(hostname --fqdn)" = "$SCM_HOST" ] || BailOut "This must be run on $SCM_HOST as user 'mavenbuild'"
+[ "$LOGNAME" != 'mavenbuild' ]  && BailOut "Please run $(basename $0) as user 'mavenbuild' instead of $(whoami)"
+cd $MAVENHOME || BailOut "Why can't we cd to $MAVENHOME?"
+
+# parse arguments
+while [ $# -gt 0 ]
+do
+	case $1 in
+		-e|--env|--environment )  
+			$(echo "$2" | grep -q -- "^-") || { ENVIRONMENT="$2"; } 
+			shift;;
+		-b|--branch|-a|--artifact|-d|--deploy )  
+			$(echo "$2" | grep -q -- "^-") || { DEPLOY="$2"; } 
+			shift;;
+		-p|--project )  
+			$(echo "$2" | grep -q -- "^-") || { PROJECT="$2"; } 
+			shift;;
+		-c|--comments )  
+			$(echo "$2" | grep -q -- "^-") || { COMMENTS="$2"; } 
+			shift ;;
+		-t|--ticket )  
+			$(echo "$2" | grep -q -- "^-") || { TICKET="$2"; } 
+			shift;;
+		-m|--maven_opts ) 
+			MAVEN_EXTRA="$(echo $2 | sed -e s/'depversion '/'depversion='/g)";
+			shift ;;
+		* ) shift ;;
+	esac
+done
+
+[ -z "$PROJECT" ] && BailOut "Need project name!"
+#[ -z "$DEPLOY" ] && BailOut "Need branch/release name/version!"
+[ -n "$COMMENTS" ] && COMMENTS="-c \"$COMMENTS\""
+[ -n "$MAVEN_EXTRA" ] && MAVEN_EXTRA="-m \"$MAVEN_EXTRA\""
+if [ -n "$TICKET" ] 
+then
+	# convert to upper-case and remove brackets
+	TICKET=$(echo "$TICKET" | tr "a-z" "A-Z")
+	TICKET=$(echo "$TICKET" | sed -e s/\\[//g -e s/\\]//g)
+    JIRA="$TICKET"
+    for j in $(echo "$JIRA" | sed -e s/','/' '/g)
+    do
+        echo "Jira: https://jira.wsgc.com/browse/$j"
+    done
+	TICKET="$TICKET"
+else
+    TICKET="DEVOPS"
+fi
+
+echo "Project: $PROJECT"
+
+# fetch project file from release-tools-configs
+rm -rf /tmp/release-tools-configs
+git clone $RELEASE_TOOLS_CONFIGS /tmp/release-tools-configs >/dev/null 2>&1 || BailOut "Can't clone $RELEASE_TOOLS_CONFIGS"
+cd /tmp/release-tools-configs
+PROJECT_FILE="/tmp/release-tools-configs/$PROJECT.project"
+[ ! -f "$PROJECT_FILE" ] && BailOut "Can't find project file for $PROJECT ($PROJECT_FILE)"
+
+# source project - read it into our shell namespace
+. $PROJECT_FILE
+[ -n "$DEBUG" ] && cat $PROJECT_FILE | egrep -iv "^$|^#"
+
+# setup working area
+TMP="/tmp/update-config-package-tmp/$PROJECT"
+rm -rf $TMP
+mkdir -p $TMP $TMP/tmp || BailOut "Couldn't create $TMP"
+cd $TMP || BailOut "Couldn't cd to $TMP"
+cp $PROJECT_FILE $TMP 
+GETVERSION=$(which getversion)
+
+BUILD_URL="$JENKINS_URL/job/create-release-artifact-configs/$BUILD_NUMBER/console"
+
+# if DEPLOY comes in as a naked variable, clear it
+[[ $DEPLOY = '${Deploy}' ]] && DEPLOY=
+
+if [ -n "$DEPLOY" ]
+then
+    echo "Deploy: $DEPLOY"
+    [ -z "$ARTIFACT_ID" ] && BailOut "ARTIFACT_ID is blank in $(basename PROJECT_FILE)"
+    [ -z "$SCM_URL" ] && BailOut "SCM_URL is blank in $(basename PROJECT_FILE)"
+
+    # figure out the branch
+    if echo "$DEPLOY" | grep -iq "[0.9].*\.[0-9].*"
+    then
+        echo "$DEPLOY looks like a release version"
+        ARTIFACT_VERSION="$DEPLOY"
+        # todo - validate this version
+        echo "Fetching REPO for $PROJECT"
+        A_URL=$(SHOWREPO=true $GETVERSION "$PROJECT" | grep -i "https" | awk -F= '{ print $2 }')
+    else
+        echo "$DEPLOY looks like a work branch"
+        # the showprep flage tells $GETVERSION to return the artifactory URL, ao we take that and swap in the snapshot URL
+        echo "Fetching REPO for $PROJECT"
+        A_URL=$(SHOWREPO=true $GETVERSION "$PROJECT" | grep -i "https" | awk -F= '{ print $2 }')
+        S_URL=$(echo "$A_URL" | sed -es!$ARTIFACTORY!$SNAPSHOT!g)
+
+        # try to figure out the actual artifact name
+        if echo "$DEPLOY" | grep -q "SNAPSHOT"
+        then
+            echo "  - it's a SNAPSHOT so we won't bother fetching the version"
+            ARTIFACT_VERSION="$DEPLOY"
+        else
+            ARTIFACT_VERSION=$(curl -qsk $S_URL/ | egrep -i "$DEPLOY-SNAPSHOT|ci_eCommerce-.*$DEPLOY-SNAPSHOT" | awk -F '[<>]' '{ print $2 }' | awk -F= '{ print $2 }' | sed -es/\"//g | sed -e s!/!!g)
+            [ -z "$ARTIFACT_VERSION" ] && BailOut "Could not figure out the artifact for $PROJECT branch $DEPLOY"
+        fi
+    fi
+    echo "*** Deployed artifact version will be: $ARTIFACT_VERSION"
+fi
+
+# check out the repo
+SCM_REPO=$(echo $SCM_URL | awk -F\# '{ print $1 }')
+# create a unique directory name into which to checkout the configs.  This is sorta convoluted because oour repos are not consistent
+if echo "$SCM_REPO" | grep -iq git
+then
+	SCM_DIR="$(basename "$SCM_REPO" | sed -es!/trunk!!g -es!/config!!g -es!/\$!!g -es/\.git//g).repo"
+else
+	SCM_DIR="$(echo "$CFG" | sed -es!$SUBVERSION!!g -es!devops/application/!!g -es!/trunk!!g -es!/config!!g -es!/\$!!g -es!^/!!g ).repo"
+fi
+[ -z "$SCM_DIR" ] && BailOut "Couldn't figure out dir for $SCM_REPO"
+
+# find pom for common
+for config in $(grep "^CONFIG_COM" $PROJECT_FILE | awk -F= '{ print $2 }')
+do
+	echo "### Update config $config (pre-step)" 
+	getConfig $config
+    # the value for COMMON_POM should have been created by the getConfig call
+	[ -z "$COMMON_POM" ] && echo "Where is our pom for common?"
+done
+
+# get parent version
+# parent and common should really be the same thing, I think - I may be able to re-factor this
+[ -z "$ARTIFACT_PARENT" ] && ARTIFACT_PARENT=$ARTIFACT_COMMON
+#if [ -n "$ARTIFACT_PARENT" ]
+#then
+#	/bin/echo -ne "*** Fetching parent assembly ($ARTIFACT_PARENT) version: "
+#	#ARTIFACT_PARENT_VERSION=$($GETVERSION $ARTIFACT_PARENT)
+#	ARTIFACT_PARENT_VERSION=$($GETVERSION $ARTIFACT_COMMON)
+#	[ -z "$ARTIFACT_PARENT_VERSION" ] && BailOut "Couldn't fetch parent assembly version ($ARTIFACT_COMMON)"
+#	echo "$ARTIFACT_PARENT_VERSION"
+#else
+#	echo "We should probably think about setting ARTIFACT_PARENT in $(basename $PROJECT_FILE)"
+#fi
+
+# if they haven't spec'd anything, then just print a list of properties
+
+[[ -z $ENVIRONMENT ]] && { listEnvironments; exit 0; }
+
+# build a list of configs to update
+echo "### Building config list " 
+CONFIG_LIST=$(grep -i "CONFIG_${ENVIRONMENT}=" $PROJECT_FILE | awk -F= '{ print $2 }')
+
+# if they haven't provided an environment, show them the list
+[[ -z $CONFIG_LIST ]] && BailOut "Environment ${ENVIRONMENT} does not appear to be valid $(listEnvironments)"
+
+# update each of the configs in turn
+for config in $CONFIG_LIST
+do
+	echo "### Update config $config " 
+	getConfig $config
+
+    echo "<><><><><><><><><><><><><><><><><>"
+    echo "* POMs under $(pwd) *"
+    find . -name pom.xml
+    echo "<><><><><><><><><><><><><><><><><>"
+
+    for POM in $(find . -maxdepth 1 -name pom.xml) $(find . -name pom.xml | grep -iw "$ENVIRONMENT") 
+    do
+        echo "POM: $(basename $POM)"
+	    /bin/echo -ne "*** Fetching common ($ARTIFACT_COMMON) version: "
+	    CONFIG_COM_VER=$($GETVERSION $ARTIFACT_COMMON)
+	    echo "$CONFIG_COM_VER"
+	    [ -z "$CONFIG_COM_VER" ] && BailOut "Could not get common version"
+
+        # update parent versions of various artifacts
+        for parent in $PARENT_ARTIFACTS
+        do
+            grep -wq "$parent" $POM || continue
+            REL=$($GETVERSION "$parent")
+            [ -z "$REL" ] && continue
+            CUR=$(xmlstarlet sel -N pom=$NS -t -v "/pom:project/pom:parent/pom:version" -v "$parent" $POM)
+            echo "--- Parent: $parent - released=$REL current=$CUR"
+
+            # comment out until I get it working correctly
+    	    #echo "# Update $parent in $CFG_DIR $CUR->$REL"
+    	    #xmlstarlet ed -L -O -P -N pom=$NS -u "/pom:project/pom:parent/pom:version" -v "$parent" $POM || BailOut "Couldn't update $parent"
+    	    #commitPOM $COMMON_POM "Update $parent to $REL"
+        done
+
+        # we should really just re-factor this so it's one property
+        [ -z "$ARTIFACT_PARENT_PROP" -a -n "$ARTIFACT_COMMON" ] && ARTIFACT_PARENT_PROP="$ARTIFACT_COMMON"
+        if [ -n "$ARTIFACT_PARENT_PROP" ]
+        then
+            # extract current version
+            CURRENT_COM_VER=$(xmlstarlet sel -N pom=$NS -t -v /pom:project/pom:properties/pom:$ARTIFACT_PARENT_PROP $POM)
+            if [ -z "$CURRENT_COM_VER" ] 
+            then
+                echo "*** Note: $(pwd)/$(basename $POM) does not reference $ARTIFACT_PARENT_PROP ***"
+            else
+                echo "Current common/parent: ($ARTIFACT_PARENT_PROP): $CURRENT_COM_VER"
+            fi
+        else
+	        echo "We should probably think about setting ARTIFACT_PARENT in $(basename $PROJECT_FILE)"
+        fi
+
+        # TODO: bring this in line with logic from create-release-artifact-configd
+#        # for any package other than common, update the version of common in said package
+#	    if [ -n "$ARTIFACT_COMMON" -a -n "$ARTIFACT_PARENT_PROP" -a -n "$CURRENT_COM_VER" ]
+#	    then
+#            # don't do this for the common package
+#            if ! echo "$config" | grep -iq "common"
+#    	    then 
+#                # update only if it isn't a snapshot or a variable
+#                if ! echo "$CURRENT_COM_VER" | egrep -iq 'SNAPSHOT|\\${'
+#                then
+#                    echo ">>> Updating $CFG_DIR pom with new common version ($CONFIG_COM_VER)"
+#                    xmlstarlet ed -L -O -P -N pom=$NS -u "/pom:project/pom:parent/pom:properties" -v $CONFIG_COM_VER $POM || BailOut "Couldn't update parent version for $POM"
+#                    commitPOM $POM "Update project common to $CONFIG_COM_VER"
+#                else
+#		            echo "> Not updating project common because it is a -SNAPSHOT"
+#                fi
+#		    fi
+#	    fi
+
+
+        if [ -n "$DEPLOY" ]
+        then
+            # update war version
+	        if [ -n "$ARTIFACT_WAR_PROP" ]
+	        then
+		        echo ">>> Updating $CFG_DIR *war* $ARTIFACT_WAR_PROP to $ARTIFACT_VERSION"
+		        propset -f $POM -p $ARTIFACT_WAR_PROP -v $ARTIFACT_VERSION
+		        commitPOM $POM "Update artifact $ARTIFACT_WAR_PROP version to $ARTIFACT_VERSION"
+          else
+            echo "<<< No pom property for ARTIFACT_WAR_PROP"
+	        fi
+
+            # update jar version
+	        if [ -n "$ARTIFACT_JAR_PROP" ]
+	        then
+		        echo ">>> Updating $CFG_DIR *jar* $ARTIFACT_JAR_PROP to $ARTIFACT_VERSION"
+		        propset -f $POM -p $ARTIFACT_JAR_PROP -v $ARTIFACT_VERSION
+		        commitPOM $POM "Update artifact $ARTIFACT_JAR_PROP version to $ARTIFACT_VERSION"
+          else
+            echo "<<< No pom property for ARTIFACT_JAR_PROP"
+	        fi
+
+            # update the Jira ticket if necessary
+            [ -n "$JIRA" ] && jira-comment "$JIRA" "${ICON_SUCC}Updated $PROJECT $ENVIRONMENT config package to deploy $ARTIFACT_VERSION"
+
+            # need a better way to determine "common"
+            # if it's a common config, and we have a Jira ticket, update the ticket
+	        if echo "$config" | egrep -iq "common.*config|config.*common" 
+    	    then 
+                [ -n "$JIRA" ] && jira-comment "$JIRA" "${ICON_SUCC}Updated $PROJECT COMMON config package to deploy $ARTIFACT_VERSION"
+            fi
+        fi
+
+        if [ -n "$PROPERTY" ]
+        then
+            echo "Update property: $PROPERTY"
+            VALID=$(propget -f $POM -l | awk -F/ '{ print $NF }' | grep -wi "$PROPERTY")
+            [ -z "$VALID" ] && BailOut "Property \"$PROPERTY\" is not valid$(listProperties)"
+            echo "VALID: $VALID"
+            PROPERTY=$VALID
+    	    xmlstarlet ed -L -O -P -N pom=$NS -u "/pom:project/pom:properties/pom:$PROPERTY" -v "$VALUE" $POM || BailOut "Couldn't update $PROPERTY in $POM for ${ENVIRONMENT}"
+            commitPOM $POM "Update property \"$PROPERTY\" to \"$VALUE\""
+            [ -n "$JIRA" ] && jira-comment "$JIRA" "${ICON_SUCC}Updated pom property _${PROPERTY}_ for ${ENVIRONMENT}"
+        fi
+
+        # if they haven't spec'd anything, then just print a list of properties
+        if [ -z "$DEPLOY" -a -z "$PROPERTY" ]
+        then
+            listProperties
+            exit 0
+        fi
+
+    done
+done
+	
+# cleanup
+rm -rf /tmp/release-tools-configs
+
+timeStamp "$(basename $0) done"
+
+exit 0
+

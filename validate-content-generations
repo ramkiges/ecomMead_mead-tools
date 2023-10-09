@@ -1,0 +1,119 @@
+#!/bin/bash
+# compare and validate content generations between DP and MFE
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin
+export PATH
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  echo "Usage: $(basename $0) <brand> <enviro> [ticket]"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "$ICON_FAIL $(basename $0): $*"
+  exit 255
+}
+
+BRAND=$1
+ENVIRO=$2
+TICKET=$3
+[[ -z $ENVIRO ]] && BailOut 
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+FLAG=
+WARN=
+
+BRAND_UC=$(tr '[:lower:]' '[:upper:]' <<< $BRAND)
+DP_LOGIN="pkqaenv:Ca8tWh33l"
+TIMEOUT="--connect-timeout 30  --max-time 60"
+SITE=$(getsiteid $BRAND $ENVIRO)
+ECM_HOST=
+
+AKAMAI=$(get-akamai $BRAND $ENVIRO)
+SCHED=$AKAMAI/.delivery/esi/v1/setedgeschedules.html
+
+TMP=/tmp/$(basename $0)-$LOGNAME
+mkdir -p $TMP
+MFE_GENERATIONS=$TMP/$BRAND-$ENVIRO-mfegen.txt
+DP_GENERATIONS=$TMP/$BRAND-$ENVIRO-dpgen.txt
+AGENT_GENERATIONS=$TMP/$BRAND-$ENVIRO-agentgen.txt
+OUT=$TMP/$BRAND-$ENVIRO-results.txt
+TBL=$TMP/$BRAND-$ENVIRO-results.tbl
+umask 000
+
+rm -f $OUT $TBL
+
+DP_HOST=$(gethost $BRAND $ENVIRO | awk -F\. '{ print $1 }')
+[[ -z $DP_HOST ]] && BailOut "Can't find a host for $BRAND $ENVIRO"
+DP_SUMMARY=$DP_HOST.wsgc.com/admin/summary.html
+
+# don't know if I actually need this
+for try in 1 2 3
+do
+  ECM_ENV=$(get-ecm-info $BRAND $ENVIRO | sed -es/-service//g -es/prdrk/prd/g | head -1)
+  [[ -n $ECM_ENV ]] && break
+done
+
+for dc in rk1v sac1v 
+do
+  host $ECM_ENV-$dc >/dev/null 2>&1 && { ECM_HOST=$ECM_ENV-$dc.wsgc.com; break; }
+done
+[[ -z $ECM_HOST ]] && echo "$BRAND $ENVIRO not configured as an ECM target"
+[[ -n $ECM_HOST ]] && ECM_URL="https://$ECM_HOST"
+
+# TODO: this needs work: the logrotate config is broken, so the most recent file is usually 0 bites, so you need to grab the prior log
+ECMAGENT_LOG=$(curl -fsqk "http://$ECM_HOST:38667/wsgc-tomcat-ecmagent/?C=M;O=D" | grep application.log | head -1 | awk -F 'href=' '{ print $2 }' | sed -es/'"'/' '/g -es/'>'/' '/g | awk '{ print $1 }')
+
+#
+# grab recently-deployed generations from ecm agent
+# ] 2022-05-05 15:09:20,016 [   ] INFO  [taskSchedulerPt-1] com.wsgc.ecommerce.tools.build_system_releaser.BgbInvoker [ - ] - Checking for stage verification at https://ecmagent-uat1-ca-sac1v.wsgc.com/services/status/v1/staging/77/ecm-pages-208501-2273/dpecmqa
+#for gen in $(curl -fsqk http://$ECM_HOST:38667/wsgc-tomcat-ecmagent/application.log | grep -i "$ENVIRO.*$SITE" | awk '{ print $16 }' | sort -u)
+#do
+#  SUBSYS=$(curl $TIMEOUT -fqsk --user $DP_LOGIN https://$DP_SUMMARY | grep $gen | awk -F '[<>]' '{ print $2 }' | awk -F= '{ print $2 }' | sed -es/\'//g)
+#  [[ -n $SUBSYS ]] && echo "$SUBSYS $gen" >> $DP_GENERATIONS
+#done
+
+## grab generations from sync generation job
+## __SNAPSHOT__
+#START="Loading redirection.*concept=$BRAND_UC installation=$ENVIRO"
+#END="targetRoot"
+#eval jenkins-jnlp build -f sync-mfe-generations -p APP_ENVIRONMENT=$ENVIRO | awk "/$START/{flag=1;next}/$END/{flag=0}flag" | egrep -vi " __SNAPSHOT__" | grep "Got:" | awk '{ print $(NF-2), $NF }' 2>/dev/null > $MFE_GENERATIONS
+
+echo "||Subsystem||DP||MFE||" > $TBL
+echo "*** Generation validation for $BRAND $ENVIRO
+https://$DP_SUMMARY
+$SCHED
+$ECM_URL " > $OUT
+
+# grab mfe and dp generations and store them
+get-dp-generations $BRAND $ENVIRO > $DP_GENERATIONS
+get-mfe-generations $BRAND $ENVIRO > $MFE_GENERATIONS
+
+for subsys in $(cat $DP_GENERATIONS $MFE_GENERATIONS | awk -F= '{ print $1 }' | xargs -n1 | sort -u )
+do
+  mfe_gen=$(grep -iw $subsys $MFE_GENERATIONS | awk -F= '{ print $2 }')
+  dp_gen=$(grep -iw $subsys $DP_GENERATIONS | awk -F= '{ print $2 }')
+
+  # look up generation in ECM agent logs
+  #ecm_gen=$(curl -fsqk http://$ECM_HOST:38667/wsgc-tomcat-ecmagent/$ECMAGENT_LOG | grep -i "Activating Generation " | egrep -i "$dp_gen|$mfe_gen" | head -1)
+
+  [[ -n $dp_gen && -n $mfe_gen && $dp_gen != $mfe_gen ]] && { FLAG=$ICON_FLAG; WARN="$ICON_WAR - There is a DP/MFE content mismatch"; } || FLAG=
+  [[ -z $dp_gen ]] && dp_gen="<none>"
+  [[ -z $mfe_gen ]] && mfe_gen="<none>"
+
+  echo "$subsys   dp:$dp_gen  mfe:$mfe_gen" >> $OUT
+  echo "|$subsys$FLAG|$dp_gen|$mfe_gen|" >> $TBL
+done
+
+cat $OUT
+
+[[ -n $TICKET ]] && jira-comment "$TICKET" "$ICON_INFO Generation comparison for $BRAND $ENVIRO
+https://$ECM_HOST
+https://$DP_SUMMARY
+$SCHED
+$(cat $TBL)"
+
+#rm -rf $TMP
+
+exit 0

@@ -1,0 +1,234 @@
+#!/bin/bash
+# use this script to update content for xcadm env's
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps
+export ORACLE_HOME=/opt/oracle/product/11.2.0/client_1/
+PATH=$PATH:/$ORACLE_HOME/bin
+PATH=~/instantclient:$PATH
+umask 000
+
+BailOut() {
+    { set +x; } 2>/dev/null
+    [[ -n $1 ]] && echo "$*"
+    echo "Usage: $(basename $) <env> [generation]
+Where 'env' is the corp environment
+And 'generation' is the TMPL/MISC/MSG generation
+Example:
+    $(basename $0) qa2 270193424 
+
+*** This must be run on artrck-vdcn002 ***"
+    #exit 1    
+}
+
+[ "$(hostname)" = "artrck-vdcn002" ] || BailOut "This must be run on artrck-vdcn002"
+
+. /apps/buildsystem/bin/env.sh
+PATH=$PATH:$ORACLE_HOME/bin
+
+[ -z "$SSHUSER" ] && SSHUSER="a_${LOGNAME}"
+IMG_HOST=img-qa-rk1v
+IMG_CORP=/images/ecom-images/corpimgs
+[[ -z $BGB_HOST ]] && BGB_HOST=bgb-uat1-rk1v
+BGB_REPO=/bgb/buildsystem-2.0-work/artifact_repository/corpdp
+BSYS_REPO=/buildsystem/buildsystem-2.0-work/artifact_repository/corpdp
+BGB_ASSET=/bgb/buildsystem-2.0-work/siteasset/corpdp
+BSYS_ASSET=/buildsystem/buildsystem-2.0-work/siteasset/corpdp
+REPO=https://repos.wsgc.com/svn/devops/application/xcadm/qa/config/trunk
+CTLSYNC=/apps/bgb/apps/biggreenbutton/bin/oraclectlsync
+export SSHOPTS="-o StrictHostKeyChecking=no"
+
+#ENV=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+ENV=qa
+[[ -z $ENV ]] && BailOut "Need env (qa[2..6])"
+#echo "$ENV" | egrep -q "^qa1|^qa2|^qa3|^qa4|^qa5|^qa6|^ca-qa|^ca-uat|^vdb|^dev" || BailOut "Invalid env: $ENV" 
+TMPL=$2
+#TMPL=223012708
+#TMPL=219073138
+#TMPL=223012607
+#TMPL=270266662
+TMPL=270266820
+
+TMP=/tmp/$(basename $0)-$TMPL
+mkdir -p $TMP
+
+#HOST=$(svn cat $REPO/$ENV/pom.xml | grep -i xcadm.nodename | awk -F '[<>]' '{ print $3 }')
+HOST=corp-qa1-rk1v
+[[ -z $HOST ]] && BailOut "Host for corp $ENV not found"
+SUMMARY=https://$HOST.wsgc.com/summary.html
+
+echo "BGB Host: $BGB_HOST"
+[[ -z $TMPL ]] && TMPL=$(curl -s -k -H 'Cache-Control: no-cache' $SUMMARY 2>/dev/null |grep -iw "TMPL" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{print $1 }' | head -1)
+[[ -z $TMPL ]] && BUILD=$(basename $(ssh -q -tt $BGB_HOST "ls -1td $BGB_REPO/$BUILD* | head -1" | dos2unix) | awk -F- '{ print $3 "-" $4 }')
+if [[ -n $BUILD ]]
+then
+  M=${BUILD##*-}
+  S=${M:0:1}
+  G=${M:(-2)}
+  TMPL=$BUILD
+  TMPL=${TMPL#cmx-build-20}
+  TMPL=${TMPL%-*}
+  TMPL=${TMPL}${G}
+  TMPL=$(echo $TMPL | sed -es/"^20"/"2"/g)
+fi
+
+[ -z "$TMPL" ] && BailOut "Could not automatically get TMPL/MISC/MSG generation"
+
+G="${TMPL:0:1}"
+S="${TMPL:(-2)}"
+B="${TMPL:0:${#TMPL}-2}"
+B="${B:1}"
+BUILD="cmx-build-20${B}"
+
+echo "CMX:    $TMPL"
+echo "Build:  $BUILD"
+
+# get the most recent version of the artifact
+ARTIFACT=$(ssh $SSHOPTS -q $BGB_HOST "ls -1td $BGB_REPO/$BUILD* | head -1")
+ARTIFACT=$(basename $ARTIFACT 2>/dev/null)
+[ -z "$ARTIFACT" ] && BailOut "Can't find artifact for $TMPL"
+
+# get the DB schema for this xcadm environment
+#SCHEMA=$(svn cat $REPO/$ENV/pom.xml | grep "<xcadm.table.owner>" | awk -F '[<>]' '{ print $3 }' | tr '[:upper:]' '[:lower:]')
+SCHEMA=ws_app_owner
+[ -z "$SCHEMA" ] && BailOut "Can't get schema for xcadm $ENV"
+DB=$(getdb $SCHEMA)
+[ -z "$DB" ] && BailOut "Can't get DB creds for $SCHEMA"
+dbHost=$(echo "$DB" | awk -F\| '{ print $1 }')
+dbOwner=$(echo "$DB" | awk -F\| '{ print $2 }' | tr "a-z" "A-Z")
+dbUser=$(echo "$DB" | awk -F\| '{ print $3 }')
+dbPass=$(echo "$DB" | awk -F\| '{ print $4 }')
+dbSID=$(echo "$DB" | awk -F\| '{ print $5 }')
+dbPort=$(echo "$DB" | awk -F\| '{ print $6 }')
+dbTable=$(echo "$DB" | awk -F\| '{ print $7 }')
+dbCred=$(echo "$DB" | awk -F\| '{ print $8 }')
+
+# copy artifacts over from BGB
+scp $SSHOPTS -q $BGB_HOST:$BGB_REPO/$ARTIFACT/importinfo.txt $TMP || BailOut "Unable to scp $SSHOPTS -q $BGB_HOST:$BGB_REPO/$ARTIFACT/importinfo.txt $TMP"
+
+# I'm not sure this section is actually necessary
+for file in corpdpftl corpdpmsgs corpdptmpl
+do
+    file="$file-$ARTIFACT.zip"
+    echo "*** Copy $file from $BGB_HOST to $TMP"   
+    scp $SSHOPTS -q $BGB_HOST:$BGB_REPO/$ARTIFACT/$file $TMP || BailOut "Unable to scp $SSHOPTS -q $BGB_HOST:$BGB_REPO/$ARTIFACT/$file $TMP"
+done
+
+# figure out which credential file to use
+[ -f /apps/bgb/apps/biggreenbutton/credentials/$dbCred ] && CREDFILE=$dbCred
+[ -z "$CREDFILE" ] && CREDFILE=$(basename $(egrep -il "username=$dbUser|username=$dbOwner" /apps/bgb/apps/biggreenbutton/credentials/*) 2>/dev/null)
+[ -z "$CREDFILE" ] && BailOut "Can't figure out credential file for $dbUser"
+
+for file in corpdptmpl corpdpmsgs
+do
+    file="$file-$ARTIFACT.zip"
+    SYNC=$TMP/$file
+
+    echo "*** $(basename $CTLSYNC) $file"
+    cd /apps/bgb/apps/biggreenbutton
+    sudo -u imageuser bash -c eval $CTLSYNC  -s $SYNC -d $dbSID -c $CREDFILE -i 600 -g $TMPL -t $dbUser -v deploy || BailOut "Unable to run  $CTLSYNC  -s $SYNC -d $dbSID -c $CREDFILE -i 600 -g $TMPL -t $dbUser -v deploy"
+done
+
+#for file in $(grep "REQUIRES.*/corpdp/" $TMP/importinfo.txt | awk '{ print $NF}') 
+for file in $(grep "REQUIRES.*.zip" $TMP/importinfo.txt | awk '{ print $NF}') 
+do
+    file=$(basename $file)        
+    #echo "+++ REQUIRES $file"
+
+    echo "*** REQUIRES: Copy BGB Asset $file from $BGB_HOST to $TMP"
+#set -x
+    scp $SSHOPTS -q $BGB_HOST:$BGB_ASSET/$file $TMP >/dev/null 2>&1
+    scp $SSHOPTS -q $BGB_HOST:$BSYS_REPO/$ARTIFACT/$file $TMP >/dev/null 2>&1
+    scp $SSHOPTS -q $BGB_HOST:$BGB_REPO/$ARTIFACT/$file $TMP >/dev/null 2>&1
+{ set +x; } 2>/dev/null
+    if [[ ! -e $TMP/$file ]]
+    then
+      echo "Could not get $file from
+$BGB_HOST:$BGB_ASSET/$file
+$BGB_HOST:$BSYS_REPO/$ARTIFACT/$file    
+$BGB_HOST:$BGB_REPO/$ARTIFACT/$file
+" 
+      exit 1
+    fi
+    echo
+
+    echo "*** Copy $file to $IMG_HOST:$IMG_CORP"
+    #set -x
+    scp $SSHOPTS -q $TMP/$file $IMG_HOST:/tmp || BailOut "Unable to scp $SSHOPTS -q $TMP/$file $IMG_HOST:/tmp (REQUIRES)"
+    ssh $SSHOPTS -qtt $IMG_HOST "sudo cp /tmp/$file $IMG_CORP"
+    ssh $SSHOPTS -qtt $IMG_HOST "sudo chown imageuser:webadmin $IMG_CORP/*zip"
+    ssh $SSHOPTS -qtt $IMG_HOST "ls -l $IMG_CORP/$file" || BailOut "Unable to  ssh $SSHOPTS -qt $IMG_HOST ls -l $IMG_CORP/$file"
+    { set +x; } 2>/dev/null
+    echo
+
+    echo "*** Unzip $file on $IMG_HOST $IMG_CORP"
+    ssh $SSHOPTS -qt $IMG_HOST "cd $IMG_CORP;sudo unzip -qqo $file"
+    ssh $SSHOPTS -qt $IMG_HOST "sudo chown -R imageuser:webadmin $IMG_CORP"
+    { set +x; } 2>/dev/null
+    echo
+
+    echo "+++ Stage $file on $HOST"
+    if [ "$LOGNAME" != "imageuser" ]
+    then
+        echo "*** Copy $file to $HOST /apps/ecimages/corp"
+        scp $SSHOPTS -q $TMP/$file $HOST:/tmp
+        ssh $SSHOPTS -qtt $HOST "sudo cp -f /tmp/$file /apps/ecimages/corp"
+        ssh $SSHOPTS -qtt $HOST "cd /apps/ecimages/corp;sudo chown tomcat:webadmin $file;sudo chmod 664 $file"
+
+        #echo "*** Copy $file to $HOST /apps/staging"
+        #ssh $SSHOPTS -qtt $HOST "sudo cp -f /tmp/$file /apps/staging"
+        #ssh $SSHOPTS -qtt $HOST "cd /apps/staging;sudo chown tomcat:webadmin $file;sudo chmod 664 $file"
+        echo
+
+        echo "*** Unzip $file on $HOST"
+        ssh $SSHOPTS -qtt $HOST "cd /apps/ecimages/corp;sudo unzip -qo $file" || BailOut "Unable to unzip -qo $file"
+        echo
+    else
+        echo "--- Skipping copy of $file to $HOST"
+    fi
+
+done
+
+#echo "+++ Update $HOST"
+#for file in corpdpftl 
+#do
+#    file="$file-$ARTIFACT.zip"
+#    if [ "$LOGNAME" != "imageuser" ]
+#    then
+#        echo "*** Copy $file to $HOST"
+#        scp $SSHOPTS -q $TMP/$file $HOST:/tmp
+#        ssh $SSHOPTS -qt $HOST "cd /tmp;sudo cp -f $file /apps/ecimages/corp" || BailOut "Unable to mv -f $file /apps/ecimages/corp"
+#        ssh $SSHOPTS -qt $HOST "cd /tmp;cd /apps/ecimages/corp;sudo chown tomcat:webadmin $file;sudo chmod 664 $file"
+#
+#        #ssh $SSHOPTS -qt $HOST "cd /tmp;sudo cp -f $file /apps/staging" || BailOut "Unable to cp -f $file /apps/staging"
+#        #ssh $SSHOPTS -qt $HOST "cd /apps/ecimages/corp;sudo unzip -qqo $file;sudo chown -R tomcat:webadmin /apps/ecimages/corp"
+#    else
+#        echo "--- Skipping copy of $file to $HOST"
+#    fi
+#done
+
+export CONNECTION="${dbUser}/\"${dbPass}\"@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))"
+#INST=$(svn cat $REPO/$ENV/pom.xml | grep "<xcadm.installation>" | awk -F '[<>]' '{ print $3 }' | tr '[:upper:]' '[:lower:]')
+INST=qa
+[[ -z $INST ]] && BailOut "Can't figure out installation"
+
+echo "Installation: $INST"
+
+for SUBSYS in MSG TMPL
+do
+  SQL="
+insert into ${dbOwner}.WW_GENERATION_SCHEDULE (GENERATION, SITE, INSTALLATION, SUBSYSTEM, START_TIME, REFRESH)
+VALUES ($TMPL, 64, '$INST', '$SUBSYS', SYSDATE, (SELECT REFRESH FROM (SELECT SITE, INSTALLATION, SUBSYSTEM, GENERATION, START_TIME, REFRESH, ROW_NUMBER() 
+OVER (PARTITION BY SITE, INSTALLATION, SUBSYSTEM ORDER BY START_TIME DESC) AS rn 
+FROM ${dbOwner}.WW_GENERATION_SCHEDULE
+WHERE START_TIME <= SYSDATE AND GENERATION != -1 AND site = 64 AND INSTALLATION = '$INST' AND SUBSYSTEM = '$SUBSYS')  WHERE rn = 1));
+"
+  echo "$SQL"
+  echo "$SQL" | sqlplus -S "$CONNECTION"
+done
+echo "commit;" | sqlplus -S "$CONNECTION"
+
+rm -rf $TMP
+
+[ -n "$TICKET" ] && jira-comment "$TICKET" "Staged TMPL $TMPL for $HOST"
+
+exit 0
+

@@ -1,0 +1,249 @@
+#!/bin/bash
+# https://confluence.wsgc.com/display/EPS/EPS+Environment+Details
+# hack of a script to configure backend settings
+# TODO: add manifest support eg https://github.wsgc.com/eCommerce-DevOps/env-manifest/pull/1316/files 
+
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/apps/mead-tools:~/bin:$PATH
+export PATH
+umask 000
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  echo "Usage: $(basename $0) <brand> <env> <backend> [ticket]"
+  #rm -rf $TMP
+  exit 1  
+}
+
+Notation() { echo "### [$(basename $0)] $* "; }
+
+[[ -z $BUILD_USER_ID ]] && BUILD_USER_ID=$(sed -es/a_//g <<< $LOGNAME)
+[[ $BUILD_USER_ID =~ svc || $BUILD_USER_ID =~ ciuser ]] || RUNBY=${BUILD_USER_ID}
+
+[[ $# -lt 2 ]] && BailOut
+
+# Jira icons
+export ICON_FAIL=" (x) "
+export ICON_SUCC=" (/) "
+export ICON_WARN=" (!) "
+export ICON_INFO=" (i) "
+
+DEVOPS=https://repos.wsgc.com/svn/devops
+FRONTEND=https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk
+ETCD_SYNCAPPCONFIG_REPO=git@github.wsgc.com:eCommerce-Tahoe/etcd-syncappconfig-helm-config.git
+ETCD_SYNCAPPCONFIG_BRANCH=all-nonprod-session
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+BRAND_UC=$(tr '[:lower:]' '[:upper:]' <<< $1)
+ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $2)
+ENVIRO_UC=$(tr '[:lower:]' '[:upper:]' <<< $2)
+BACKEND=$(tr '[:upper:]' '[:lower:]' <<< $3)
+BACKEND=$(awk -F: '{ print $1 }' <<< $BACKEND)
+#[[ -z $BACKEND ]] && BACKEND=$(getschema $BRAND $ENVIRO | awk -F: '{ print $2 }')
+[[ -z $BACKEND ]] && BailOut "Need backend"
+[[ -z $TICKET ]] && export TICKET=$(tr '[:lower:]' '[:upper:]' <<< $4)
+
+MARKET=$(getmarket $BRAND $ENVIRO)
+DOMAIN=$(getdomain $BRAND $ENVIRO | awk -F\. '{ print $1 }')
+AKAMAI=$(get-akamai $BRAND $ENVIRO)
+SCHEMA=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+
+#DB=$(getschema $BRAND $ENVIRO | awk -F: '{ print $2 }')
+#[[ -z $DB ]] && $(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+#[[ -z $DB ]] && BailOut "Can't schema for $BRAND $ENVIRO"
+DB_INFO=$(getdb $BACKEND)
+[[ -z $DB_INFO ]] && BailOut "Can't get db info for $DB"
+
+dbHost=$(echo "$DB_INFO" | awk -F\| '{ print $1 }')
+dbOwner=$(echo "$DB_INFO" | awk -F\| '{ print $2 }' | tr "A-Z" "a-z")
+dbUser=$(echo "$DB_INFO" | awk -F\| '{ print $3 }')
+dbPass=$(echo "$DB_INFO" | awk -F\| '{ print $4 }')
+dbSID=$(echo "$DB_INFO" | awk -F\| '{ print $5 }')
+dbPort=$(echo "$DB_INFO" | awk -F\| '{ print $6 }')
+dbTable=$(echo "$DB_INFO" | awk -F\| '{ print $7 }')
+dbCred=$(echo "$DB_INFO" | awk -F\| '{ print $8 }')
+dbSecret=$(echo "$DB_INFO" | awk -F\| '{ print $9 }')
+dbConnect=$(echo "$DB_INFO" | awk -F\| '{ print $10 }')
+dbBackEnd=$(echo "$DB_INFO" | awk -F\| '{ print $11 }')
+
+# this is used to find the sub-scripts
+BASEPATH=$(dirname $0)
+[[ $BASEPATH = "." ]] && BASEPATH=$(pwd)
+
+if [ -n "$TICKET" ]
+then
+  export TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+  for jira in $TICKET
+  do
+    echo "* Jira: https://jira.wsgc.com/browse/$jira *"
+  done
+fi
+
+# make sure we have the utilities we need
+for util in yq xmlstarlet geturls propset propget wsi_settings.sh svn set-manifest-property
+do
+  which $util >/dev/null 2>&1 || BailOut "Can't find $util"
+done
+
+[[ $BACKEND = nochange ]] && BACKEND=
+[[ -z $BACKEND ]] && BACKEND=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+[[ -z $BACKEND ]] && BailOut "Can't determine backend for $BRAND $ENVIRO"
+[[ -n $TICKET ]] && REASON="$TICKET" || REASON="DEVOPS"
+export MESSAGE="Update $BRAND $ENVIRO settings for ${DB} ${BACKEND} backend ($RUNBY)"
+export COMMENTS="-c [$REASON] $MESSAGE"
+
+# clean up prior executiion
+export TMP=/tmp/$(basename $0)/$LOGNAME/$BRAND-$ENVIRO
+rm -rf $TMP
+mkdir -p $TMP || BailOut "Unable to create TMP $TMP"
+Notation "TMP=$TMP"
+
+# svn checkout
+Notation "SVN checkout frontend"
+mkdir -p $TMP/frontend || BailOut "Unable to mkdir $TMP/frontend "
+svn co -q $FRONTEND $TMP/devops/application/frontend-2.1/qa/config/app/trunk || BailOut "Could not svn co frontend repo"
+
+# get the pom file
+export POM="$TMP/devops/application/frontend-2.1/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml"
+[[ -z $POM ]] && BailOut "No filename for pom.xml"
+[[ -e $POM ]] || BailOut "Can't find pom.xml in $TMP"
+svn cleanup $TMP/devops/application/frontend-2.1/qa/config/app/trunk
+
+Notation "Clone syncappconfig"
+git clone -q -b $ETCD_SYNCAPPCONFIG_BRANCH $ETCD_SYNCAPPCONFIG_REPO $TMP/syncappconfig || BailOut "Unable to clone $ETCD_SYNCAPPCONFIG_REPO/$ETCD_SYNCAPPCONFIG_BRANCH"
+
+# verify that we can get to the syncapp files
+cd $TMP/syncappconfig || BailOut "Unable to cd to $TMP/syncappconfig"
+cd config || BailOut "Unable to cd to config"
+VALUES=$ENVIRO/values.yaml
+[[ -e $VALUES ]] || echo "Can't find syncappconfig $VALUES"
+
+[[ $TICKET = "test" ]] && exit 0
+
+[[ $ENVIRO =~ qa ]] && REALM=qa
+[[ $ENVIRO =~ rgs ]] && REALM=qa
+[[ $ENVIRO =~ int ]] && REALM=qa
+[[ $ENVIRO =~ uat ]] && REALM=uat
+[[ $ENVIRO =~ perf ]] && REALM=uat
+[[ $ENVIRO =~ bpv ]] && REALM=uat
+[[ $BACKEND =~ veqa ]] && REALM=qa
+[[ -z $REALM ]] && REALM=qa
+REALM_UC=$(tr '[:lower:]' '[:upper:]' <<< $REALM)
+
+# set basic pom values
+echo "* update $(basename $POM)"
+propset -f $POM -p frontend.tableOwner -v ${dbOwner}
+#set -x
+propset -f $POM -p frontend.datasource.ecomDB.url -v "jdbc:oracle:thin:@${dbHost}:${dbPort}/${dbSID}"
+propset -f $POM -p frontend.datasource.ecomDB.username -v "${dbUser}"
+propset -f $POM -p frontend.datasource.ecomDB.password -v "${dbSecret}"
+{ set +x; } 2>/dev/null
+
+propset -f $POM -p frontend.datasource.session.url -v "jdbc:oracle:thin:@${dbHost}:${dbPort}/${dbSID}"
+propset -f $POM -p frontend.datasource.session.username -v "${dbUser}"
+propset -f $POM -p frontend.datasource.session.password -v "${dbSecret}"
+
+Notation "Commit $(basename $POM)"
+cd $(dirname $POM)  || BailOut "Can't cd to $(dirname $POM)"
+#svn diff | egrep "^-|^\+" | sort
+svn commit -m "[$REASON] $MESSAGE" || BailOut "SVN pom commit failed"
+
+# macros to improve readability
+export SMP="set-manifest-property -t $TICKET -e $ENVIRO -m \\\\\"Update for $BACKEND backend\\\\\""
+export UPDATE_SETTING="wsi_settings.sh '$COMMENTS' --brand $BRAND --env $ENVIRO -v --bulk"
+
+# this sets the basic appsettings
+. $BASEPATH/set-backend-any || BailOut "Something went wrong calling set-backend-any"
+
+# the commands for setting the values have been moved to sub-scripts for each backend
+case $BACKEND in
+  vtrn1 ) 
+    . $BASEPATH/set-backend-vtrn1 || BailOut "Something went wrong when calling set-backend-vtrn1"
+    ;; 
+
+  veqa1 ) 
+    . $BASEPATH/set-backend-veqa1 || BailOut "Something went wrong when calling set-backend-veqa1"
+    ;; 
+
+  veqa2 ) 
+    . $BASEPATH/set-backend-veqa2 || BailOut "Something went wrong when calling set-backend-veqa2"
+    ;; 
+
+  veqa3 ) 
+    . $BASEPATH/set-backend-veqa3 || BailOut "Something went wrong when calling set-backend-veqa3"
+    ;; 
+
+  eqa1 | dtc_app_owner ) 
+    . $BASEPATH/set-backend-eqa1 || BailOut "Something went wrong when calling set-backend-eqa1"
+    ;; 
+
+  eqa2 | dtcmou_app_owner ) 
+    . $BASEPATH/set-backend-eqa2 || BailOut "Something went wrong when calling set-backend-eqa2"
+    ;;
+
+  eqa3 | eqa3_app_owner ) 
+    . $BASEPATH/set-backend-eqa3 || BailOut "Something went wrong when calling set-backend-eqa3"
+    ;;
+
+  ws_app_owner ) 
+    . $BASEPATH/set-backend-ws_app_owner || BailOut "Something went wrong when calling set-backend-ws_app_owner"
+    ;;
+
+  ecom_can_prf ) 
+    . $BASEPATH/set-backend-ecom_can_prf || BailOut "Something went wrong when calling set-backend-ws_app_owner"
+    ;;
+
+  *) BailOut "No idea what to do with backend \"$BACKEND\" ";;
+esac
+
+#set -x
+if [[ -e $BASEPATH/set-backend-$DB ]]
+then 
+  Notation "Run DB-specific script [$DB]"
+  . $BASEPATH/set-backend-$DB || BailOut "Something went wrong calling set-backend-$DB"
+fi
+{ set +x; } 2>/dev/null
+
+Notation "Update oauth"
+[[ $ENVIRO =~ qa  ]] && DOM=qa
+[[ $ENVIRO =~ rgs ]] && DOM=qa
+[[ $ENVIRO =~ stag ]] && DOM=qa
+[[ $ENVIRO =~ uat ]] && DOM=uat
+[[ $ENVIRO =~ perf ]] && DOM=uat
+[[ $ENVIRO =~ bpv ]] && DOM=uat
+[[ -z $DOM ]] && DOM=qa
+eval set-oauth $ENVIRO $DOM $BRAND 
+
+cd /tmp
+
+Notation "Trigger appsettings job for $BRAND $ENVIRO" 
+get-appsetting-job $BRAND $ENVIRO run > /dev/null 2>&1 &
+
+# commit changes
+#Notation "Commit $VALUES"
+#cd $TMP/syncappconfig || BailOut "Unable to cd to $TMP/syncappconfig"
+#git add .
+#git pull >/dev/null 2>&1
+##git diff | egrep "^-|^\+" | sort -k2
+#git commit -q -a -m "[$REASON] $MESSAGE"
+#git push -q || BailOut "Push failed"
+
+eval jenkins-jnlp build wsgc-devops-frontend21-qa-$BRAND-app-config >/dev/null 2>&1 &
+sleep 10
+eval jenkins-jnlp build wsgc-devops-frontend21-qa-single-env -p BRAND=$BRAND -p ENVIRONMENT=$ENVIRO &
+
+[[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO} $MESSAGE"
+
+jenkins-jnlp build checkenv \
+  -p Brand=$BRAND \
+  -p Environment=$ENVIRO \
+  -p Options=Validate-Appsettings \
+  -p Options=Check-Schema \
+  -p Options=Rebuild-Config  \
+  -p Options=Deploy-War \
+  -p Options=Clear-Logs \
+  -p RunBy=$(basename $0) \
+  -p Ticket=$TICKET  >/dev/null 2>&1 &
+
+rm -rf $TMP
+
+exit 0

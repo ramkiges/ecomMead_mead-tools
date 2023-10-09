@@ -1,0 +1,41 @@
+#!/bin/bash
+# syncs a Mead fork with DevOps
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/release-tools:/apps/scm-tools
+#TODO: add logic to determine the branch, rather that just assuming 'release'
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "$(basename $0) - sync Mead fork with DevOps
+Usage: $(basename $0) <repo>" >&2
+  exit 128
+}
+
+REPO=$1
+[[ -z ${REPO} ]] && BailOut "Need repo"
+
+for util in hub 
+do
+  which $util >/dev/null 2>&1 || BailOut "Need to install $util"
+done
+
+REPO=$(sed -es/git@github.wsgc.com://g <<< ${REPO})
+REPO=$(sed -es/eCommerce-Mead//g <<< ${REPO})
+REPO=$(sed -es/\.git//g <<< ${REPO})
+REPO=$(sed -es%/%%g <<< ${REPO})
+TMP=$HOME/$(basename $0):${REPO}
+
+#set -x
+hub clone -q git@github.wsgc.com:eCommerce-Mead/${REPO}.git $TMP
+cd $TMP || BailOut "Can't cd to $TMP"
+hub remote remove origin
+hub remote add mead git@github.wsgc.com:eCommerce-Mead/${REPO}.git
+hub remote add devops git@github.wsgc.com:eCommerce-DevOps/${REPO}.git
+hub fetch -q --all --prune >/dev/null 2>&1
+hub checkout -q release
+hub merge -q --no-edit --commit -m "[CLEANUP]" devops/release
+hub rebase -q devops/release
+hub push -q -f --set-upstream git@github.wsgc.com:eCommerce-Mead/${REPO}.git release >/dev/null 2>&1
+{ set +x; } 2>/dev/null
+
+rm -rf $TMP
+exit 0

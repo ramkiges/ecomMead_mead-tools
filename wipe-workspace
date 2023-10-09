@@ -1,0 +1,47 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/sbin:/usr/sbin
+
+LIST="0 3 4 5 6 7 8 9 10 11 14 15 16 17 18 19 20 21"
+#LIST="0"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  exit 255
+}
+
+[[ -z $1 ]] && BailOut "Need workspace to wipe"
+
+for WS in $*
+do
+  echo "$WS" | egrep -iq "\.\." && BailOut "Invalid workspace [$WS]"
+
+  WS=$(echo "$WS" | sed \
+    -es%https://%%g \
+    -es%http://%%g \
+    -es%ecombuild.wsgc.com%%g \
+    -es%/jenkins%%g \
+    -es%/apps/jenkins/workspace/%%g \
+    -es%/job%%g \
+    -es%/console%%g \
+    -es%^/%%g \
+  )
+
+  ORG=$(echo "$WS" | awk -F/ '{ print $1 }')
+  PRJ=$(echo "$WS" | awk -F/ '{ print $2 }')
+  BCH=$(echo "$WS" | awk -F/ '{ print $3 }')
+
+  [[ -z $ORG ]] && BailOut "Malformed workspace (no org)"
+  [[ -z $PRJ ]] && BailOut "Malformed workspace (no prj)"
+
+  for x in $LIST
+  do 
+    host="ecom-jenkins-agent-$x"
+    [[ $x = "0" ]] && host=ecombuild
+
+    #echo "host: $host"
+    ssh -q -tt $host "sudo ls -l /apps/jenkins/workspace/${ORG}/${PRJ}/${BCH}* 2>/dev/null"
+    ssh -q -tt $host "sudo rm -rf /apps/jenkins/workspace/${ORG}/${PRJ}/${BCH}* "
+  done
+done
+
+

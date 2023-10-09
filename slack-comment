@@ -1,0 +1,65 @@
+#!/bin/bash
+# simple script to send a message to a Slack channel
+# requires a credential token in ~/.credentials.d that matches the name of the slack channel 
+# eg ~/.credentials.d/slack-team-devops-notice
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+
+# universal slack hook URL
+SLACK_URL=https://hooks.slack.com/services
+CHANNELS=$(echo $HOME/.credentials.d/slack-* 2>/dev/null | sed -es%$HOME/.credentials.d/slack-%%g)
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*" >&2
+  echo "Usage: $(basename $0) -c <channel> -m <message> [-f <from>] [-s <summary>] [-t <color>] " >&2
+  echo "Available channels: $CHANNELS" >&2
+  exit 1
+}
+
+## argument assignment
+while getopts "c:m:s:t:f:" opt 
+do
+    case ${opt} in
+        c) CHANNEL=$OPTARG ;;
+        m) MESSAGE=$OPTARG ;;
+        s) SUMMARY=$OPTARG ;;
+        t) COLOR=$OPTARG ;;
+        f) SENDER=$OPTARG ;;
+    esac
+done
+
+[[ -z $CHANNEL ]] && BailOut 
+[[ -z $MESSAGE ]] && BailOut
+
+# validate Slack creds
+CHANNEL=$(sed -es/slack-//g <<< $CHANNEL)
+SLACK_CRED=$HOME/.credentials.d/slack-$CHANNEL
+[[ -f "$SLACK_CRED" ]] || BailOut "Can't find Slack token file ($SLACK_CRED)"
+source $SLACK_CRED
+[[ -z "$SLACK_TOKEN" ]] && BailOut "SLACK_TOKEN not set"
+
+# massage the parameters
+MESSAGE="'text': '$MESSAGE',"
+MESSAGE=$(echo "$MESSAGE" | sed -es/" \`$"/"\`"/g)
+[[ -n $SENDER ]] && SENDER="'author_name': '${SENDER}',"
+[[ -n $SUMMARY ]] && SUMMARY="'text': '${SUMMARY}'," 
+if [[ -n $COLOR ]]
+then
+  [[ ${COLOR:0:1} = "#" ]] || COLOR="#$COLOR"
+  COLOR="'color': '${COLOR}',"
+fi
+
+# craft the json payload
+PAYLOAD="
+{
+  ${SUMMARY}
+  attachments: [ {
+    ${SENDER}
+    ${COLOR}
+    ${MESSAGE} 
+  } ]
+}"
+
+# send payload to Slack
+curl -sqk -X POST -H 'Content-type: application/json' --data "${PAYLOAD}" $SLACK_URL/$SLACK_TOKEN >&2
+
+exit $?
