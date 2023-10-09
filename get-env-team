@@ -1,0 +1,35 @@
+#!/bin/bash
+# finds the team assigned to a frontend env
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+REPO=git@github.wsgc.com:eCommerce-DevOps/jenkins-jobs.git
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+
+  exit 255
+}
+
+Usage() {
+  echo "Usage: $(basename $0) <environment>" >&2
+  exit 0
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  [[ -n $TMP ]] && rm -rf $TMP
+}
+trap cleanUp EXIT
+
+[[ $# -lt 1 ]] && Usage
+
+ENVIRO=$1
+
+TMP=$(mktemp -d -t tmp.$(basename $0).XXX )
+git clone -q --depth 1 $REPO $TMP || BailOut "Unable to clone $REPO"
+
+cd $TMP || BailOut "Unable to cd to $TMP"
+TEAM=$(ls -d deploy-$ENVIRO-* | cut -d- -f3-)
+
+[[ -n $TEAM ]] && echo "$TEAM"
+
+exit 0

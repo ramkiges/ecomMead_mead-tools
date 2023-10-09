@@ -1,0 +1,14 @@
+#!/bin/bash
+
+ODISSVR_PRD=invadj-prd-ab1v
+ODISSVR_QA=invadj-qa1-rk1v
+ODISDIR=/apps/odis-display-season-artifacts
+umask 000
+
+for b in pb pk we ws
+do
+  for gen in $(ssh -q $ODISSVR_PRD "cd /apps/odis-display-season-artifacts;ls -1t *$b* | head -1 | awk -F '[-.]' '{ print \$5 }'")
+  do
+    ./asset-clone $gen
+  done
+done

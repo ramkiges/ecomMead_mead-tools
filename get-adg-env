@@ -1,0 +1,118 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+
+ADG_REPO=git@github.wsgc.com:eCommerce-DevOps/delivery-gateway-helm-config.git
+MODE=$(basename $0)
+#TMP=$HOME/.adg.d
+TMP=$(mktemp -d -t tmp.$(basename $0).XXX )
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(hostname | awk -F\. '{ print $1 }')/$(basename $0): $*" >&2
+  exit 255
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  rm -rf $TMP
+}
+trap cleanUp EXIT
+
+[[ $1 =~ clea ]] && exit 0
+
+if [[ $# -gt 1 ]]
+then
+  BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1) 
+  ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $2)
+  BRAND_UC=$(tr '[:lower:]' '[:upper:]' <<< $BRAND)
+  KEY=$3
+else
+  ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $1)
+fi
+
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+for util in yq get-manifest
+do
+  which $util >/dev/null 2>&1 || BailOut "Can't find $util"
+done
+
+if [[ $MODE =~ get-adg-url || $MODE =~ get-adg-summary ]]
+then
+  [[ -z $BRAND ]] && BRAND=ws
+  ADG_PFX=$(get-adg-info $BRAND $ENVIRO hostnamePrefix)
+  [[ -z $ADG_PFX ]] && BailOut "Can't find ADG hostnamePrefix for $BRAND $ENVIRO"
+  ADG_DOMAIN=$(get-domain $BRAND $ENVIRO)
+  [[ -z $ADG_DOMAIN ]] && BailOut "Can't find domain for $BRAND $ENVIRO"
+  ADG_NAME=$(get-adg-info $BRAND $ENVIRO matchPathPrefix)
+  [[ -z $ADG_NAME ]] && BailOut "Can't get ADG matchPathPrefix for $ENVIRO"
+  ADG_URL="https://$ADG_PFX.$(getdomain $BRAND)/${ADG_NAME}.${ADG_DOMAIN}"
+  [[ $MODE =~ summary ]] && ADG_URL="$ADG_URL/.delivery/summary/index.html"
+  [[ -n $ADG_URL ]] && { echo "$ADG_URL/"; exit 0; }
+  exit 64
+fi
+
+if [[ $MODE =~ get-adg-org ]]
+then
+  mft=$(get-manifest -e $ENVIRO -s delivery-gateway -k pkg_branch)
+  value=$(awk -F/ '{ print $1 }' <<< $mft)
+  [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+fi
+
+if [[ $MODE =~ get-adg-branch ]]
+then
+  mft=$(get-manifest -e $ENVIRO -s delivery-gateway -k pkg_branch)
+  value=$(awk -F/ '{ print $NF }' <<< $mft)
+  [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+fi
+
+ADG_ORG=$(get-adg-org $ENVIRO)
+ADG_BRANCH=$(get-adg-branch $ENVIRO)
+ADG_ENV=$(get-manifest -e $ENVIRO -s delivery-gateway -k env)
+ADG_REPO=git@github.wsgc.com:$ADG_ORG/delivery-gateway-helm-config.git
+[[ -e $TMP/.git ]] || git clone -b $ADG_BRANCH -q $ADG_REPO $TMP || BailOut "$FUNCNAME:Unable to clone $ADG_REPO $ADG_BRANCH"
+
+[[ $ENVIRO = "uat1" ]] && ADG_ENV=uat
+[[ $ENVIRO = "uat" ]] && ADG_ENV=uat
+[[ -e $TMP/config/$ENVIRO ]] && ADG_ENV=$ENVIRO
+[[ -z $ADG_ENV ]] && BailOut "Why is ADG_ENV empty for $ENVIRO?"
+[[ -e $TMP/config/$ADG_ENV ]] || BailOut "Config directory for $ENVIRO not found"
+cd $TMP/config/$ADG_ENV || BailOut "Unable to cd to $TMP/config/$ADG_ENV"
+
+git fetch --all --prune -q >/dev/null 2>&1
+git branch --all -q >/dev/null 2>&1
+git checkout -q $ADG_BRANCH || BailOut "Unable to check out branch $ADG_BRANCH"
+git pull -q --rebase --autostash
+
+if [[ $MODE =~ get-adg-env ]]
+then
+  ## this may need more smarts
+  #value=$(get-manifest -e $ENVIRO -s delivery-gateway -k env)
+  #[[ $value = "qa" ]] && { echo "$ENVIRO"; exit 0; }
+  ##[[ $value = "uat" ]] && { echo "uat1"; exit 0; }
+  ##[[ $value = "uat" ]] && { echo "$ENVIRO"; exit 0; }
+  [[ -n $ADG_ENV ]] && { echo "$ADG_ENV"; exit 0; } || exit 64
+fi
+
+YAML=values.yaml
+[[ -e $YAML ]] || BailOut "Can't find $YAML"
+
+shopt -s nocasematch
+# make sure the case is correct
+[[ $KEY =~ ecmImagesUrl ]] && KEY=ecmImagesUrl
+[[ $KEY =~ imagesAssetUri ]] && KEY=imagesAssetUri
+[[ $KEY =~ ecmImagesAssetUri ]] && KEY=ecmImagesAssetUri
+[[ $KEY =~ hostnameprefix ]] && KEY=hostnamePrefix
+[[ $KEY =~ envId ]] && KEY=envI
+[[ $KEY =~ matchPathPrefix ]] && KEY=matchPathPrefix
+
+if [[ $KEY =~ images ]] 
+then
+  VALUE=$(yq eval "(.environments.[] | select(has(\"name\")) | select(.name == \"$ENVIRO\")).brands.${BRAND_UC}.$KEY" $YAML | grep -vi "null")
+  [[ -z $VALUE ]] && VALUE=$(yq eval "(.environments.[] | select(has(\"name\")) | select(.name == \"$ENVIRO\")).$KEY" $YAML | grep -vi "null")
+  [[ -n $VALUE ]] && { echo "$VALUE"; exit 0; } 
+fi
+
+VALUE=$(yq eval "(.environments.[] | select(has(\"name\")) | select(.name == \"$ENVIRO\")).$KEY" $YAML | grep -vi "null")
+[[ -n $VALUE ]] && { echo "$VALUE"; exit 0; } 
+
+exit 128

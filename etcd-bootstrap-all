@@ -1,0 +1,62 @@
+#!/bin/bash
+# this should be run on the Jenkins master for no other reason than it would be faster
+# TODO: add generic non-brand-specific etcd auth record - legacy record in etcd-bootstrap.sh
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:$PATH
+export PATH
+export UPDATE_DATA=false 
+
+BailOut() {
+    [[ -n $1 ]] && echo "
+    $(basename $0): $*
+    " >&2
+    echo "Usage: $(basename $0) <qa|uat> [env ...]"
+  exit 255
+}
+
+#echo "$(hostname)" | egrep -iq "jnkrck|ecbuild-agent" || BailOut "Please run on Jenkins master"
+export JENKINS=$(which jenkins-jnlp 2>/dev/null)
+
+if [[ -n $1 ]]
+then
+  ENV_LIST=$*
+else
+  ENV_LIST=$(get-env-list)
+fi
+ENV_LIST=$(echo "$ENV_LIST" | xargs -n1 | sort -u)
+
+[[ -z $ENV_LIST ]] && BailOut "ENV_LIST is blank"
+
+[[ -z $1 ]] && ENV_LIST="localdev fktest $ENV_LIST"
+
+MANUAL_MARKETS=
+for brand in $(getbrandlist | tr '[:lower:]' '[:upper:]')
+do
+  for market in US CAN
+  do
+    MANUAL_MARKETS="$brand:$market $MANUAL_MARKETS"
+  done
+done
+[[ -z $MANUAL_MARKETS ]] && BailOut "Why is MANUAL_MARKETS blank?"
+
+for e in $ENV_LIST 
+do
+  ETCD=$(get-etcd-env $e)
+  [[ -z $ETCD ]] && { echo "No etcd environment found for $e"; continue; }
+
+  echo ">>> $e "
+  eval $JENKINS build -s update-bootstrap-records \
+    -p Brand=WS \
+    -p Environment=${e} \
+    -p Market="\"'${MANUAL_MARKETS}'\"" \
+    -p ETCD_NAMESPACE=ecommerce-etcd-${ETCD} \
+    -p RunBy=$RUNBY \
+    -p UpdateData=false
+  { ret=$?; set +x; } 2>/dev/null
+  [[ $ret != 0 ]] && { echo "Jenkins job failed"; continue; }
+
+  /apps/mead-tools/run-mfe-config $e >/dev/null 2>&1 &
+done
+
+echo
+
+exit 0 

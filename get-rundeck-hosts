@@ -1,0 +1,22 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+umask 000
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(hostname):$(basename $0): $*" >&2
+  exit 255
+}
+ 
+RUNDECK_REPO=https://snapshotrepo.wsgc.com/artifactory/snapshotrepo-rpm/com/wsgc/devops/toolchain/resource-model/1.1-SNAPSHOT
+RUNDECK_HOSTS=/tmp/resource-model-$LOGNAME.xml
+RUNDECK_XML=$(curl -fsqk $RUNDECK_REPO/ | grep "resource-model-.*xml" | awk -F '[<>]' '{ print $3 }' | sort | tail -1)
+
+rm -f $RUNDECK_HOSTS
+
+[[ -z $RUNDECK_XML ]] && BailOut "Unable to determine resource-model file"
+curl -fsqk $RUNDECK_REPO/$RUNDECK_XML -o $RUNDECK_HOSTS
+
+[[ -e $RUNDECK_HOSTS ]] || BailOut "Unable to download resource-model file $RUNDECK_REPO/$RUNDECK_XML"
+echo "$RUNDECK_HOSTS"
+
+exit 0

@@ -1,0 +1,36 @@
+#!/bin/bash
+# 
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+export PATH
+
+DP_LOGIN="pkqaenv:Ca8tWh33l"
+TIMEOUT="--connect-timeout 30  --max-time 60"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  echo "Usage: $(basename $0) <brand> <enviro> [subsystem]"
+  exit 255
+}
+
+BRAND=$1
+ENVIRO=$2
+SUBSYS=$(tr '[:lower:]' '[:upper:]' <<< $3)
+[[ -z $ENVIRO ]] && BailOut 
+
+AKAMAI=$(get-akamai $BRAND $ENVIRO)
+SCHED_URL=$AKAMAI/.delivery/esi/v1/setedgeschedules.html
+
+GEN_LIST=$(curl $TIMEOUT -sqk --user $DP_LOGIN $SCHED_URL \
+  | awk -F 's_gens' '{ print $2 }' \
+  | awk -F 'value=' '{ print $2 }' \
+  | awk -F/ '{ print $1 }' \
+  | sed -es/\"//g -es/\'//g -es/[{}]//g -es/','/' '/g -es/:/=/g)
+
+if [[ -n $SUBSYS ]]
+then
+  echo "$GEN_LIST" | tr ' ' '\n' | sort | grep -wi $SUBSYS | awk -F= '{ print $2 }'
+else
+  echo "$GEN_LIST" | tr ' ' '\n' | sort
+fi
+
+exit 0

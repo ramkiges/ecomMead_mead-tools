@@ -1,0 +1,174 @@
+#!/bin/bash
+# 
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+MODE=$(basename $0)
+ORG=eCommerce-DevOps
+
+[[ $(uname) = "Darwin" ]] && TMP=$HOME/.bgb-env.d || TMP=/home/$LOGNAME/.bgb-env.d
+find $TMP -maxdepth 1 -mindepth 1 -mtime +10 -exec rm -rf {} \; 2>/dev/null
+
+BailOut() {
+	[[ -n $1 ]] && echo "[$(hostname | awk -F\. '{ print $1 }')] $(basename $0): $*" >&2
+  #echo "Usage: $(basename $0) <brand> <env> [action]" >&2
+  exit 0
+}
+
+# test svn access
+svn --non-interactive ls https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk >/dev/null 2>&1
+if [[ $? -ne 0 ]]
+then
+  echo "??? svn on $(hostname) isn't working ???" >&2
+  cd $HOME
+  [[ -e svn-creds.tar ]] && tar xf svn-creds.tar
+  svn --non-interactive ls https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk >/dev/null 2>&1 || BailOut "SVN is broken"
+fi
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+ENVIRO=$(tr '[:upper:]' '[:lower:]' <<<$2)
+[[ -z $ENVIRO ]] && BailOut "Need enviroment"
+ACTION=$3
+
+[[ $BRAND =~ admin ]] && BRAND=ws
+[[ $ENVIRO = "regression" ]] && ENVIRO=rgs1
+[[ $ENVIRO = "integration2" ]] && ENVIRO=int2
+
+MARKET=$(get-market $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+[[ $MARKET =~ us ]] && MARKET=
+
+INSTALLATION=$(get-installation $BRAND $ENVIRO)
+[[ -z $INSTALLATION ]] && INSTALLATION=$ENVIRO
+
+DEPLOYMENTS="https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties/${ENVIRO}/${BRAND}${MARKET}.properties"
+BUILD_DATA="https://repos.wsgc.com/svn/deployments/content/trunk/build_data/content-deploy/${ENVIRO}/${BRAND}${MARKET}.properties"
+
+BGB_URL=$(svn --non-interactive cat $DEPLOYMENTS 2>/dev/null | grep -i "bgburi=" | egrep -v "#" | awk -F= '{ print $2 }')
+[ -z "$BGB_URL" ] && BGB_URL=$(svn --non-interactive cat "$(dirname $(dirname $DEPLOYMENTS))/deploy.properties" | grep -i "bgburi=" | egrep -v "#" | awk -F= '{ print $2 }')
+BGB_HOST=$(echo "$BGB_URL" | sed -es%https://%%g | awk -F: '{ print $1 }')
+
+BUILDSYS_URL=$(svn --non-interactive cat $DEPLOYMENTS 2>/dev/null | grep -i "bsuri=" | egrep -v "#" | awk -F= '{ print $2 }')
+[ -z "$BUILDSYS_URL" ] && BUILDSYS_URL=$(svn --non-interactive cat "$(dirname $(dirname $DEPLOYMENTS))/deploy.properties" | grep -i "bsuri=" | egrep -v "#" | awk -F= '{ print $2 }')
+BUILDSYS_HOST=$(echo "$BUILDSYS_URL" | sed -es%https://%%g | awk -F: '{ print $1 }')
+
+SCHEMA=$(svn --non-interactive cat $DEPLOYMENTS 2>/dev/null | grep -i "DBSchema=" | egrep -v "#" | awk -F= '{ print $2 }')
+[[ -z $SCHEMA ]] && SCHEMA=$(svn --non-interactive cat "$(dirname $(dirname $DEPLOYMENTS))/deploy.properties" | grep -i "DBSchema=" | egrep -v "#" | awk -F= '{ print $2 }')
+SID=$(svn --non-interactive cat $DEPLOYMENTS 2>/dev/null | grep -i "DBInst=" | egrep -v "#" | awk -F= '{ print $2 }')
+[[ -z $SID ]] && SID=$(svn --non-interactive cat "$(dirname $(dirname $DEPLOYMENTS))/deploy.properties" | grep -i "DBInst=" | egrep -v "#" | awk -F= '{ print $2 }')
+
+[[ $MARKET = "can" ]] && MARKET=ca
+BGB_ENV=$(echo "$BGB_HOST" | awk -F\. '{ print $1 }' | sed -es/-rk1v//g -es/-sac1v//g -es/bgb-//g)
+BGB_CONFIG="bgb-$BGB_ENV-config"
+[[ $BGB_ENV = "bgb" ]] && BGB_CONFIG=bgb-prdrk-config
+[[ $BGB_ENV = "ca-prd" ]] && BGB_CONFIG=bgb-ca-prdrk-config
+
+mkdir -p $TMP
+[[ -e $TMP/$BGB_CONFIG/.git ]] || git clone --depth 1 -q git@github.wsgc.com:$ORG/${BGB_CONFIG}.git $TMP/$BGB_CONFIG
+cd $TMP/$BGB_CONFIG || BailOut "Unable to cd to $TMP/$BGB_CONFIG"
+#[[ $(find $TMP/$BGB_CONFIG -mtime +1) ]] || { git -C $TMP/$BGB_CONFIG pull -q --rebase --autostash >/dev/null 2>&1 || echo "Unable to pull svc $TMP/$BGB_CONFIG" >&2; }
+# this older git doesn't know -C or --autostash
+git pull -q --rebase >/dev/null 2>&1 #|| echo "Unable to pull svc $TMP/$BGB_CONFIG" >&2
+
+# find the BGB config file
+XML=$(find $TMP/$BGB_CONFIG -name environmentConfig-override.xml)
+[[ -z $XML ]] && XML=$(find $TMP/$BGB_CONFIG -name environmentConfig.xml)
+[[ -z $XML ]] && BailOut "Why is XML blank?"
+#xmlstarlet el -v $XML
+
+if [[ $MODE =~ get-bgb-installation ]]
+then 
+  STAGE=$(svn --non-interactive cat $DEPLOYMENTS 2>/dev/null | grep -i "ActInstallation" | egrep -v "#" | awk -F= '{ print $2 }' | sort -u)
+  [[ -n $STAGE ]] && { echo "$STAGE"; exit 0; }
+  exit 1
+fi
+
+if [[ $MODE =~ get-bgb-stage ]]
+then 
+  STAGE=$(svn --non-interactive cat $DEPLOYMENTS 2>/dev/null | grep -i "bgb.stage=" | egrep -v "#" | awk -F= '{ print $2 }')
+  [[ -z $STAGE ]] && STAGE=$(svn --non-interactive cat "$(dirname $(dirname $DEPLOYMENTS))/deploy.properties" | grep -i "bgb.stage=" | egrep -v "#" | awk -F= '{ print $2 }')
+  [[ -n $STAGE ]] && { echo "$STAGE"; exit 0; }
+  exit 1
+fi
+
+if [[ $MODE =~ get-bgb-cfg ]]
+then 
+  [[ -n $BGB_CONFIG ]] && { echo "$TMP/$BGB_CONFIG"; exit 0; }
+  exit 1
+fi
+
+if [[ $MODE =~ get-cmx-path || $ACTION =~ cmx || $ACTION =~ content ]]
+then
+  m=$(get-market $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+  [[ $m =~ us ]] && m=
+
+  SITEIMAGES=$(xmlstarlet el -v $XML | egrep -A+100 -i "Host\[.*@name=.*img.*qa" | grep -i "contents='siteimages'" | grep "/${BRAND}${m}dp/" | awk -F 'hostRoot=' '{ print $2 }' | awk -F\' '{ print $2 }' | egrep -vi "/rk/|/ab/|/dv/" | head -1)
+  [[ -z $SITEIMAGES ]] && { echo "$(basename $0): SITEIMAGES is blank" >&2; continue; }
+
+  CONTENT_IMAGE=$(sed -es%/images/ecom-images/%%g <<< $SITEIMAGES)
+  [[ -n $CONTENT_IMAGE ]] && { echo "$CONTENT_IMAGE"; exit 0; }
+  exit 1
+fi
+
+if [[ $MODE =~ get-cat-path || $ACTION =~ cat ]]
+then
+  #CATALOGDATA=$(xmlstarlet el -v $XML | grep -i "hostRoot='catalogdata'" | grep "/${BRAND}dp/" | awk -F 'hostRoot=' '{ print $2 }' | awk -F\' '{ print $2 }' | egrep -vi "/rk/|/ab/|/dv/")
+  #[[ -z $CATALOGDATA ]] && BailOut "CATALOGDATA is blank"
+  #CAT_IMAGE=$(sed -es%/images/ecom-images/%%g <<< $CATALOGDATA)
+
+  BGB_HOST=$(get-bgb-env $BRAND $ENVIRO | grep BGB_HOST | awk -F= '{ print $2 }' | awk -F\. '{ print $1 }')
+  case $BGB_HOST in
+    bgb-uat1-rk1v ) CAT_IMAGE=${BRAND}imgs/qark/images/dp/ ;;
+    bgb-ca-rgs1-rk1v ) CAT_IMAGE=${BRAND}imgs/qark/images/dp/ ;;
+    * ) BailOut "Don't know the CAT_IMAGE for $BGB_HOST" ;;
+  esac
+
+  [[ -n $CAT_IMAGE ]] && { echo "$CAT_IMAGE"; exit 0; }
+  exit 1
+fi
+
+# find the DP config file
+DP="$TMP/$BGB_CONFIG/src/main/resources/tomcat/apps/bgb/etc/dp${INSTALLATION}"
+[[ -e $DP ]] || BailOut "Unable to find BGB DP config file for $BRAND $ENVIRO ($INSTALLATION) [$DP]"
+
+if [[ $MODE =~ get-bgb-service || $ACTION =~ service ]]
+then
+  SERVICE_ID=$(egrep -i -A+5 "Environment id=\"dp${INSTALLATION}\"|Environment id=\"dp${ENVIRO}\"" $XML |grep -i "service id.*/db" | awk -F= '{ print $2 }' | awk '{ print $1 }' | awk -F/ '{ print $1 }' | sort -u | egrep -vi "<!--|-->")
+  [[ -z $SERVICE_ID ]] && BailOut "Can't find ServiceID for dp${INSTALLATION}"
+  key="OracleService id.*$SERVICE_ID/db"
+  ORACLE_ID=$(grep -i "$key" $XML)
+  [[ -z $ORACLE_ID ]] && BailOut "Unable to find OracleService for $SERVICE_ID"
+  SID=$(grep -i -A+5 "$key" $XML | grep -i "sid=" | awk -F 'sid=' '{ print $2 }' | awk '{ print $1 }' | tr -cd "[:alnum:]_" | tr '[:upper:]' '[:lower:]')
+  [[ -z $SID ]] && SID=$(grep -i -A+5 "$key" $XML | grep -i "service_name=" | awk -F 'service_name=' '{ print $2 }' | awk '{ print $1 }' | tr -cd "[:alnum:]_" | tr '[:upper:]' '[:lower:]')
+  SCHEMA=$(grep -i -A+10 "$key" $XML | grep -i "Schema contents=\"miscdata\"" | awk -F 'name=' '{ print $2 }' | awk '{ print $1 }' | tr -cd "[:alnum:]_" | tr '[:upper:]' '[:lower:]')
+
+  #CREDS=$(grep -i -A+5 "$key" $XML | grep -i "credentials=" | awk -F 'credentials=' '{ print $2 }' | awk '{ print $1 }' | tr -cd "[:alnum:]_")
+  #CREDFILE="$(dirname $(dirname $XML))/credentials/$CREDS"
+  [[ -n $SCHEMA && -n $SID ]] && { echo "$SCHEMA:$SID"; exit 0; }
+  exit 1
+fi
+
+if [[ $MODE =~ get-bgb-schema || $ACTION =~ schema ]]
+then
+  SCHEMA=$(grep -i "owner=" $DP | grep -iv "#" | awk -F= '{ print $2 }' | tr '[:upper:]' '[:lower:]')
+  SID=$(grep -i "sid=" $DP | grep -iv "#" | awk -F 'sid=' '{ print $2 }' | awk -F\; '{ print $1 }' | tr '[:upper:]' '[:lower:]')
+  [[ -z $SID ]] && SID=$(grep -i "service_name=" $DP | grep -iv "#" | awk -F 'service_name=' '{ print $2 }' | awk -F\; '{ print $1 }' | tr '[:upper:]' '[:lower:]')
+  [[ -n $SCHEMA && -n $SID ]] && { echo "$SCHEMA:$SID"; exit 0; }
+  exit 1
+fi
+
+[[ $MODE =~ bgb.*host ]] && { echo "$BGB_HOST"; exit 0; }
+[[ $MODE =~ bgb.*ur ]] && { echo "$BGB_URL"; exit 0; }
+[[ $MODE =~ build.*host ]] && { echo "$BUILDSYS_HOST"; exit 0; }
+[[ $MODE =~ build.*ur ]] && { echo "$BUILDSYS_URL"; exit 0; }
+
+if [[ $MODE =~ get-cmx-schema ]]
+then 
+  [[ -n $SCHEMA && -n $SID ]] && { echo "$SCHEMA:$SID"; exit 0; }
+  exit 1
+fi
+
+echo "BGB_HOST=$BGB_HOST
+BGB_URL=$BGB_URL
+BUILDSYS_HOST=$BUILDSYS_HOST
+BUILDSYS_URL=$BUILDSYS_URL"
+
+exit 0
+

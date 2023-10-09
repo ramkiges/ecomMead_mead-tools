@@ -1,0 +1,46 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:$HOME/bin:$PATH
+MODE=$(basename $0)
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*" >&2
+  exit 255
+}
+
+BRAND=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+ENVIRO=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+[[ -z $ENVIRO ]] && BailOut
+DOMAIN=$(getdomain $BRAND $ENVIRO)
+[[ -z $DOMAIN ]] && BailOut "No domain found for $BRAND $ENVIRO"
+
+[[ $ENVIRO =~ preprd || $ENVIRO =~ preprod || $ENVIRO =~ aktest ]] && { echo "https://aktest-www.$DOMAIN"; exit 0; }
+[[ $ENVIRO =~ prd || $ENVIRO =~ prod ]] && { echo "https://www.$DOMAIN"; exit 0; }
+
+echo "$ENVIRO" | egrep -iq "regression|integration|rgs" &&  www= || www="www."
+ENV_URL=$(echo "$ENVIRO" | sed -es/"^ca"//g)
+
+[[ $ENVIRO =~ uat3 ]] && ENV_URL="uat3"
+[[ $ENVIRO = "qa1" ]] && ENV_URL="qa"
+[[ $ENVIRO = "uat1" ]] && ENV_URL="uat"
+[[ $ENVIRO = "cauat1" ]] && ENV_URL="uat"
+[[ $ENVIRO = "uat" ]] && ENV_URL="uat"
+[[ $ENVIRO = "int" ]] && ENV_URL="integration"
+[[ $ENVIRO = "int1" ]] && ENV_URL="integration"
+[[ $ENVIRO = "int2" ]] && ENV_URL="integration2"
+[[ $ENVIRO = "rgs" ]] && ENV_URL="regression"
+[[ $ENVIRO = "rgs1" ]] && ENV_URL="regression"
+[[ $ENVIRO = "rgs2" ]] && ENV_URL="regression2"
+[[ $ENVIRO = "cargs1" ]] && ENV_URL="regression"
+[[ $ENVIRO = "perf" ]] && ENV_URL="perf"
+
+[[ -z $ENV_URL ]] && echo "$ENV" | egrep -iq "^qa|^uat|^bpv|^ca" && ENV_URL="$ENVIRO"
+
+[[ $MODE = get-akamai ]] && ENV_URL="${www}${ENV_URL}"
+
+[[ $MODE = get-origin ]] && ENV_URL="origin-${www}${ENV_URL}"
+
+WWW="$ENV_URL.$DOMAIN"
+
+[[ -n $WWW ]] && echo "https://$WWW"
+
+exit 0

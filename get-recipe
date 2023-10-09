@@ -1,0 +1,91 @@
+#!/bin/bash
+# Thom Fitzpatrick
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+export PATH
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+
+BRAND=$1
+ENV=$2
+
+BRAND=ws
+ENV=qa23
+
+umask 000
+DEBUG=
+
+alias sqlplus="DYLD_LIBRARY_PATH=~/instantclient sqlplus"
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <brand> <dst_env> <src_env> [commit]"
+	echo "Read it as: Copy to <brand> <dst_env> 'from' <src_env> [ and commit ]"
+	echo
+	echo "Running without 'commit' does a dry run showing you what *would* be updated, but does not update anything. "
+	exit 1
+}
+
+[ -z "$BRAND" ] && BailOut "Need brand"
+[ -z "$ENV" ] && BailOut "Need destination "
+
+#WSI_SETTINGS=$(which wsi_settings 2>/dev/null)
+#[ -z "$WSI_SETTINGS" ] && BailOut "Can't find wsi_settings"
+
+SITE=$(brand2site $BRAND)
+[ -z "$SITE" ] && BailOut "Invalid brand"
+
+OWNER=$(svn cat $FRONTEND/qa/config/app/trunk/$BRAND/$ENV/pom.xml|grep -i "<frontend.tableowner>" | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+
+[ -z "$OWNER" ] && BailOut "Can't find schema for destination ($BRAND $ENV)"
+
+[ -n "$DEBUG" ] && echo "DST Owner: $OWNER"
+
+# getdb is a script which returns the db connections params for a given schema
+DB=$(getdb $OWNER)
+[ -z "$DB" ] && BailOut "Can't get creds for $OWNER $BRAND $ENV"
+dbHost=$(echo "$DB" | awk -F\| '{ print $1 }')
+dbOwner=$(echo "$DB" | awk -F\| '{ print $2 }')
+dbUser=$(echo "$DB" | awk -F\| '{ print $3 }')
+dbPass=$(echo "$DB" | awk -F\| '{ print $4 }')
+dbSID=$(echo "$DB" | awk -F\| '{ print $5 }')
+dbPort=$(echo "$DB" | awk -F\| '{ print $6 }')
+dbTable=$(echo "$DB" | awk -F\| '{ print $7 }')
+
+# test the connection
+#echo "quit;" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" || BailOut "Cannot connect to DST DB"
+
+#[ "$ENV" = "int1" ] && ENV="integration"
+#[ "$ENV" = "int2" ] && ENV="integration2"
+[ "$ENV" = "rgs1" ] && ENV="regression"
+
+[[ $ACTION = "commit" && $ENV =~ ^int ]] && BailOut "I'm sorry $(logname), I can't let you do that"
+
+echo "get setting from $BRAND $ENV"
+# get list of relevant subsystems
+#select SETTING_NAME from $dbOwner.ww_setting_values where (site = '$SITE' and setting_scope = '$ENV' and setting_group = '$GROUP'); "
+SQL="set heading off; 
+select GENERATION from $dbOwner.ww_generation_schedule where (site = '$SITE' and installation = '$ENV' and subsystem = 'RECIPE' ); "
+#echo  $SQL
+
+echo "$SQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" | egrep -iv "selected" 
+
+exit
+
+
+for SETTING_NAME in $SETTING_LIST
+do
+    T_SQL="set heading off; 
+select SETTING_TYPE from $dbOwner.ww_setting_values where (site = '$SITE' and setting_scope = '$ENV' and setting_group = '$GROUP' and setting_name='$SETTING_NAME');"
+    V_SQL="set heading off; 
+select SETTING_VALUE from $dbOwner.ww_setting_values where (site = '$SITE' and setting_scope = '$ENV' and setting_group = '$GROUP' and setting_name='$SETTING_NAME');"
+    #echo "$V_SQL"
+    #echo "$T_SQL"
+
+    type=$(echo "$T_SQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" | egrep -iv "selected" | tr '\n' ' ' | awk '{ print $1 }' ) 
+    #echo "type: $type"
+
+    value=$(echo "$V_SQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" | egrep -iv "selected" | tr '\n' ' ' | awk '{ print $1 }' ) 
+    #echo "type: $value"
+
+    echo wsi_settings --env "\$ENV" --brand $BRAND update $GROUP.$SETTING_NAME --type $type "\"$value\"" --force
+
+done

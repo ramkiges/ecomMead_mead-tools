@@ -1,0 +1,50 @@
+#!/bin/bash
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:$PATH
+
+sudo rm -f /var/lib/rpm/__db*		
+
+sudo /usr/lib/rpm/rpmdb_verify /var/lib/rpm/Packages
+
+sudo yum-complete-transaction -y -d0
+
+cd /etc/yum.repos.d
+umask 036
+
+repo=wsgc-devops-snapshotrepo.repo 
+if [[ ! -e $repo ]]
+then
+  cat > /tmp/$repo << EOF
+[wsgc-devops-snapshotrepo]
+name=wsgc-devops-snapshot repository
+baseurl=https://snapshotrepo.wsgc.com/artifactory/wsgc-devops-snapshot
+enabled=0
+gpgcheck=0
+sslverify=0
+username=devopsci
+password=push67!blue
+EOF
+
+  sudo cp /tmp/$repo /etc/yum.repos.d
+  rm /tmp/$repo
+fi
+
+repo=wsgc-snapshotrepo-ext.repo
+if [[ ! -e $repo ]]
+then
+  cat > /tmp/$repo << EOF
+[wsgc-snapshotrepo-ext]
+name=wsgc-snapshot-ext repository
+mirrorlist=https://pkgs.wsgc.com/linux/mirrors/mirrors.ecom.snapshot-ext
+enabled=0
+gpgcheck=0
+sslverify=0
+EOF
+
+  sudo cp /tmp/$repo /etc/yum.repos.d
+  rm /tmp/$repo
+fi
+
+sudo /usr/bin/yum -y --disablerepo=\* --enablerepo=wsgc-\* clean metadata -d1
+sudo /usr/bin/yum -y --disablerepo=\* --enablerepo=wsgc-\* makecache fast -d1
+
+exit 0

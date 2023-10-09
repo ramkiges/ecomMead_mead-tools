@@ -1,0 +1,39 @@
+#!/bin/bash
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:~/bin
+export PATH
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*" >&2
+  echo "Usage: $(basename $0) <brand> <environment> [run]" >&2
+  exit 1
+}
+
+BRAND=$1
+ENVIRO=$2
+RUN=$3
+
+[[ -z $ENVIRO ]] && BailOut
+
+SCHEMA=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+[[ -z $SCHEMA ]] && BailOut "Can't find schema for $BRAND $ENVIRO"
+SID=$(getschema $BRAND $ENVIRO | awk -F: '{ print $2 }')
+
+DB_INFO=$(getdb $SCHEMA)
+[[ -z $DB_INFO ]] && BailOut "Can't get db info for $BRAND $ENVIRO ($SCHEMA)"
+
+dbOwner=$(echo "$DB_INFO" | awk -F\| '{ print $2 }' | tr "A-Z" "a-z")
+[[ -z $dbOwner ]] && BailOut "Can't find dbOwner for $BRAND $ENVIRO ($SCHEMA)"
+
+job=$(jenkins-jnlp list-jobs | egrep -i "appsettings-$SID-$SCHEMA-$BRAND|appsettings-${dbOwner}-${SCHEMA}-${BRAND}|appsettings-${SCHEMA}-${BRAND}" | head -1)
+
+[[ -z $job ]] && BailOut "Can't find appsetting job for $BRAND $ENVIRO ($SCHEMA)"
+
+echo "$job"
+
+if [[ -n $RUN ]]
+then
+  jenkins-jnlp build -s $job
+  exit $?
+fi
+
+exit 0

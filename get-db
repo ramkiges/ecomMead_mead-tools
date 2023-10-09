@@ -1,0 +1,321 @@
+#!/bin/bash
+# TODO: get new ENC: string for ws_app_owner
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+#PATH=~/py3/bin:/wsgc/bin:$HOME/.pyenv/shims:$PATH
+# this script takes a db schema as an argment and returns a pipe-delimited string with the connection parameters
+# secret: https://confluence.wsgc.com/display/ES/Using+tomcat-crypto-factory
+# java -Dwsgc.cryptofactory.toolread=true -jar tomcat-crypto-factory-2.0.2.jar -k ./config.key read foo ENC:7A/kUaWA6UchFPHEZw04S/xFxTCyRxRQMV+tXdE4co0=
+
+# dbCred is the name of the file which contains the BGB db credentials
+
+#  EQA3_APP_OWNER/Eqa3#7768#pwd
+
+SCHEMA=$1
+[ -z "$SCHEMA" ] && exit 1
+
+# defaults
+dbPort="3800"
+dbTable="WW_APPLICATION_SETTINGS"
+dbUser="qa_app_owner"
+dbPass="q1ky*519"
+dbConnect="SID"
+
+SCHEMA=$(echo "$SCHEMA" | tr "A-Z" "a-z")
+
+case $SCHEMA in
+  ecom_can_prd | ecom_can_prd:webgmtp1 | ecom_can_prd:webgmtp2 )
+    dbHost=webgmtp1.wsgc.com
+    dbOwner=ECOM_CAN_PRD
+    dbUser=ECOM_SETTINGS_RO
+    dbPass='Ecomsetro123$'
+    dbSID=webgmtp1
+    dbCred=db_webgmtp1
+  ;;
+
+  ws_app_owner:websun1 | ws_app_owner:websun2 )
+    dbHost=websun2.wsgc.com
+    dbOwner=WS_APP_OWNER
+    dbUser=ECOM_SETTINGS_RO
+    dbPass='Ecomsetro123$'
+    dbSID=websun2
+    dbCred=db_websun
+  ;;
+
+    ecom_can_prf | ecom_prf_can | ecom_can_prf:webprf | ecom_prf_can:webprf )
+			dbHost=wboprf-scan.wsgc.com
+			dbOwner=ECOM_CAN_PRF
+
+			#dbUser=ws_app_owner
+			#dbPass="Sweet#pea#8562"
+      #dbSecret=ENC:XnP/KUxXL2yBa4jh5Ea1IQ5b5e//5LfHle6fZEGTALk=
+
+			dbUser=ecom_can_prf_user
+			dbPass="WebEc_usr2021"
+      dbSecret=ENC:4rzIldIv4wEEEH1A8lqWXfnIFCfUWIsO+KyrijPVh50=
+
+			dbSID=webprf
+			dbCred=db_webprf_can
+      dbConnect=SERVICE_NAME
+    ;;
+
+    eqa3_app_owner | eqa3 | eqa3_app_owner:webqa2 | eqa3:webqa2 )
+			dbHost=webqark2p.wsgc.com 
+			dbOwner=eqa3_app_owner
+			dbUser=eqa3_app_owner
+			dbPass="Eqa3#7768#pwd"
+      dbSecret="ENC:auCCM2J3t9vGDKhUYR4GnN3PZ6uq3xid9e/Ir7rsJSo="
+			dbSID=webqa2
+			dbCred=db_webqa2
+      dbConnect=$dbConnect
+      backEnd=eqa3
+    ;;
+
+    int_app_owner | int | int_app_owner:webqa2 | int:webqa2 )
+      dbHost=webqark2p.wsgc.com
+      dbOwner=int_app_owner
+      dbUser=int_app_owner
+      dbPass="Int#8562"
+      dbSID=webqa2
+      #dbCred=db_webqa2
+      dbCred=db_integration2
+      dbSecret="ENC:/uvp32IAwjSRjHzFjJNXJyvVxPSsDJNKSBhEaVHJ9ps="
+      dbConnect=$dbConnect
+    ;;
+
+	d1_app_owner | d1_app_owner:webqa1 )
+			dbHost=webqark1p.wsgc.com 
+			dbOwner=d1_app_owner
+			dbUser=D1_APP_OWNER
+			dbPass=sjgwe82g
+			dbSID=webqa1
+			dbCred=db_webqa1
+            dbConnect=$dbConnect
+	;;
+	
+	dtc_app_owner | eqa1 | dtc_app_owner:webqa2 )
+			dbHost=webqark2p.wsgc.com 
+			dbOwner=DTC_APP_OWNER
+			dbSID=webqa2
+
+      dbUser=pb_user
+			dbPass=simple8dev
+      dbSecret="ENC:RydRLVbIbTe8Qmc2hFHnoqtmyctaLWYsN7oeC92ZDxY="
+
+			dbCred=db_webqa2
+      dbConnect=$dbConnect
+      backEnd=eqa1
+	;;
+
+	ws_app_owner | ws_app_owner:webqa2 )
+			dbHost=webqark2p.wsgc.com 
+			dbOwner=ws_app_owner
+
+      dbUser=pb_user
+			dbPass=simple8dev
+      dbSecret="ENC:RydRLVbIbTe8Qmc2hFHnoqtmyctaLWYsN7oeC92ZDxY="
+
+      #dbUser=ws_app_owner
+      #dbPass="q1ky*519"
+      #dbSecret=
+
+			dbSID=webqa2
+			dbCred=db_webqa2
+      dbConnect=$dbConnect
+	;;
+
+	r1_app_owner_clean* )
+			dbHost=webqark2p.wsgc.com
+			dbOwner=r1_app_owner_clean
+			dbUser=r1_app_owner_clean
+			dbPass="Apple#8562"
+			dbSID=webqa2
+			dbCred=db_webqa2_r1_clean
+            dbSecret="ENC:ww8AfKWbvuPx3JuwlONw3o4i9tBY99aOIWGeZExAFDU="
+            dbConnect=$dbConnect
+	;;
+
+	r1_app_owner | r1_app_owner:webqa1 | r1_app_owner_clean* )
+			dbHost=webqark1p.wsgc.com
+			dbOwner=r1_app_owner
+			dbUser=r1_app_owner
+            #dbPass="r1#appus3r"
+			dbPass="r1#4pp0wn3r"
+			dbSID=webqa1
+			dbCred=db_webqa1_r1
+            dbSecret="ENC:MA1ZqzxWJI+KR4ObnZzJQnLvOWe5nX6hePbYaliZXzQ="
+            dbConnect=$dbConnect
+	;;
+
+    ecomnp | ws_app_owner:ecomnp | ecomnp:ecomnp )
+            dbHost=webqark1p.wsgc.com
+            dbOwner=ecomnp
+            #dbUser=ws_app_owner
+            #dbPass="WS_APP_OWNER_321"
+            dbUser=ecomnp
+            dbPass="ecomnp_321"
+            dbSID=ecomnp
+            dbCred=db_ecomnp
+            dbSecret="ENC:XGJHEMA70Tvoiws5FHyniPOCn+FUs7W7fFWZD5wlJVyO5gd3kol44LlLNMZTzFRV"
+            dbConnect=$dbConnect
+    ;;
+
+	export_app_owner_2 | export_app_owner_2:webqa2 )
+			dbHost=webqark2p.wsgc.com
+			dbOwner=export_app_owner_2
+			dbUser=export_app_owner_2
+			dbPass="JupiterMoon#2019"
+			dbSID=webqa2
+			dbCred=db_export_app_owner_2
+      dbConnect=$dbConnect
+	;;
+	
+	dtcmou_app_owner | eqa2 | dtcmou_app_owner:webqa2 )
+			dbHost=webqark2p.wsgc.com 
+			dbSID=webqa2
+			dbCred=db_webqa2
+
+			dbOwner=dtcmou_app_owner
+			dbUser=dtcmou_app_owner
+			dbPass="DTCMOUAPPOWNER"
+      dbSecret="ENC:CsrRqzPoWkbfOBWTBLfeX7W3aQYOXDXecZlC8mT2sVc="
+
+			#dbOwner=pb_user
+			#dbUser=pb_user
+			#dbPass=simple8dev
+      #dbSecret="ENC:RydRLVbIbTe8Qmc2hFHnoqtmyctaLWYsN7oeC92ZDxY="
+
+      dbConnect=$dbConnect
+      backEnd=eqa2
+	;;
+
+	qa_app_owner | qa_app_owner:webqa2 )
+			dbHost=webqark2p.wsgc.com 
+			dbOwner="qa_app_owner"
+			dbSID=webqa2
+			dbUser=pb_user
+			dbPass=simple8dev
+			dbCred=db_webqa2
+            dbConnect=$dbConnect
+	;;
+
+	dtcitg_app_owner | dtcitg_app_owner:webqa1 )	
+			dbHost=webqark1p.wsgc.com
+			dbOwner=dtcitg_app_owner
+			#dbUser=DTCITG_APP_USER
+			#dbPass="I#4pp0wn3r"
+			#dbUser=DTCITG_APP_ADMIN
+			#dbPass="I4pp4dmin"
+			dbUser=DTCITG_APP_OWNER
+			dbPass="I#4pp0wn3r"
+      dbSecret="ENC:r2S/2QpB527lhInJmn4QlIUgbcGPU5wkaaDpO0+iLxM="
+			dbSID=webqa1
+			dbCred=db_webqa1_dtcitg
+      #username=DTCITG_APP_ADMIN
+      #password=I4pp4dmin
+      dbConnect=$dbConnect
+      #I#5vc0wn3r
+	;;
+
+    jukebox | jukebox:webqa2 )
+      dbHost=webqark2p.wsgc.com
+			dbUser=jukebox
+			dbOwner=jukebox
+			dbPass='JB##2019'
+      dbSecret=
+			dbSID=webqa2
+      dbCred=db_jukebox
+      dbConnect=$dbConnect
+    ;;
+
+    jukebox_canada | jukebox_canada:webqa2 )
+            dbHost=webqark2p.wsgc.com
+                        #dbUser=export_app_owner_2
+                        dbUser=jukebox_canada
+                        dbOwner=jukebox_canada
+                        dbPass='JUKEBOX_CANADA'
+            dbSecret=
+                        dbSID=webqa2
+            dbCred=db_jukebox-canada
+            dbConnect=$dbConnect
+    ;;
+
+
+    ws_app_owner:webprf | webprf | webprf:wboprf-scan )
+      dbHost=wboprf-scan
+			dbUser=ws_app_owner
+			dbOwner=ws_app_owner
+			dbPass="Sweet#pea#8562"
+      dbSecret=ENC:7wRfbse3V0qpCMxongkukUVmVNL7Bfif0aZs5a0ye+M=
+			dbSID=webprf
+			dbCred=db_webprf
+      dbConnect=SERVICE_NAME
+    ;;
+
+    ca_app_owner:webqark2p | ca_app_owner | ca_app_owner:webqa2 )
+      dbHost=webqark2p.wsgc.com
+			dbUser=ca_app_owner
+			dbOwner=CA_APP_OWNER
+			dbPass="CA_APP_OWNER#123"
+      dbSecret=ENC:NbeNCnrlqY/RvqxRZ6XaaRaQXZZI6EcEWfooRQhvXpOGVHq34NFzBXHx/cY5jdpT
+			dbCred=db_ca_app_owner
+      dbSID=webqa2
+      dbConnect=SID
+    ;;
+
+  vtrn1 | ws_app_owner:vtrn1 )
+      dbHost=webqark1p.wsgc.com
+			dbOwner=ws_app_owner
+			dbUser=ws_app_owner
+			dbPass=simple8dev
+      dbSecret="ENC:iKemmONXU/y2km0dnA30JjKyYTShBFr4gX8TCZ3owgQ="
+			dbCred=db_vtrn1
+      dbSID=vtrn1
+      dbConnect=$dbConnect
+      backEnd=
+    ;;
+
+  veqa1 | ws_app_owner:veqa1 )
+			dbHost=webqark1p.wsgc.com 
+			dbOwner=ws_app_owner
+			dbUser=ws_app_owner
+			dbPass=simple8dev
+      dbSecret="ENC:cM4jsImomXyl53uheSgSEZNJZ9eHuAG9fMbr+4OWiSQ="
+			dbCred=db_veqa1
+			dbSID=veqa1
+      dbConnect=$dbConnect
+      backEnd=veqa1
+  ;;
+
+  veqa2 | ws_app_owner:veqa2 )
+			dbHost=webqark2p.wsgc.com 
+			dbOwner=ws_app_owner
+			dbUser=ws_app_owner
+			dbPass=simple8dev
+      dbSecret="ENC:cM4jsImomXyl53uheSgSEZNJZ9eHuAG9fMbr+4OWiSQ="
+			dbCred=db_veqa2
+			dbSID=veqa2
+      dbConnect=$dbConnect
+      backEnd=veqa2
+  ;;
+
+  veqa3 | ws_app_owner:veqa3 )
+			dbHost=webqark1p.wsgc.com 
+			dbOwner=ws_app_owner
+			dbUser=ws_app_owner
+			dbPass=simple8dev
+      dbSecret="ENC:cM4jsImomXyl53uheSgSEZNJZ9eHuAG9fMbr+4OWiSQ="
+			dbCred=db_veqa3
+			dbSID=veqa3
+      dbConnect=$dbConnect
+      backEnd=veqa3
+  ;;
+
+	* ) 
+		exit 1
+	;;
+esac
+
+echo "$dbHost|$dbOwner|$dbUser|$dbPass|$dbSID|$dbPort|$dbTable|$dbCred|$dbSecret|$dbConnect|$backEnd"
+
+exit 0
+

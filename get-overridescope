@@ -1,0 +1,56 @@
+#!/bin/bash
+# fetch the installation from a frontend pom in SVN - intended to be used in scripts
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/opt/homebrew/bin:~/bin
+export PATH
+
+FRONTEND_URL="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+XCADM_REPO=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/xcadmin-helm-config.git
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$(basename $0): $*" >&2
+  exit 1
+}
+
+[[ $# -lt 1 ]] && { echo "Usage: $(basename $0) <brand> <env>" >&2; exit 0; }
+
+if [[ $# -eq 2 ]]
+then
+  BRAND=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+  ENVIRO=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+else
+  BRAND=ws
+  ENVIRO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+fi
+
+[[ -z $ENVIRO ]] && BailOut "Something went wrong"
+
+if [[ $BRAND =~ adm ]]
+then
+  SCOPE=$($0 ws $ENVIRO)
+  echo "$SCOPE"
+
+  exit 0
+fi
+
+# weird corner cases
+[ "$ENV"  = "uat" ] && ENV="uat1"
+[ "$ENV"  = "qa" ] && ENV="qa1"
+[ "$ENV"  = "ca1" ] && ENV="cadev1"
+[ "$ENV"  = "cadev" ] && ENV="cadev1"
+[ "$ENV"  = "regression" ] && ENV="rgs1"
+
+[[ $ENVIRO = "uat" ]] && ENVIRO=uat1
+
+BRAND=${BRAND: -2}
+POM_URL=$FRONTEND_URL/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+
+INSTALLATION=$(get-installation $BRAND $ENVIRO)
+SCOPE=$(svn cat $POM_URL 2>/dev/null | xmlstarlet sel -N pom=http://maven.apache.org/POM/4.0.0 -t -v /pom:project/pom:properties/pom:frontend.overrideScope 2>/dev/null | tr -d "[:space:]" | sort -u)
+SCOPE=$(sed -es/'${frontend.environment}'/$INSTALLATION/g <<< $SCOPE)
+
+[[ $ENVIRO =~ jukebox ]] && SCOPE=$ENVIRO
+
+echo "$SCOPE"
+
+exit 0

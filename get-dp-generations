@@ -1,0 +1,38 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+export PATH
+DP_LOGIN="pkqaenv:Ca8tWh33l"
+TIMEOUT="--connect-timeout 30  --max-time 60"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+  echo "Usage: $(basename $0) <brand> <enviro> [subsystem]" >&2
+  exit 255
+}
+
+BRAND=$1
+ENVIRO=$2
+[[ -z $ENVIRO ]] && BailOut
+
+SUBSYS=$(tr '[:lower:]' '[:upper:]' <<< $3)
+#[[ -z $SUBSYS ]] && BailOut 
+
+HOST=$(get-host $BRAND $ENVIRO 2>/dev/null | awk -F\. '{ print $1 }')
+[[ -z $HOST ]] && BailOut "Can't find host for $BRAND $ENVIRO"
+SUMMARY=$HOST.wsgc.com/admin/summary.html
+
+[[ -z $HOST ]] && BailOut "Can't find hose for $BRAND $ENVIRO" 
+
+for sub in $(curl $TIMEOUT -fqsk --user $DP_LOGIN https://$SUMMARY | egrep "id=.*PROMO|id=.*ECM|id=.*CAT|id=.*HOMEPAGE|id='MISC'|id='MSG'|id='TMPL'" | awk -F '[<>]' '{ print $5 }' | sort -u)
+do
+  gen=$(curl $TIMEOUT -fqsk --user $DP_LOGIN https://$SUMMARY | grep "id='$sub'" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{ print $1 }' | egrep -iv "NO_SELECTION")
+
+  [[ -n $SUBSYS && $SUBSYS != $sub ]] && continue
+
+  [[ -n $SUBSYS ]] && { echo "$gen"; break; }
+
+  echo "$sub=$gen"
+
+done
+
+exit 0

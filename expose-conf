@@ -1,0 +1,328 @@
+#!/bin/bash
+# expose conf files via httpd 
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/apps/jdk8/bin:/apps/java/bin:/apps/jdk11/bin:/apps/mead-tools
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  exit 1
+}
+
+clearLogs() {
+sudo rm -f *[2][0-9][0-9][0-9][0-9][0-9][0-9]* *[2][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*
+echo
+}
+
+cd /var/log/weblogs || BailOut "can't cd to /var/log/weblogs"
+#echo "$1" | egrep -i "clean|clear|remove" && CLEAN=true
+
+# install at so we can clean ourselves up automatically
+sudo yum -y install at -d0
+
+if [[ -e /var/log/filebeat ]]
+then
+  sudo chmod 755 /var/log/filebeat >/dev/null 2>&1
+  sudo ln -sf /var/log/filebeat /var/log/weblogs
+  sudo chmod go+r /var/log/filebeat/*
+fi
+
+gizmo_list=$(ls -1d wsgc-tomcat-gizmotron* 2>/dev/null)
+for gizmo in $gizmo_list
+do
+  echo
+  echo "gizmo: $(basename $gizmo)"
+  cd $gizmo || BailOut "Can't cd to $giz"
+  clearLogs
+  gizmo_dir=$(sed -es/wsgc-//g <<< $gizmo)
+  gizmo_name=$(sed -es/wsgc-tomcat-gizmotron-//g <<< $gizmo)
+  [[ $gizmo = wsgc-tomcat-gizmotron ]] && gizmo_name=gizmo
+
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/$gizmo_dir/conf/Catalina/localhost/ROOT.xml /apps/$gizmo_dir/bin/setenv.sh /apps/$gizmo_dir/bin/setenv-override.sh /apps/$gizmo_dir/salesforce/query /apps/$gizmo_dir/apps/$gizmo_name/*.war 
+  do
+    [[ -e $conf ]] || continue
+    echo "  $conf"
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+    sudo chmod 644 $conf
+  done
+  cd /var/log/weblogs
+done
+
+for brand in we ws pb pk
+do
+  dir=wsgc-tomcat-registry-adm-$brand
+  app=tomcat-registry-adm-$brand
+  [[ -e $dir ]] || continue
+  echo "$dir"
+  cd $dir || BailOut "Unable to cd to $dir"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/$app/conf/Catalina/localhost/ROOT.xml /apps/$app/lib/log4j2.xml /apps/$app/lib/log4j.properties /apps/$app/apps/registry-adm/app-specification.properties /apps/$app/conf/registry-admin_keystore.jks
+  do
+    [[ -e $conf ]] || continue
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+    sudo chmod 644 $conf
+  done
+  cd /var/log/weblogs
+done
+
+ip=$(ls -1d *imageprocessor* 2>/dev/null | head -1)
+if [[ -d $ip ]]
+then
+  echo "$ip"
+  cd $ip || BailOut "Can't cd to $ip"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/imageprocessor/conf/server.xml /apps/imageprocessor/conf/ROOT.xml /apps/imageprocessor/lib/log4j.properties
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+    sudo chmod 644 $conf
+  done
+  cd /var/log/weblogs
+fi
+
+cp=$(ls -1d wsgc-contentprocessor* 2>/dev/null | head -1)
+if [[ -d $cp ]]
+then
+  echo "$cp"
+  cd $cp || BailOut "Can't cd to $cp"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /etc/httpd/conf.d/contentprocessor*.conf /apps/wsgc-contentprocessor-*/conf/config.xml
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+  cd /var/log/weblogs
+fi
+
+if [[ -d wsgc-tomcat-buildsystem ]]
+then
+  echo "wsgc-tomcat-buildsystem"
+  cd wsgc-tomcat-buildsystem || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /bgb/tomcat-buildsystem/lib/log4j.properties /bgb/tomcat-buildsystem/conf/Catalina/localhost/ROOT.xml /etc/httpd/conf.d/buildsystem.conf /bgb/tomcat-buildsystem/lib/log4j2.xml /bgb/tomcat-buildsystem/bin/setenv-override.sh /bgb/tomcat-buildsystem/bin/setenv.sh /bgb/tomcat-buildsystem/lib/log4j2.xml /home/builder/.npmrc /buildsystem/tomcat-buildsystem/conf/server.xml
+  do
+    #[[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+  rm messagecontent-*.jar
+  ln -sf $(ls -1t /bgb/buildsystem-2.0-work/scripts/lib/dptools/lib/messagecontent-*.jar | head -1) .
+  rm ftlcontent-*.jar
+  ln -sf $(ls -1t /bgb/buildsystem-2.0-work/scripts/lib/dptools/lib/ftlcontent-*.jar | head -1) .
+  ln -sf /bgb/buildsystem-2.0-work/scripts/lib/dptools/lib dptools
+
+  sudo cp /home/builder/.m2/settings.xml builder-m2-settings.xml
+  sudo chmod 644 builder-m2-settings.xml
+  cd /var/log/weblogs
+fi
+
+if [[ -d wsgc-tomcat-bgb ]]
+then
+  echo "wsgc-tomcat-bgb"
+  cd wsgc-tomcat-bgb || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /bgb/tomcat-bgb/lib/log4j.properties /bgb/tomcat-bgb/conf/Catalina/localhost/ROOT.xml /etc/httpd/conf.d/bgb.conf /bgb/tomcat-bgb/apps/bgb/etc/environmentConfig.xml /bgb/tomcat-bgb/apps/bgb/etc/sourceConfig.xml /bgb/tomcat-bgb/apps/bgb/etc/conceptConfig.xml /apps/tomcat-bgb/conf/Catalina/localhost/ROOT.xml /apps/tomcat-bgb/lib/log4j.properties /apps/tomcat-bgb/apps/biggreenbutton/etc/sourceConfig.xml /bgb/tomcat-bgb/bin/setenv.sh
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+  cd /var/log/weblogs
+fi
+
+if [[ -d wsgc-tomcat-sccext ]]
+then
+  echo "wsgc-tomcat-sccext"
+  cd wsgc-tomcat-sccext|| BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /etc/httpd/conf.d/sccext.conf /apps/tomcat-sccext/conf/app-specification.properties /apps/tomcat-sccext/conf/ACL.properties /apps/tomcat-sccext/lib/log4j.properties /etc/pki/tls/certs/localhost.crt
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+  cd /var/log/weblogs
+fi
+
+if [[ -d wsgc-tomcat-sccint ]]
+then
+  echo "wsgc-tomcat-sccint"
+  cd wsgc-tomcat-sccint|| BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /etc/httpd/conf.d/sccint.conf /apps/tomcat-sccint/conf/app-specification.properties /apps/tomcat-sccint/conf/ACL.properties /apps/tomcat-sccint/lib/log4j.properties /etc/pki/tls/certs/localhost.crt
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+  cd /var/log/weblogs
+fi
+
+if [[ -d wsgc-tomcat-oss-feedgen ]]
+then
+  echo "wsgc-tomcat-oss-feedgen"
+  cd wsgc-tomcat-oss-feedgen || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/standalone-feedgen/*-config.properties /etc/httpd/conf.d/oss-feedgen.conf /apps/tomcat-oss-feedgen/apps/oss-feedgen/application.properties /apps/tomcat-oss-feedgen/lib/log4j.properties /apps/tomcat-oss-feedgen/lib/platform.properties  
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-tomcat-ecmagent ]]
+then
+  echo "wsgc-tomcat-ecmagent"
+  cd wsgc-tomcat-ecmagent || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/apmagents/etc/profile /apps/tomcat-ecmagent/apps/ecmagent/etc/ecm-pubagent-config.json  /apps/tomcat-ecmagent/conf/Catalina/localhost/ROOT.xml /etc/httpd/conf.d/ecmagent.conf /apps/tomcat-ecmagent/lib/log4j.properties /apps/tomcat-ecmagent/lib/log4j2.xml
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-tomcat-favorites ]]
+then
+  echo "wsgc-tomcat-favorites"
+  cd wsgc-tomcat-favorites || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/tomcat-favorites/apps/application.properties /apps/tomcat-favorites/lib/log4j.properties /apps/tomcat-favorites/conf/Catalina/localhost/ROOT.xml /etc/httpd/conf.d/favorites.conf
+  do
+    [[ -e $conf ]] || continue
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-loyalty-batch ]]
+then
+  echo "wsgc-loyalty-batch"
+  cd wsgc-loyalty-batch || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/apmagents/etc/profile /apps/loyalty-batch/application.properties
+  do
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-tomcat-loyalty ]]
+then
+  echo "wsgc-tomcat-loyalty"
+  cd wsgc-tomcat-loyalty || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/tomcat-loyalty/apps/loyalty/application.properties /apps/tomcat-loyalty/lib/log4j.properties /apps/tomcat-loyalty/conf/Catalina/localhost/ROOT.xml /etc/httpd/conf.d/loyalty.conf
+  do
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-tomcat-profile ]]
+then
+  echo "wsgc-tomcat-profile"
+  cd wsgc-tomcat-profile || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/tomcat-profile/conf/Catalina/localhost/ROOT.xml /apps/tomcat-profile/lib/platform.properties /apps/tomcat-profile/lib/log4j.properties /apps/tomcat-profile/apps/profile/application.properties /etc/httpd/conf.d/profile.conf
+  do
+    [[ -e $conf ]] || continue
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-tomcat-publisher ]]
+then
+  echo "wsgc-tomcat-publisher"
+  cd wsgc-tomcat-publisher || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/tomcat-publisher/lib/log4j2.xml /apps/tomcat-publisher/conf/Catalina/localhost/ROOT.xml /apps/tomcat-publisher/lib/log4j.properties /apps/tomcat-publisher/conf/publisher.properties /apps/tomcat-publisher/lib/platform.properties
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-tomcat-aes ]]
+then
+  echo "wsgc-tomcat-aes"
+  cd wsgc-tomcat-aes || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/apmagents/etc/profile /apps/tomcat-aes/conf/Catalina/localhost/ROOT.xml /apps/tomcat-aes/lib/log4j.properties /apps/tomcat-aes/apps/aes/application.properties /etc/httpd/conf.d/aes.conf
+  do
+    [[ -e $conf ]] || continue
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf .
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-tomcat-corp ]]
+then
+  echo "wsgc-tomcat-corp"
+  cd wsgc-tomcat-corp || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/tomcat-corp/conf/Catalina/localhost/ROOT.xml /apps/tomcat-corp/lib/log4j.properties /apps/tomcat-corp/apps/corp/app-specification.properties /apps/tomcat-corp/work/Catalina/localhost/_/WEB-INF/classes/com/wsgc/ecommerce/config/corp/staticproxy-servlet.xml /apps/tomcat-corp/work/Catalina/localhost/_/WEB-INF/classes/com/wsgc/ecommerce/config/corp/ria-servlet.xml /apps/tomcat-corp/work/Catalina/localhost/_/WEB-INF/classes/com/wsgc/ecommerce/config/corp/content-servlet.xml /apps/tomcat-corp/work/Catalina/localhost/_/WEB-INF/classes/com/wsgc/ecommerce/config/corp/security-config.xml /apps/tomcat-corp/work/Catalina/localhost/_/WEB-INF/classes/com/wsgc/ecommerce/config/corp/spring-context.xml /apps/tomcat-corp/work/Catalina/localhost/_/WEB-INF/classes/com/wsgc/ecommerce/config/corp/freemarker-macros.xml /apps/tomcat-corp/work/Catalina/localhost/_/WEB-INF/classes/com/wsgc/ecommerce/config/corp/scheduling-config.xml /apps/tomcat-corp/work/Catalina/localhost/_/WEB-INF/classes/com/wsgc/ecommerce/config/corp/mapquestproxy-servlet.xml /etc/httpd/conf.d/corp.conf
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+  cd /var/log/weblogs 
+fi
+
+if [[ -d wsgc-tomcat-frontend ]]
+then
+  echo "wsgc-tomcat-frontend"
+  cd wsgc-tomcat-frontend || BailOut "can't cd to log directory"
+  clearLogs
+  for conf in /apps/opentelemetry/etc/profile /apps/apmagents/etc/profile /apps/tomcat/lib/log4j.properties /apps/tomcat/lib/log4j.properties.override /apps/tomcat/lib/log4j2.xml /etc/httpd/conf.d/frontend.conf /apps/tomcat/conf/Catalina/localhost/ROOT.xml /apps/tomcat/conf/applepay_keystore.jks /apps/tomcat/conf/apple-app-site-association /etc/filebeat/filebeat.yml /apps/tomcat/conf/server.xml /apps/tomcat/bin/setenv.sh /apps/tomcat/bin/setenv-override.sh
+  do
+    [[ -e $conf ]] || continue
+    exposed=$(basename $conf)
+    [[ $conf =~ apmagents ]] && exposed=profile.apmgents
+    [[ $conf =~ opentelemetry ]] && exposed=profile.opentelemetry
+    [[ -n $CLEAN ]] && sudo rm -f $(basename $conf) || sudo ln -sf $conf $exposed
+  done
+
+  for b in admin mg pb pk pt we ws gr rj
+  do
+    [[ -e /apps/tomcat/apps/$b/app-specification.properties ]] && sudo ln -sf /apps/tomcat/apps/$b/app-specification.properties $b-app-specification.properties
+  done
+
+  # explode war
+  WAR=$(find /apps/tomcat -name *.war)
+  cd /tmp
+  jar xvf $WAR WEB-INF/classes/com/wsgc/ecommerce/config/app-settings.properties
+  sudo cp WEB-INF/classes/com/wsgc/ecommerce/config/app-settings.properties /var/log/weblogs/wsgc-tomcat-frontend
+  sudo chown tomcat:webadmin /var/log/weblogs/wsgc-tomcat-frontend/app-settings.properties
+  
+  cd /var/log/weblogs 
+fi
+
+exit 0

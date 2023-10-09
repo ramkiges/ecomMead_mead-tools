@@ -1,0 +1,67 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:~/py3/bin:$PATH
+export PATH
+#cat override.properties | egrep -vi "\.qa1\.[nrabsimptlh]=" > x;mv x override.properties 
+
+TMP=/tmp/propdiff-$$
+PROPDIR=$(cat ~/.wsi_settings 2>/dev/null)/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site
+
+Usage() {
+	echo "Please note: this script is still in the experimental phase"
+
+	[ -n "$1" ] && echo $*
+    echo "$(basename $0) <BRAND> <ENV> "
+	exit 1
+}
+
+BailOut() {
+	[ -n "$1" ] && echo "$*" >&2
+    echo "$(basename $0) <BRAND> <ENV> "
+	exit 1
+}
+
+WSI_SETTINGS=$(which wsi_settings 2>/dev/null)
+[ -z "$WSI_SETTINGS" ] && Usage "Please install wsi_settings"
+
+GETURLS=$(which geturls 2>/dev/null)
+[ -z "$GETURLS" ] && Usage "Can't find geturls"
+
+BRAND=$1
+ENV=$2
+[ -z "$ENV" ] && BailOut
+
+OVERRIDE=$(geturls $BRAND $ENV | grep -i override.properties)
+[ -z "$OVERRIDE" ] && BailOut "Override filenam is blank"
+
+cd $(dirname $OVERRIDE) || BailOut "Can't cd to $(dirname $OVERRIDE)"
+svn up >/dev/null 2>&1 || BailOut "Couldn't svn up"
+
+# before we do anything, remove obvious duplicates
+svn -q up
+sort -u override.properties > override.properties.new || BailOut "Sort failed"
+mv override.properties.new override.properties || BailOut "Unable to sort file"
+svn commit -m "[DEVOPS] remove duplicates"
+
+# first, validate the formatting
+cat override.properties | egrep -iv "^#|^$" | while read line 
+do
+    #echo "line:$line"
+    group=$(echo "$line" | awk -F\. '{ print $1 }') 
+    setting=$(echo "$line" | awk -F\. '{ print $2}') 
+    env=$(echo "$line" | awk -F\. '{ print $3}') 
+    type=$(echo "$line" | awk -F\. '{ print $4}' | awk -F= '{ print $1 }') 
+
+    #echo "$group.$setting.$env.$type"
+    if echo "$group $setting $env" | egrep -iq "=" 
+    then
+      echo "> $line"
+      echo
+    fi
+done
+
+#ENV_LIST=$(cat $OVERRIDE | grep -iv "^#" | awk -F\. '{ print $3 }' | sort -u)
+#for env in $ENV_LIST
+#do
+#    echo "env: $env"
+#done
+

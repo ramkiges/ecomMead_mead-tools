@@ -1,0 +1,58 @@
+#!/bin/bash
+#export ORACLE_HOME=/u01/app/oracle/product/11.2.0/xe
+#export LD_LIBRARY_PATH=/u01/app/oracle/product/11.2.0/xe/lib
+PATH=/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:$ORACLE_HOME/bin
+alias sqlplus="DYLD_LIBRARY_PATH=~/instantclient sqlplus"
+
+BailOut() {
+    [ -n "$1" ] && echo "$*"
+    exit 1 
+}
+
+BRAND=pb
+ENV=qa16
+GENERATION=270138621
+
+[ -z "$GENERATION" ] && BailOut "Need generation"
+
+SITE=$(brand2site $BRAND)
+SRC="latest-qa"
+SCHEMA=$(getschema $BRAND $ENV)
+[ -z "$SCHEMA" ] && BailOut "Can't get schema for $BRAND $ENV"
+DB=$(getdb $SCHEMA)
+[ -z "$DB" ] && BailOut "Can't get creds for $OWNER $BRAND $ENV"
+dbHost=$(echo "$DB" | awk -F\| '{ print $1 }')
+dbOwner=$(echo "$DB" | awk -F\| '{ print $2 }')
+dbUser=$(echo "$DB" | awk -F\| '{ print $3 }')
+dbPass=$(echo "$DB" | awk -F\| '{ print $4 }')
+dbSID=$(echo "$DB" | awk -F\| '{ print $5 }')
+dbPort=$(echo "$DB" | awk -F\| '{ print $6 }')
+dbTable=$(echo "$DB" | awk -F\| '{ print $7 }')
+dbCred=$(echo "$DB" | awk -F\| '{ print $8 }')
+
+# original
+#SQL="insert into $SCHEMA.WW_GENERATION_SCHEDULE (GENERATION, SITE, INSTALLATION, SUBSYSTEM, START_TIME, REFRESH) VALUES ($GENERATION, $SITE, '$ENV', 'MSG', SYSDATE, (SELECT REFRESH  FROM   ( SELECT SITE, INSTALLATION, SUBSYSTEM, GENERATION, START_TIME, REFRESH, ROW_NUMBER() OVER (PARTITION BY SITE, INSTALLATION, SUBSYSTEM ORDER BY START_TIME DESC) AS rn FROM   $SCHEMA.WW_GENERATION_SCHEDULE WHERE START_TIME <= SYSDATE AND GENERATION != -1 AND site = $SITE AND INSTALLATION = '$ENV' AND SUBSYSTEM = 'MSG'  ) WHERE  rn = 1));"
+
+
+#SQL="insert into $SCHEMA.WW_GENERATION_SCHEDULE (GENERATION, SITE, INSTALLATION, SUBSYSTEM, START_TIME, REFRESH) VALUES ($GENERATION, $SITE, '$ENV', 'MSG', SYSDATE, (SELECT REFRESH  FROM   ( SELECT SITE, INSTALLATION, SUBSYSTEM, GENERATION, START_TIME, REFRESH, ROW_NUMBER() OVER (PARTITION BY SITE, INSTALLATION, SUBSYSTEM ORDER BY START_TIME DESC) AS rn FROM   $SCHEMA.WW_GENERATION_SCHEDULE WHERE START_TIME <= SYSDATE AND GENERATION != -1 AND site = $SITE AND INSTALLATION = '$ENV' AND SUBSYSTEM = 'MSG' and REFRESH is not NULL ) WHERE  rn = 1));"
+
+#V="declare refresh int;"
+#echo "$V" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+SQL="
+insert into $SCHEMA.WW_GENERATION_SCHEDULE (GENERATION, SITE, INSTALLATION, SUBSYSTEM, START_TIME, REFRESH) 
+VALUES ($GENERATION, $SITE, '$ENV', 'MSG', SYSDATE, (SELECT nvl(REFRESH,0)  
+    FROM   ( SELECT SITE, INSTALLATION, SUBSYSTEM, GENERATION, START_TIME, REFRESH, ROW_NUMBER() 
+            OVER (PARTITION BY SITE, INSTALLATION, SUBSYSTEM ORDER BY START_TIME DESC) 
+                AS rn FROM   $SCHEMA.WW_GENERATION_SCHEDULE 
+                    WHERE START_TIME <= SYSDATE AND GENERATION != -1 AND site = $SITE AND INSTALLATION = '$ENV' AND SUBSYSTEM = 'MSG'  ) 
+                        WHERE  rn = 1));"
+
+#echo $SQL
+echo "$SQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+RSQL="select generation,refresh from $SCHEMA.WW_GENERATION_SCHEDULE WHERE site=$SITE and installation='$ENV' and subsystem='TMPL';"
+#echo "$RSQL" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+echo $?
+

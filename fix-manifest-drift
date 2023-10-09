@@ -1,0 +1,34 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:$PATH
+export PATH
+
+BailOut() {
+  echo "$(basename $0): $*"  >&2
+  exit 255
+}
+
+ENVIRO=$1
+
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+#jenkins-jnlp build trigger-ManifestDeployer -p ENV_NAME=$ENVIRO && exit 0
+
+for module in $(get-manifest -e $ENVIRO -l)
+do
+  for manifest in services-collection-manifest 
+  do
+    #for pass in true false
+    M_ENV=$(get-manifest -e $ENVIRO -s $module -k env)
+    for pass in true
+    do
+      echo "$module/$manifest/$pass"
+      jenkins-jnlp build manifestDriftResolve \
+        -p MANIFEST_TYPE=$manifest \
+        -p ENV_NAME=$M_ENV \
+        -p APP_NAME=$module \
+        -p DRY_RUN_FLAG=$pass
+    done
+  done
+done
+
+

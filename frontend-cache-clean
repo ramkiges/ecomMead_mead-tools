@@ -1,0 +1,17 @@
+#!/bin/bash
+PATH=/bin:/sbin:/usr/bin:/usr/local/bin:/apps/maven/latest/bin:/apps/mead-tools:/apps
+JOBS= wsgc-devops-frontend21-qa-mg-app-config wsgc-devops-frontend21-qa-pb-app-config wsgc-devops-frontend21-qa-pk-app-config wsgc-devops-frontend21-qa-pt-app-config wsgc-devops-frontend21-qa-we-app-config wsgc-devops-frontend21-qa-ws-app-config wsgc-devops-frontend21-qa-app-config wsgc-devops-frontend21-common wsgc-devops-frontend21-qa-single-env
+
+for job in $JOBS
+do
+  [ -d /apps/jenkins-slave/workspace/$job ] || continue
+  echo "> $job"
+  cd /apps/jenkins-slave/workspace/$job
+  /apps/maven/latest/bin/mvn dependency:purge-local-repository
+  echo
+done
+
+for job in $JOBS
+do
+  jenkins-jnlp build $job
+done

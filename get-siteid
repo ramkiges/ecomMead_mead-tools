@@ -1,0 +1,45 @@
+#!/bin/bash
+# fetch the siteId from a frontend pom in SVN - intended to be used in scripts
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:~/bin
+export PATH
+
+FRONTEND_URL="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+
+BailOut() {
+	[ -n "$1" ] && echo "$(basename $0): $*" >&2
+  #echo "Usage: $(basename $0) <brand> [env]" >&2
+  exit 0
+}
+
+BRAND=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+ENVIRO=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+
+[[ $BRAND = admin ]] && { echo "600"; exit 0; }
+[[ $BRAND = corp ]] && { echo "64"; exit 0; }
+
+[[ $ENVIRO = "regression" ]] && ENVIRO=rgs1
+[[ $ENVIRO = "integration2" ]] && ENVIRO=int2
+
+[[ $ENVIRO = "ca" || $ENVIRO = "can" || $ENVIRO =~ jukebox-can ]] && { brand2site "ca$BRAND"; exit 0; }
+[[ -z $ENVIRO ]] && { brand2site $BRAND; exit 0; }
+
+# if a site is passed in, convert it to a brand name first
+echo "$BRAND" | grep -q "[0-9][0-9]" && BRAND=$(site2brand $BRAND)
+
+BRAND=${BRAND: -2}
+POM_URL=$FRONTEND_URL/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+PPOM_URL="$(dirname $(dirname $POM_URL))/pom.xml"
+
+SITEID=$(svn --non-interactive cat $POM_URL 2>/dev/null | xmlstarlet sel -N pom=http://maven.apache.org/POM/4.0.0 -t -v /pom:project/pom:properties/pom:frontend.siteId 2>/dev/null | egrep -iv "^$" | sort -u | tail -1 | awk '{ print $1 }')
+[[ -z $SITEID ]] && SITEID=$(svn --non-interactive cat $PPOM_URL 2>/dev/null | xmlstarlet sel -N pom=http://maven.apache.org/POM/4.0.0 -t -v /pom:project/pom:properties/pom:frontend.siteId | egrep -vi "^$" | sort -u | tail -1 | awk '{ print $1 }')
+
+## this catches cases where the property is defined more than once
+#[[ $(echo "$SITEID"  | wc -l) -gt 1 ]] && BailOut "ERROR: Multiple siteIds for $BRAND $ENVIRO"
+
+[[ $ENVIRO =~ ^regadm ]] && SITEID=$(/apps/mead-tools/brand2site $BRAND)
+[[ $ENVIRO =~ ^caregadm ]] && SITEID=$(/apps/mead-tools/brand2site ca$BRAND)
+
+echo "$SITEID"
+
+exit 0
+

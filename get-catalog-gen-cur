@@ -1,0 +1,88 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin:$PATH
+MODE=$(basename $0)
+TMP=$(mktemp -d -t tmp.$(basename $0).XXX )
+
+BailOut() {
+	[[ -n $1 ]] && echo "$*" >&2
+	exit 1
+}
+
+Usage() {
+  echo "$(basename $0) - Retrieves properties for ecom-svc-catalog
+Usage: $(basename $0)-/action/ <brand> <enviro> [ticket]
+Actions:
+  get-catalog-gen
+  get-catalog-url
+  get-catalog-schema
+  get-catalog-env " >&2
+  exit 0
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  cd /tmp
+  [[ -n $TMP ]] && rm -rf $TMP
+}
+trap cleanUp EXIT
+
+BRAND=$1
+ENVIRO=$2
+TICKET=$3
+
+[[ $# -eq 0 ]] && Usage
+[[ -z $BRAND ]] && BailOut "Need brand"
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+CATALOG_HELM=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-svc-catalog-helm-config.git
+
+# trying to parse this stuff out of the manifest is a hot mess
+C_ENV=$(get-manifest -e $ENVIRO -s ecom-svc-order-servicing -k env)
+CATALOG_ENV=$(get-manifest -e $ENVIRO -s ecom-svc-order-servicing -p '"configuration"."applicationProperties"."catalogservice.serviceUrl"')
+CATALOG_ENV=$(awk -F/ '{ print $1 "/" $2 "/" $3 }' <<< $CATALOG_ENV)
+CATALOG_URL=$(sed -es/%s/$BRAND/g <<< $CATALOG_ENV)
+CATALOG_ENV=$(awk -F/ '{ print $3 }' <<< $CATALOG_ENV)
+CATALOG_ENV=$(awk -F. '{ print $1 }' <<< $CATALOG_ENV)
+CATALOG_ENV=$(sed -es/%s-ecommerce-ecom-svc-catalog-//g <<< $CATALOG_ENV)
+
+[[ $MODE =~ env ]] && { echo "$CATALOG_ENV"; exit 0; }
+
+git clone -q --depth 1 $CATALOG_HELM $TMP || BailOut "Unable to clone $CATALOG_HELM"
+cd $TMP/config/$CATALOG_ENV || BailOut "Can't cd to catalog env $CATALOG_ENV"
+o=$(yq eval '."applicationProperties"."app.data.table-owner"' values.yaml | tr '[:upper:]' '[:lower:]' | egrep -iv "null")
+u=$(yq eval '."applicationProperties"."app.datasource.url"' values.yaml | tr '[:upper:]' '[:lower:]' | egrep -iv "null" | awk -F/ '{ print $NF }')
+[[ -n $o && -n $u ]] && CATALOG_SCHEMA="$o:$u"
+CATALOG_INST=$(yq eval '.applicationProperties."app.data.installation"' values.yaml | egrep -vi "null")
+
+if [[ $BRAND =~ pb ]]
+then
+  CATALOG_HOST=$(get-catalog-vm $BRAND $CATALOG_ENV)
+  CATALOG_URL="https://$CATALOG_HOST"
+else
+  CATALOG_URL=$(sed -es/services.west.wsgc.com/services.west.nonprod.wsgc.com/g <<< $CATALOG_URL)
+fi
+[[ -z $CATALOG_URL ]] && BailOut "Can't figure out catalog URL for $BRAND $ENVIR ($C_ENC)"
+
+[[ $MODE =~ url ]] && { echo "$CATALOG_URL"; exit 0; }
+[[ $MODE =~ inst ]] && { echo "$CATALOG_INST"; exit 0; }
+
+if [[ $MODE =~ schema ]]
+then
+  [[ -n $CATALOG_SCHEMA ]] && { echo "$CATALOG_SCHEMA"; exit 0; } || exit 128
+fi
+
+if [[ $MODE =~ gen ]]
+then
+  CATALOG_GEN_ACT=$(curl -fsqk $CATALOG_URL/summary | jq ".Generations.ActiveGenerations.CAT" | egrep -iv "null|Not Found" | sed -es/\"//g | awk -F\. '{ print $1 }')
+  CATALOG_GEN_CUR=$(curl -fsqk $CATALOG_URL/summary | jq ".Generations.CurrentGenerations.CAT" | egrep -iv "null|Not Found" | sed -es/\"//g | awk -F\. '{ print $1 }')
+  [[ -z $CATALOG_GEN_ACT && -z $CATALOG_GEN_CUR ]] && exit 128
+
+  [[ $MODE =~ gen-act ]] && { echo "$CATALOG_GEN_ACT"; exit 0; }
+  [[ $MODE =~ gen-cur ]] && { echo "$CATALOG_GEN_CUR"; exit 0; }
+
+  [[ -n $CATALOG_GEN_ACT ]] && { echo "$CATALOG_GEN_ACT"; exit 0; }
+  [[ -n $CATALOG_GEN_CUR ]] && { echo "$CATALOG_GEN_CUR"; exit 0; }
+fi
+
+exit 255
+

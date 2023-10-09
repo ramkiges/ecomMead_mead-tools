@@ -1,0 +1,53 @@
+#!/bin/bash
+# generates ADS PLCC key
+# https://confluence.wsgc.com/pages/viewpage.action?spaceKey=PS&title=PLCC+encryption+with+ADS
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps:~/bin
+DATE=$(date +'%m%Y')
+ENTROPY=$(ls -LR /tmp 2>/dev/null)
+COMMENT="WSI PLCC test $DATE"
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0)"
+	echo
+	exit 1
+}
+
+cat > /tmp/ads.exp << EOF
+#!/usr/bin/expect -f
+set timeout 300
+match_max 7500
+set expect_out(buffer) {}
+send "cd /home/tomcat/ads_keys\r"
+spawn gpg --s2k-cipher-algo AES256 --gen-key
+expect "what kind of key"
+send "5\r"
+expect "keys may be"
+send "2048\r"
+expect "how long the key should be valid"
+send "15m\r"
+expect "this correct"
+send "y\r"
+expect "name:"
+send "$COMMENT\r"
+expect "address:"
+send "webops-ecommerce@wsgc.com\r"
+expect "omment:"
+send "$COMMENT\r"
+expect "hange"
+send "O\r"
+expect "assphrase"
+send "wsitesting\r"
+expect "assphrase"
+send "wsitesting\r"
+expect "random bytes"
+send "$ENTROPY\r"
+spawn gpg --export-secret-keys -a "$COMMENT" >wsi-plcc-testing-$DATE-private.key
+spawn gpg --export -a "$COMMENT" >wsi-plcc-testing-$DATE.asc
+EOF
+
+chmod 755 /tmp/ads.exp
+echo "COMMENT: $COMMENT"
+
+#eval /tmp/ads.exp
+

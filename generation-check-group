@@ -1,0 +1,13 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps/jdk8/bin:/apps/java/bin:/apps/jdk7/bin:/apps/scm-tools
+
+ENV_LIST=$*
+
+for ENVIRO in $ENV_LIST
+do
+  generation-check $ENVIRO
+  ret=$?
+  [[ $ret -eq 0 ]] && { echo "Need sync for $ENVIRO"; jenkins-jnlp build sync-mfe-generations -p APP_ENVIRONMENT=$ENVIRO; } || echo "No sync needed for $ENVIRO"
+done
+
+exit 0

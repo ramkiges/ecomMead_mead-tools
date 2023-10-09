@@ -1,0 +1,52 @@
+#!/bin/bash
+# returns the oauth environment
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+export PATH
+
+BailOut() {
+  [[ -n $1 ]] && echo "
+$(basename $0): $*
+" >&2
+  echo "Usage: $(basename $0) <brand> <env>" >&2
+  exit 255
+}
+
+which getoverride >/dev/null 2>&1 || BailOut "Can't find getoverride"
+
+BRAND=$1
+ENVIRO=$2
+[[ -z $ENVIRO ]] && BailOut
+
+if [[ "$ENVIRO" =~ "jukebox" ]]
+then
+  echo "ecommerce-oauth-qa.services.west.nonprod.wsgc.com"
+  exit 0
+fi
+
+OVERRIDE=$(getoverride $BRAND $ENVIRO 2>/dev/null)
+#[[ -z $OVERRIDE ]] && BailOut "Can't find overrride for $BRAND $ENVIRO"
+[[ -n $OVERRIDE ]] && HOST=$(svn cat $OVERRIDE \
+  | egrep -i "ACCOUNT_SERVICES.OAUTH_AUTHORIZATION_TOKEN_HOST|ACCOUNT_SERVICES.USER_SERVICE_URI|ACCOUNT_SERVICES.OAUTH_ACCESS_TOKEN_URI" \
+  | grep "\.$ENVIRO\." \
+  | awk -F= '{ print $NF }' \
+  | awk -F/ '{ print $3 }' \
+  | sort -u | head -1\
+)
+
+if [[ -z $HOST ]]
+then
+  [[ $ENVIRO =~ fktest ]] && HOST=ecommerce-oauth-qa.services.west.nonprod.wsgc.com
+  [[ $ENVIRO =~ int ]] && HOST=ecommerce-oauth-qa.services.west.nonprod.wsgc.com
+  [[ $ENVIRO =~ rgs ]] && HOST=ecommerce-oauth-qa.services.west.nonprod.wsgc.com
+  [[ $ENVIRO =~ qa ]] && HOST=ecommerce-oauth-qa.services.west.nonprod.wsgc.com
+  [[ $ENVIRO =~ bpv ]] && HOST=ecommerce-oauth-uat.services.west.nonprod.wsgc.com
+  [[ $ENVIRO =~ uat ]] && HOST=ecommerce-oauth-uat.services.west.nonprod.wsgc.com
+  [[ $ENVIRO =~ perf ]] && HOST=ecommerce-oauth-uat.services.west.nonprod.wsgc.com
+  [[ $ENVIRO =~ prd ]] && HOST=webauth-rk.wsgc.com
+  [[ $ENVIRO =~ prdrk ]] && HOST=webauth-rk.wsgc.com
+  [[ $ENVIRO =~ prdab ]] && HOST=webauth-ab.wsgc.com
+fi
+
+[[ -n $HOST ]] && echo "$HOST"
+
+exit 0

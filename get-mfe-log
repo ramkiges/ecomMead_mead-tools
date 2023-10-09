@@ -1,0 +1,41 @@
+#!/bin/bash 
+export PATH=$JAVA_HOME/bin:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/apps/mead-tools:/home/jenkins/node_modules/.bin:/opt/homebrew/bin:~/bin
+
+export KUBE_USER="svcak8sci"
+[[ -e $HOME/.kube ]] && KUBE_CONFIG_PATH="$HOME/.kube"
+[[ -e /var/lib/jenkins/.kube ]] && KUBE_CONFIG_PATH="/var/lib/jenkins/.kube"
+export KUBE_CLUSTER="ts-sharedplatform-rck-nonprod"
+export KUBE_CONTEXT="${KUBE_CLUSTER}_${KUBE_USER}@wsgc.com"
+export KUBE_CONFIG="${KUBE_CONFIG_PATH}/${KUBE_USER}/${KUBE_CLUSTER}"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"  >&2
+  exit 255
+}
+
+[[ $LOGNAME = jenkins ]] || BailOut "Need to run as Jenkins"
+
+[[ -n $KUBE_CONFIG_PATH ]] || BailOut "KUBE_CONFIG_PATH is blank"
+[[ -e $KUBE_CONFIG_PATH ]] || BailOut "$KUBE_CONFIG_PATH missing"
+[[ -e $KUBE_CONFIG ]] || BailOut "$KUBE_CONFIG missing"
+[[ -n $KUBE_CONTEXT ]] || BailOut "KUBE_CONTEXT is blank"
+which kubectl >/dev/null 2>&1 || BailOut "Can't find kubectl"
+which kubelogin >/dev/null 2>&1 || BailOut "Can't find kubelogin"
+
+NS=$1
+shift
+PODS=$*
+
+[[ -z $NS ]] && BailOut "Need namespace"
+
+if [[ -z $PODS ]]
+then
+  PODS=$(kubectl --kubeconfig=$KUBE_CONFIG get pods -n $NS | egrep -vi "^NAME" | awk '{ print $1 }')
+fi
+
+for pod in $PODS
+do
+  kubectl --kubeconfig=$KUBE_CONFIG logs --since=1h $pod -n $NS | sed -es'/\\n/\/g' -es'/\\t//g' | egrep -iv "^$"
+done
+
+exit 0

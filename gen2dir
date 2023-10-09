@@ -1,0 +1,35 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/opt/homebrew/bin:~/bin
+# translates cat generation number to the actual directory name
+GEN=$(echo "$1" | awk -F \. '{ print $1 }')
+
+[[ -z $GEN ]] && exit 1
+[[ ${#GEN} != 9 ]] && exit 1
+
+G="${GEN:0:1}"
+
+if [[ $G = "2" ]]
+then
+  #S="${GEN:(-4)}"
+  #B="${GEN:0:${#GEN}-4}"
+  #B="${B:1}"
+  BUILD=$GEN
+fi
+
+if [[ $G = "8" ]]
+then
+  S="${GEN:(-4)}"
+  B="${GEN:0:${#GEN}-4}"
+  B="${B:1}"
+  BUILD="20${B}-${S}"
+fi
+
+if [[ $G = "4" || $G = "3" ]]
+then
+  S="${GEN:(-2)}"
+  B="${GEN:0:${#GEN}-2}"
+  B="${B:1}"
+  BUILD="wcm-build-20${B}-${G}${S}"
+fi
+
+echo "$BUILD"

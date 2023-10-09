@@ -1,0 +1,156 @@
+#!/bin/bash
+# TODO: Investigate using http://ecmagent-uat1-rk1v.wsgc.com/summary.html 
+# returns the ECM environment
+PATH=/opt/homebrew/bin:/usr/local/bin:/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:$HOME/bin:$PATH
+
+for gnu in grep gsed
+do
+  [[ -e /usr/local/opt/$gnu/libexec/gnubin ]] && export PATH=/usr/local/opt/$gnu/libexec/gnubin:$PATH
+done
+
+umask 000
+MODE=$(basename $0)
+
+[[ $(uname) = "Darwin" ]] && TMP=$HOME/.ecm-env.d || TMP=/home/$LOGNAME/.ecm-env.d
+find $TMP -maxdepth 1 -mindepth 1 -mtime +10 -exec rm -rf {} \; 2>/dev/null
+
+# list of ECM repos - take note of the differnet org for prod
+export ECM_REPO_LIST="\
+SupplyChain-Ontario/ecmagent-service-qa1-config \
+SupplyChain-Ontario/ecmagent-service-qa3-config \
+SupplyChain-Ontario/ecmagent-service-ca-qa1-config \
+SupplyChain-Ontario/ecmagent-service-ca-qa2-config \
+SupplyChain-Ontario/ecmagent-service-ca-qa3-config \
+SupplyChain-Ontario/ecmagent-service-uat1-config \
+SupplyChain-Ontario/ecmagent-service-ca-uat1-config \
+SupplyChain-Ontario/ecmagent-service-rgs1-config \
+SupplyChain-Ontario/ecmagent-service-ca-rgs1-config \
+eCommerce-DevOps/ecmagent-service-prdrk-config \
+eCommerce-DevOps/ecmagent-service-ca-prdrk-config \
+"
+#SupplyChain-Ontario/ecmagent-service-perf1-config \
+#SupplyChain-Ontario/ecmagent-service-ca-perf1-config \
+#SupplyChain-Ontario/ecmagent-service-qa2-config \
+#SupplyChain-Ontario/ecmagent-service-staging-config \
+#SupplyChain-Ontario/ecmagent-service-ca-staging-config \
+
+BailOut() {
+  [[ -n $1 ]] && echo "
+$(basename $0): $*
+" >&2
+  echo "Usage: $(basename $0) <brand> <env> [clean]" >&2
+  exit 255
+}
+
+for util in jq xmlstarlet getschema getdb get-market
+do
+  which $util > /dev/null 2>&1 || BailOut "need to install $util"
+done
+
+# we can just pass in 'clean' as the first argument to wipe out the workspace
+[[ $1 =~ clea ]] && { rm -rf $TMP; mkdir -p $TMP; exit 0; }
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $2)
+ACTION=$(tr '[:upper:]' '[:lower:]' <<< $3) 
+[[ -z $ENVIRO ]] && BailOut
+[[ $ENVIRO =~ jukebox ]] && exit 0
+
+[[ $ACTION =~ clea ]] && rm -rf $TMP
+
+mkdir -p $TMP || BailOut "Unable to create $TMP"
+cd $TMP || BailOut "Unable to cd to $TMP"
+
+rm -rf $HOME/get-ecm-env.d
+rm -rf $TMP/SupplyChain-Ontario
+rm -rf $TMP/eCommerce-DevOps
+
+for repo in $ECM_REPO_LIST
+do
+  svc_dir=$TMP/$(basename $repo)
+  [[ -e $svc_dir/.git ]] || git clone --depth 1 -q git@github.wsgc.com:${repo}.git $svc_dir >/dev/null 2>&1
+  cd $svc_dir
+  git stash -q >/dev/null 2>&1
+  git pull -q --rebase  >/dev/null 2>&1 &
+  git stash pop -q >/dev/null 2>&1
+  #|| echo "Unable to pull svc $svc_dir" >&2
+
+  bgb=$(sed -es/service/bgb/g <<< $repo)
+  bgb_dir=$TMP/$(basename $bgb)
+  [[ -e $bgb_dir/.git ]] || git clone --depth 1 -q git@github.wsgc.com:${bgb}.git $bgb_dir >/dev/null 2>&1
+  cd $bgb_dir
+  git stash -q >/dev/null 2>&1
+  git pull -q --rebase >/dev/null 2>&1 &
+  git stash pop -q >/dev/null 2>&1
+  #|| echo "Unable to pull bgb $bgb_dir" >&2
+done
+
+wait
+
+SITEID=$(get-siteid $BRAND $ENVIRO)
+[[ -z $SITEID ]] && BailOut "No siteId for $BRAND $ENVIRO"
+
+INSTALLATION=$(get-installation $BRAND $ENVIRO)
+[[ -z $INSTALLATION ]] && INSTALLATION=$BRAND
+
+cd $TMP
+JSON_LIST=$(find *service*config -name ecm-pubagent-config.json)
+[[ -z $JSON_LIST ]] && BailOut "Unable to find the relevant ECM json configs"
+
+#ECM_ENV_LIST=$(egrep -il "\"$ENVIRO\".*site.*:.*$SITEID|\"$INSTALLATION\".*site.*:.*$SITEID" $JSON_LIST)
+ECM_ENV_LIST=$(grep -lPzo "(?s)\"$ENVIRO\".*site.*$SITEID" $JSON_LIST)
+[[ -z $ECM_ENV_LIST ]] && ECM_ENV_LIST=$(grep -lPzo "(?s)\"$INSTALLATION\".*site.*$SITEID" $JSON_LIST)
+if [[ -n $ECM_ENV_LIST ]]
+then
+  for cfg in $ECM_ENV_LIST
+  do
+    pom="$(echo "$cfg" | awk -F/ '{ print $1 }')/pom.xml"
+    [[ -e $pom ]] || BailOut "Can't find pom for $cfg"
+
+    SOURCE_HOST=$(grep -ihr "<ecmagent.serverId>" $pom | awk -F '[<>]' '{ print $3 }' | awk -F\. '{ print $1 }')
+    [[ -z $SOURCE_HOST ]] && BailOut "Can't figure out SOURCE_HOST"
+    [[ $SOURCE_HOST = "ecmagent-prd-rk1v" ]] && SOURCE_HOST="ecmagentprdrk1v"
+
+    if [[ $MODE =~ server || $ACTION =~ server ]]
+    then
+        [[ -n $SOURCE_HOST ]] && { echo "$SOURCE_HOST"; continue; }
+    fi
+
+    if [[ $MODE =~ path || $ACTION =~ path ]]
+    then
+        # find the BGB config file
+        BGB_SOURCE=$(echo "$cfg" | awk -F/ '{ print $1 }' | sed -es/service/bgb/g)
+        XML=$(find $BGB_SOURCE -name environmentConfig.xml)
+        [[ -e $XML ]] || BailOut "Can't find BGB config for $cfg [$BGB_SOURCE]"
+
+        DEST_ECIMAGES=$(xmlstarlet el -v $XML | grep -i "contents=.*ecmimages" | grep "/$BRAND/" | awk -F 'hostRoot=' '{ print $2 }' | awk -F\' '{ print $2 }' | egrep -vi "/rk/|/ab/|/dv/")
+        [[ -z $DEST_ECIMAGES ]] && continue
+        DOC=$(sed -es%/images/ecom-images/%%g <<< $DEST_ECIMAGES)
+        [[ -n $DOC ]] && echo "$DOC"
+        continue
+    fi
+
+    if [[ $MODE =~ schema || $ACTION =~ schem ]]
+    then
+      # find the JSON file 
+      JSON=$(find $cfg -name ecm-pubagent-config.json)
+
+      # this needs work - I need to figure out the JQ expression to parse a specific env out of the array, insteady of cheating and using grep
+      exp='.contentDeploymentConfiguration.allContentStagingAndActivationConfigs[] | .activationConfigs[] | { installation, site, dataSource, databaseSchema } | join(",")' 
+      SCHEMA=$(jq -r "$exp" $JSON | grep -i "$INSTALLATION,$SITEID" | awk -F, '{ print $4 ":" $3 }' | tr '[:upper:]' '[:lower:]')
+      [[ -n $SCHEMA ]] && { echo "$SCHEMA"; continue; }
+
+      exp='.contentDeploymentConfiguration.approvedContentStagingAndActivationConfigs[] | .activationConfigs[] | { installation, site, dataSource, databaseSchema } | join(",")' 
+      SCHEMA=$(jq -r "$exp" $JSON | grep -i "$INSTALLATION,$SITEID" | awk -F, '{ print $4 ":" $3 }' | tr '[:upper:]' '[:lower:]')
+      [[ -n $SCHEMA ]] && { echo "$SCHEMA"; continue; }
+
+      continue
+    fi
+
+    echo "$cfg" | awk -F/ '{ print $1 }' | sed -es/-config//g 
+  done
+#else
+#  echo "<none>" >&2
+fi
+
+exit 0

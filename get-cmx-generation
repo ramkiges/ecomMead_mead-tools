@@ -1,0 +1,74 @@
+#!/bin/bash
+# finds the most recent successful CMX build for a brand
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin
+REPO=/bgb/buildsystem-2.0-work/artifact_repository
+
+LOGVIEW="logview:System@111"
+LOGIN="ptqaenv:ta8PoLe"
+TIMEOUT="--connect-timeout 20 --max-time 120"
+USER_AGENT="--user-agent GetCMXGeneration"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0) [$(hostname)] $*" >&2
+  exit 1
+}
+
+BRAND=$1
+ENVIRO=$2
+[[ -z $BRAND ]] && BailOut "Need brand"
+#[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+MARKET=$(getmarket $BRAND $ENVIRO 2>/dev/null | tr '[:upper:]' '[:lower:]')
+[[ $MARKET = "us" ]] && MARKET=
+
+BGB_HOST=$(get-bgb-host $BRAND $ENVIRO | sed -es%https://%%g | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+[[ -z $BGB_HOST ]] && BailOut "Can't figure out BGB host for $BRAND $ENVIRO"
+
+HOST=$(hostname | awk -F\. '{ print $1 }')
+SITE=$(brand2site $BRAND $ENVIRO)
+
+if [[ $LOGNAME = jenkins ]] 
+then
+  SSH_USER=builder
+  SSH_KEY=$HOME/.ssh/id_rsa_svcagitci
+else
+  [[ $LOGNAME =~ ^a_ ]] && SSH_USER="${LOGNAME}" || SSH_USER="a_${LOGNAME}"
+  SSH_KEY=$HOME/.ssh/id_rsa
+fi
+
+if [[ -n $ENVIRO ]]
+then
+  dp=$(get-host $BRAND $ENVIRO 2>/dev/null)
+
+  BD_CD=https://repos.wsgc.com/svn/deployments/content/trunk/build_data/content-deploy/$ENVIRO/$BRAND$MARKET.properties
+  gen=$(svn cat $BD_CD | grep bs2_genname | awk -F= '{ print $2 }')
+  [[ -n $gen ]] && { echo "CMX src=build_data" >&2; echo "$gen"; exit 0; }
+
+  # try to get the gen from the logs 
+  log=https://$dp:38666/wsgc-tomcat-frontend/application.log
+  gen=$(curl -fsqk $TIMEOUT $USER_AGENT --user $LOGVIEW $log | grep "Unable to get template zip file for site.* generation" | tail -1 | awk '{ print $NF }')
+  [[ -n $gen ]] && { echo "CMX src=log" >&2; echo "$gen"; exit 0; }
+
+  # try to get the gen from the summary page
+  summary=https://$dp/admin/summary.html
+  gen=$(curl -fsqk -H 'Cache-Control: no-cache' $TIMEOUT $USER_AGENT --user $LOGIN $summary 2>/dev/null |grep -iw "TMPL" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{print $1 }' | head -1)
+  [[ -n $gen ]] && { echo "CMX src=summary" >&2; echo "$gen"; exit 0; }
+
+  # try to get the gen from the index page
+  index=https://$dp
+  gen=$(curl -fsqk -H 'Cache-Control: no-cache' $TIMEOUT $USER_AGENT --user $LOGIN $index 2>/dev/null |egrep -iw "generationId" | head -1 | awk -F '[<>]' '{ print $7 }' | awk '{ print $NF }')
+  [[ -n $gen ]] && { echo "CMX src=index" >&2; echo "$gen"; exit 0; }
+fi
+
+if [[ -e $REPO ]] 
+then
+  cd $REPO/${BRAND}${MARKET}dp_UI
+  gen_dir=$(dirname $(grep -L "Build id:cmx-build.*FAILED" */BUILD.LOG | tail -1 ))
+  gen=$(grep 'generation_id' $gen_dir/BUILD_ORDER.JSON | head -1 | tr -cd '[:digit:]\n')
+  echo "CMX src=$HOST/${BRAND}${MARKET}dpUI" >&2;
+  echo "$gen"
+else
+  exec timeout -k 90s 60s ssh -o StrictHostKeyChecking=no -q -i $SSH_KEY $SSH_USER@$BGB_HOST "/apps/mead-tools/get-cmx-generation $BRAND $ENVIRO"    
+fi
+
+exit 0

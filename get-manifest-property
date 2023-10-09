@@ -1,0 +1,212 @@
+#!/bin/bash
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:~/bin
+
+#REPO=git@github.wsgc.com:eCommerce-DevOps/env-manifest.git
+#BRCH=release
+
+REPO=git@github.wsgc.com:eCommerce-Echo/env-manifest.git
+BRCH=2.0-TESTING
+
+TMP=$HOME/.set-manifest-$BRCH
+QUIET=false
+DEBUG=
+LABEL=
+MODE=$(basename $0 | awk -F- '{ print $1 }')
+shopt -s nocasematch
+
+BailOut() {
+  { set +x; } 2>/dev/null
+  [[ -n $1 && $QUIET = "false" ]] && echo "$(hostname --short)/$(basename $0): $*" >&2
+  exit 255
+}
+
+Notation() { unbuffer echo "*** $* "; }
+
+submitPR() {
+  # if there are no changes, just return
+  CX=$(git status -s --porcelain) 
+  [[ -z $CX ]] && return
+
+  # create branch name and commit message
+  [[ -n $TICKET ]] && MSG=$TICKET || MSG=$(basename $0)
+  #[[ -n $BUILD_NUMBER ]] && LABEL=$BUILD_NUMBER || LABEL=$(date +'%y%m%d%H%M%S')
+  MANIFEST_BRANCH="${MSG}-${ENVIRO}-$LABEL"
+
+  Notation "Create manifest branch $MANIFEST_BRANCH"
+#set -x
+  hub checkout -q -b "$MANIFEST_BRANCH" || BailOut "Unable to checkout $MANIFEST_BRANCH"
+  hub push -q -f --set-upstream mead "$MANIFEST_BRANCH" || BailOut "Unable to push to $MANIFEST_BRANCH"
+  hub diff --no-color -w | egrep "^-|^\+" 
+#{ set +x; } 2>/dev/null
+
+  Notation "Commit changes"
+#set -x
+  hub add $E_YML
+  hub commit -q -m "[$MSG] update $ENVIRO manifest $LABEL ($RUNBY)" $ENV_YML
+  hub push -q -f
+#{ set +x; } 2>/dev/null
+  #hub rebase -q devops/release || BailOut "Rebase failed"
+
+  Notation "Create Manifest PR"
+set -x
+  MANIFEST_PR=$(hub pull-request -b Commerce-DevOps:release -h "eCommerce-Mead:$MANIFEST_BRANCH" -m "[$TICKET] $MESSAGE $LABEL")
+{ set +x; } 2>/dev/null
+  [[ -z $MANIFEST_PR ]] && BailOut "Failed to create Manifest PR"
+  PR_NUM=$(echo "$MANIFEST_PR" | grep "https:" | awk -F/ '{ print $NF }')
+  PR_BUILD="https://ecombuild.wsgc.com/jenkins/job/eCommerce-DevOps/job/env-manifest/job/PR-$PR_NUM"
+  echo "/// PR:     $MANIFEST_PR"
+  echo "/// Build:  $PR_BUILD"
+}
+
+commitFile() {
+  hub diff $E_YML
+  #hub add $E_YML
+  #hub commit -q -m "[$TICKET] $MESSAGE"
+  #hub push -q
+}
+
+printDebug() {
+  [[ $DEBUG =~ true ]] && echo "@@@ $(basename $0): $*" >&2
+}
+
+Usage() {
+  echo "$(basename $0) -e <enviro> -b <brand> -s <service> -p <property> -v <value>
+  -e  - environment [required]
+  -b  - brand
+  -s  - service
+  -p  - property
+  -v  - value
+  -t  - Jira ticket
+
+If <service> is omitted, will print a list of available services for the environment
+if <value> is omitted, will print current value " >&2
+  exit 0
+}
+#If <property> is ommitted, will print a list of available properties for the services in the environment 
+
+for util in yq hub
+do
+  which yq >/dev/null 2>&1 || BailOut "Need to install $util"
+done
+
+[[ $# -eq 0 ]] && Usage
+
+export GITHUB_TOKEN=$(grep "ciuser_org_owner_token" $HOME/.credentials | awk '{ print $NF }')
+[[ -z $GITHUB_TOKEN ]] && BailOut "Can't get GHE Token (ciuser_org_owner_token)"
+
+git config --global push.default simple
+#git config --global --add hub.host github.wsgc.com
+#git config --global --add hub.name ciuser
+#git config --global --add hub.protocol ssh
+
+while getopts "dqhb:e:s:c:p:v:x:t:m:" opt 
+do
+    case ${opt} in
+      d ) DEBUG=true;;
+      q ) QUIET=true;;
+      b ) BRAND=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+      e ) ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+      s ) SERVICE=$OPTARG ;;
+      c ) CONFIG=$OPTARG ;;
+      p ) PROPERTY=$OPTARG ;;
+      v ) VALUE=$OPTARG ;;
+      m ) COM_MSG=$OPTARG ;;
+      t ) TICKET=$(tr '[:lower:]' '[:upper:]' <<< $OPTARG | sed -es/','/' '/g) ;;
+      h ) Usage; exit 0;;
+    esac
+done
+
+[[ -z $RUNBY ]] && RUNBY=$(sed -es/a_//gi <<< $LOGNAME)
+
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+[[ -z $TICKET && $(basename 0) =~ set ]] && BailOut "Need Jira ticket"
+#[[ -z $TICKET ]] && TICKET="DEVOPS"
+
+# snowflake environment xlations
+[[ $ENVIRO = "regression" ]] && ENVIRO=rgs1
+
+MESSAGE="$(basename $0): update $ENVIRO $SERVICE $PROPERTY $COM_MSG ($RUNBY)"
+
+# sync the manifest repo before we start
+#sync-fork $REPO || BailOut "Unable to sync $REPO"
+
+# clone manifest repo
+rm -rf $TMP
+hub clone -q $REPO -b $BRCH $TMP >/dev/null 2>&1 || BailOut "Unable to clone $REPO to $TMP"
+cd $TMP/manifest || BailOut "Unable to cd to $TMP/manifest"
+
+#hub remote remove origin
+#hub remote add devops git@github.wsgc.com:eCommerce-DevOps/env-manifest.git
+#hub remote add mead git@github.wsgc.com:eCommerce-Mead/env-manifest.git
+#hub fetch -q --all --prune >/dev/null 2>&1
+#hub branch -q --all >/dev/null 2>&1
+#hub checkout -q --track mead/release >/dev/null 2>&1
+#hub checkout -q mead/release || BailOut "hub checkout -q release"
+
+cd $TMP/manifest || BailOut "Unable to cd to $TMP/manifest"
+[[ -e env-manifest/$ENVIRO ]] || BailOut "No manifest directory for $ENVIRO"
+# we assume these properties are not shared
+E_YML=env-manifest/$ENVIRO/services-manifest.yaml
+[[ -e $E_YML ]] || BailOut "Unable to find $E_YML"
+
+S_ENV=$(yq eval ".services.$SERVICE.configuration.services-collection-manifest" $E_YML 2>/dev/null | egrep -iv 'null')
+[[ -z $S_ENV ]] && S_ENV=$ENVIRO
+S_YML=services-collection-manifest/$S_ENV/services-manifest.yaml
+
+[[ $# -lt 2 ]] && Usage
+
+if [[ -z $SERVICE ]]
+then 
+  BailOut "Need service 
+Available services:
+$(yq eval '.services.[].name' $E_YML) "
+fi
+
+[[ $(basename $0) =~ get ]] && VALUE=
+
+if [[ -n $PROPERTY && -z $VALUE ]]
+then
+  VALUE=$(yq eval ".services.$SERVICE.$PROPERTY" $E_YML | egrep -iv "null")
+  [[ -z $VALUE ]] && VALUE=$(yq eval ".services.$SERVICE.$PROPERTY" $S_YML | egrep -iv "null")
+  [[ -n $VALUE ]] && echo "$VALUE"
+  exit 0
+fi
+
+if [[ -n $PROPERTY && -n $VALUE ]]
+then
+  # setup an expression based on the type of config section
+  if [[ -n $CONFIG ]]
+  then
+    exp_r="(.services.$SERVICE | select(has(\"name\")) | select(.name == \"$SERVICE\")).configuration.\"$CONFIG\".$PROPERTY" 
+    exp_w="(.services.$SERVICE | select(has(\"name\")) | select(.name == \"$SERVICE\")).configuration.\"$CONFIG\".\"$PROPERTY\"=\"$VALUE\""
+  else
+    exp_r="(.services.$SERVICE | select(has(\"name\")) | select(.name == \"$SERVICE\")).configuration.\"$PROPERTY\"" 
+    exp_w="(.services.$SERVICE | select(has(\"name\")) | select(.name == \"$SERVICE\")).configuration.\"$PROPERTY\"=\"$VALUE\""
+  fi
+
+  #set -x
+  v=$(yq eval "$exp_r" $E_YML)
+  #{ set +x; } 2>/dev/null
+  [[ -z $v ]] && BailOut "No property found for $SERVICE.$PROPERTY"
+
+  # actually execute the edit
+  #set -x
+  yq eval "$exp_w" -i $E_YML
+  #{ set +x; } 2>/dev/null
+
+  LABEL="$SERVICE-$PROPERTY"
+
+  [[ $REPO =~ mead ]] && submitPR || commitFile
+
+  # cleanup
+  rm -rf $TMP
+
+  exit 0
+fi
+
+# cleanup
+rm -rf $TMP
+
+# if we get this far, nothing good happened
+exit 128

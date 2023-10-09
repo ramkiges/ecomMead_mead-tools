@@ -1,0 +1,129 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin:$PATH
+QUIET=
+SHOW_ALL=false
+DP_LOGIN="pkqaenv:Ca8tWh33l"
+MODE=$(basename $0)
+
+# curl options
+TIMEOUT="--connect-timeout 10  --max-time 20"
+USER_AGENT="--user-agent GetHost"
+
+BailOut() {
+  [[ $QUIET =~ true ]] && exit 255
+
+  [[ -n $1 ]] && echo "$(hostname)/$(basename $0): $*" >&2
+  Usage 255
+}
+
+Usage() {
+  ret=$1
+  echo "Usage: $(basename $0) [-a] <brand> <enviro> 
+  -a shows all hosts matching tag; default is to return a single valid host" >&2
+  exit $ret
+}
+
+# rundeck props for looking up hostnames
+RUNDECK_REPO=https://snapshotrepo.wsgc.com/artifactory/snapshotrepo-rpm/com/wsgc/devops/toolchain/resource-model/1.1-SNAPSHOT
+RUNDECK_HOSTS=$HOME/.resource-model.xml
+
+# if the file is over a certain age, remove it and grab a new one
+find $(dirname $RUNDECK_HOSTS) -maxdepth 1 -name $(basename $RUNDECK_HOSTS) -mmin +120 -delete 2>/dev/null
+if [[ ! -e $RUNDECK_HOSTS ]]
+then
+  for try in {1..5}
+  do
+    RUNDECK_XML=$(curl -fsqk $USER_AGENT $TIMEOUT $RUNDECK_REPO/ | grep "resource-model-.*xml" | awk -F '[<>]' '{ print $3 }' | sort | tail -1)
+    [[ -n $RUNDECK_XML ]] && break
+    sleep 5
+  done
+  [[ -z $RUNDECK_XML ]] && BailOut "Unable to determine resource-model file from $RUNDECK_REPO"
+
+  for try in {1..5}
+  do
+    curl -fsqk $USER_AGENT $TIMEOUT $RUNDECK_REPO/$RUNDECK_XML -o $RUNDECK_HOSTS
+    [[ -e $RUNDECK_HOSTS ]] && break
+    sleep 5
+  done
+  [[ -e $RUNDECK_HOSTS ]] || BailOut "Unable to download resource-model file $RUNDECK_REPO/$RUNDECK_XML"
+fi
+
+[[ $# -eq 0 ]] && Usage 0
+
+if [[ $1 =~ - ]]
+then 
+  [[ $1 = "-a" ]] && { SHOW_ALL=true; shift; } 
+  [[ $1 = "-q" ]] && { QUIET=true; shift; } 
+fi
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $2)
+MARKET=$(tr '[:upper:]' '[:lower:]' <<< $3)
+[[ -z $ENVIRO ]] && BailOut
+
+# corp snowflake
+[[ $BRAND = "corp" && $ENV = "qa" ]] && { echo "corp-qa1-rk1v"; exit 0; }
+
+# catalog snowflake
+if [[ $MODE =~ catalog ]]
+then
+  HOST=$(grep -iw "$BRAND-catalog" $RUNDECK_HOSTS | grep -i ",$ENVIRO" | awk -F\" '{ print $2 }' | awk -F\. '{ print $1 }' | sort -r | head -1 | awk -F\. '{ print $1 }')
+  [[ -n $HOST ]] && { echo "$HOST.wsgc.com"; exit 0; }
+  exit 64
+fi
+
+ENVIRO_TAG=$ENVIRO
+
+[[ $ENVIRO_TAG = "rgs" ]] && ENVIRO_TAG=rgs1
+
+# we'll need one of these for each market
+[[ $ENVIRO_TAG =~ ^ca ]] && { MARKET="ca"; ENVIRO_TAG=$(sed -es/^ca//g <<< $ENVIRO_TAG); }
+[[ $ENVIRO_TAG =~ ^us ]] && { MARKET=; ENVIRO=$(sed -es/^us//g <<< $ENVIRO_TAG); }
+
+[[ -z $MARKET ]] && MARKET=$(getmarket $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+[[ -n $MARKET ]] && MARKET="/$MARKET"
+[[ $MARKET =~ ca ]] && MARKET=ca
+[[ $MARKET =~ us ]] && MARKET=
+
+[[ $ENVIRO_TAG =~ uat ]] && tag="${MARKET}$ENVIRO_TAG"
+[[ $ENVIRO_TAG =~ int ]] && tag="${MARKET}$ENVIRO_TAG"
+[[ $ENVIRO_TAG =~ rgs ]] && tag="${MARKET}$ENVIRO_TAG"
+[[ $ENVIRO_TAG =~ qa ]] && tag="${MARKET}$ENVIRO_TAG"
+[[ $ENVIRO_TAG =~ bpv ]] && tag="${MARKET}$ENVIRO_TAG"
+[[ $ENVIRO_TAG =~ p.*rf ]] && tag="${MARKET}perf"
+[[ $ENVIRO_TAG =~ ^pr.*d ]] && tag="${MARKET}prd"
+[[ $ENVIRO_TAG =~ ^pre.*d || $ENVIRO =~ aktest ]] && tag="${MARKET}preprd"
+[[ -z $tag ]] && BailOut "No tag found for $BRAND $ENVIRO"
+
+# try to generate a list of hosts that match the tag pattern
+HOST_LIST=$(grep -i "frontend" $RUNDECK_HOSTS | grep -iw "$tag" | grep -i ",$BRAND" | awk -F\" '{ print $2, $8 }' | sed -es/\.wsgc\.com//g | sort -r)
+[[ -z $HOST_LIST ]] && HOST_LIST=$(grep -i "frontend" $RUNDECK_HOSTS | grep -iw "$ENVIRO" | grep -i ",$BRAND" | awk -F\" '{ print $2 }' | awk -F\. '{ print $1 }' | sort -r)
+
+# if show_all is set, print the list and exit
+[[ $SHOW_ALL =~ true ]] && { echo "$HOST_LIST"; exit 0; }
+
+# if there's more than one host then loop through them to get the first that responds
+if [[ $(echo $HOST_LIST | wc -w) -gt 1 ]]
+then
+  for host in $HOST_LIST
+  do
+    summary="https://${host}.wsgc.com/admin/summary.html"
+    curl $TIMEOUT -fqsk --user $DP_LOGIN $summary >/dev/null 2>&1 && break 
+    host=
+  done
+else
+  host=$HOST_LIST
+fi
+[[ -n $host ]] && { echo "$host"; exit 0; }
+
+# fallback to a basic DNS-resolvable host if no hosts have a working summary
+for host in $HOST_LIST
+do
+  host $host >/dev/null 2>&1 && break
+  host=
+done
+[[ -n $host ]] && { echo "$host"; exit 0; }
+
+BailOut "No host found for $BRAND $ENVIRO"
+
+exit $?

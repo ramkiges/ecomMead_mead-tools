@@ -1,0 +1,8 @@
+#!/bin/bash
+
+SHORTCUTS=https://repos.wsgc.com/svn/shortcuts/evolution/branches
+BRANCHES=/var/lib/jenkins/release-tools-configs
+
+svn ls ^/tags $SHORTCUTS 2>/dev/null | grep -i -- "shortcut" | grep ".*-.*-.*-" | sed -es%/$%%g | tr "\n" ","
+#svn ls ^/tags $SHORTCUTS | grep "^ws-"
+

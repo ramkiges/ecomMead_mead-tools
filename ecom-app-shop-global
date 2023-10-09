@@ -1,0 +1,71 @@
+#!/bin/bash 
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps/mead-tools:/apps:~/bin:~/bin/localdeployer
+TMP=/tmp/$(basename $0)-$LOGNAME
+
+ECOM_APP_SHOP=git@github.wsgc.com:eCommerce-Bedrock/ecom-app-shop.git#branch/release
+ECOM_APP_GLOBAL_HELM=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-global-helm-config.git
+ECOM_APP_SHOP_HELM=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-shop-helm-config.git
+ECOM_APP_SCHEDULE_APPS=git@github.wsgc.com:eCommerce-@ORG@/ecom-app-schedule-apps.git#branch/@BRANCH@
+
+bailOut() { [ -n "$1" ] && echo "$*"; Usage; exit 1; }
+
+Notation() { echo;echo "### $* "; }
+
+Usage() {
+  echo "Usge: $(basename $0) -e <env> -v <version> -o <sched_org> -b <sched_branch>"
+}
+
+while getopts "o:t:h:e:b:v:" opt 
+do
+    case ${opt} in
+      e ) ENV=$(echo $OPTARG | tr "A-Z" "a-z");;
+      v ) VERSION=$OPTARG;;
+      o ) ORG=$OPTARG;;
+      b ) BRANCH=$OPTARG;;
+      t ) TICKET=$(echo $OPTARG | tr "A-Z" "a-z" | sed -es/','/' '/g);;
+      h ) Usage; exit 0;;
+      * ) Usage; bailOut "Unknown option ${opt}";;
+    esac
+done
+
+[[ -z $1 ]] && { Usage; exit 0; }
+[[ -z $ENV ]] && { Usage; bailOut "Need env"; }
+[[ -z $BRAND_LIST ]] && BRAND_LIST="mg pb pk pt we ws"
+
+# munge the sche-apps URL
+[[ -z $ORG ]] && ORG=Bedrock
+[[ -z $BRANCH ]] && BRANCH=release
+ECOM_APP_SCHEDULE_APPS=$(echo "$ECOM_APP_SCHEDULE_APPS" | sed -es/@ORG@/$ORG/gi -es/@BRANCH@/$BRANCH/gi)
+
+#rm -rf $TMP
+mkdir -p $TMP
+cd $TMP
+
+for url in $ECOM_APP_GLOBAL_HELM $ECOM_APP_SHOP_HELM $ECOM_APP_SHOP $ECOM_APP_SCHEDULE_APPS
+do
+  Notation "Checkout $url"
+  cd $TMP || bailOut "Unable to cd to $TMP"
+  repo=$(echo "$url" | awk -F\# '{ print $1 }')
+  repo_dir=$(basename $repo | sed -es/\.git//g)
+  branch=$(echo "$url" | awk -F\# '{ print $2 }'| sed -es!branch/!!g )
+  [[ -z $branch ]] && branch=release
+  [[ -d $repo_dir ]] || git clone -q $repo
+  cd $repo_dir || bailOut "Unable to cd to $repo_dir"
+  git checkout $branch
+  git pull >/dev/null 2>&1
+done
+
+cd $TMP/ecom-app-shop || bailOut "Couldn't cd to $TMP/ecom-app-shop"
+
+set -x
+if [[ -z $VERSION ]]
+then
+  SHA=$(git rev-parse --verify HEAD)
+else
+  SHA=$(git show-ref -s $VERSION)
+fi
+
+[[ -z "$SHA" ]] && bailOut "Unable to get SHA"
+
+exit 0
+

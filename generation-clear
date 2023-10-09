@@ -1,0 +1,115 @@
+#!/bin/bash
+#
+PATH=/apps/mead-tools:/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps/jdk8/bin:/apps/java/bin:/apps/jdk7/bin:/apps/scm-tools
+[[ -e /opt/oracle/product/11.2.0/client_1/bin ]] && export ORACLE_HOME=/opt/oracle/product/11.2.0/client_1
+[[ -e /usr/lib/oracle/12.2/client64/bin ]] && export ORACLE_HOME=/usr/lib/oracle/12.2/client64
+[[ -e /usr/lib/oracle/19.6/client64/bin ]] && export ORACLE_HOME=/usr/lib/oracle/19.6/client64
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib
+PATH=$PATH:$ORACLE_HOME/bin
+export PATH
+umask 000
+
+# default status 
+STATUS=1
+
+SUBSYS_LIST="CAT DOMAIN_KEY ECMCS ECMHOMEPAGE ECMHOMEPAGES ECMMSG ECMPAGES ECMPROMOS ENDECA FEED_ID HOMEPAGE IDEAS MISC MSG ODIS ODISSERVICE ODIS_SERVICE PROMOS RECIPE REGLANDING ROOMS TMPL VALIDATION"
+
+BailOut() {
+  [[ -n $1 ]] && echo "
+$(basename $0): $*
+" >&2
+  echo "Usage: $(basename $0) <env>"
+  exit 1
+}
+
+runSQL() {
+  RESULT=$(echo "$SQL" | \
+$SQLPLUS -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" | \
+egrep -v "$ORA_EXCLUDE" | \
+tr '\n' ' ')
+  [[ -n $RESULT ]] && echo "$RESULT"
+}
+
+getSubSystemList() {
+  SQL="set heading off;
+set pagesize 0;
+SELECT DISTINCT SUBSYSTEM FROM ${dbOwner}.WW_GENERATION_SCHEDULE;"
+  SUBSYS_LIST=$(runSQL)
+}
+
+SQLPLUS=$(which sqlplus)
+[[ -z $SQLPLUS ]] && BailOut "Can't find sqlplus"
+
+SET_SITE=
+ORA_EXCLUDE="selected|ERROR:|created|committed|TNS:connection|CONN\[ECT\]|ORA-.*:|SP2-.*:|^$"
+
+# allow for an arbitrary tag
+if [[ $1 =~ TAG= ]]
+then 
+  TAG="$(echo $1 | awk -F= '{ print $2 }')-"
+  shift
+fi
+
+# this works a little different than my other utilities
+ENVIRO=$1
+shift
+BRAND_LIST=$(tr '[:upper:]' '[:lower:]' <<< $*)
+[[ -z $BRAND_LIST ]] && BRAND_LIST=$(getbrandlist)
+[[ -z $ENVIRO ]] && BailOut
+BRAND_LIST=$(sed -es/','/' '/g <<< $BRAND_LIST)
+
+GENERATION_STORE=$HOME/.generation-datastore
+mkdir -p $GENERATION_STORE || bailOut "Unable to create commit store $GENERATION_STORE"
+
+[[ -z $SUBSYS_LIST ]] && getSubSystemList
+
+echo "*** $(basename $0) $ENVIRO $BRAND_LIST ***"
+for BRAND in $BRAND_LIST
+do
+  SITE=$(getsiteid $BRAND $ENVIRO)
+  SCHEMA=$(getschema $BRAND $ENVIRO 2>/dev/null)
+  dbHost=$(getdb $SCHEMA | awk -F\| '{ print $1 }')
+  dbOwner=$(getdb $SCHEMA | awk -F\| '{ print $2 }')
+  dbUser=$(getdb $SCHEMA | awk -F\| '{ print $3 }')
+  dbPass=$(getdb $SCHEMA | awk -F\| '{ print $4 }')
+  dbSID=$(getdb $SCHEMA | awk -F\| '{ print $5 }')
+  dbPort=3800
+
+  for SUBSYS in $SUBSYS_LIST
+  do
+    [[ $SUBSYS =~ ^[A-Z] ]] || continue
+
+    # if the mode is to clear, remove the file and move on
+    [[ $MODE = "generation-clear" ]] && { rm -f $DATA; STATUS=0; continue; } 
+
+	  SQL="set heading off; 
+set pagesize 0;
+select * from 
+(SELECT GENERATION FROM ${dbOwner}.WW_GENERATION_SCHEDULE WHERE (SITE = '$SITE' and installation = '$ENVIRO' and subsystem = '$SUBSYS') order by START_TIME desc)
+where rownum = 1;"
+
+    NEW_GEN=$(runSQL | sed -r 's/\s+//g')
+    [[ -z $NEW_GEN ]] && continue
+
+    # datafile in which to store the generation
+    DATA="$GENERATION_STORE/${TAG}${ENVIRO}:${BRAND}:$SUBSYS"
+
+    # compare old and now commits
+    OLD_GEN=$(cat $DATA 2>/dev/null)
+    [[ -z $NEW_GEN ]] && bailOut "Unable to get most recent generation for $SUBSYS"
+
+#echo "$DATA [$OLD_GEN/$NEW_GEN]"
+
+    # if generation is the same, move on to the next one
+    [[ $OLD_GEN = $NEW_GEN ]] && continue
+
+    # save the new generation
+    echo $NEW_GEN > $DATA
+
+    # set status flag to 0 - this means at least one of the generations was recently updated
+    STATUS=0
+  done
+done
+
+# if we've not exited 0 by now, there are no new generations
+exit $STATUS

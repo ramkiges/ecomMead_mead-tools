@@ -1,0 +1,120 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin
+export PATH
+ICON_INFO=" (i) "
+ICON_WARN=" (!) "
+DP_LOGIN="pkqaenv:Ca8tWh33l"
+TIMEOUT="--connect-timeout 10  --max-time 20"
+LABEL=Fix-Content
+[[ -z $DEPLOY ]] && DEPLOY=false
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "Usage: $(basename $0) <brand> <env> [ticket]"
+  exit 1
+}
+
+RUNBY=$(sed -es/a_//g <<< $LOGNAME)
+BRAND=$1
+ENVIRO=$2
+TICKET=$3
+CLOSE=$4
+[[ -z $ENVIRO ]] && exit 1
+MARKET=$(getmarket $BRAND $ENVIRO)
+[[ $MARKET = CAN ]] && MARKET=ca
+[[ $MARKET = US ]] && MARKET=
+
+[[ $ENVIRO =~ bpv ]] && SRC=${MARKET}uat3
+[[ $ENVIRO =~ uat ]] && SRC=${MARKET}uat3
+[[ $ENVIRO = qa32 ]] && SRC=${MARKET}uat3
+[[ $ENVIRO = uat3 ]] && SRC=${MARKET}uat
+
+# TODO: need to come back and finish this
+if [[ -z $SRC ]]
+then 
+  SCHEMA=$(get-schema $BRAND $ENVIRO)
+  [[ $SCHEMA =~ veqa1 ]] && SRC=${MARKET}rgs1
+  [[ $SCHEMA =~ veqa2 ]] && SRC=${MARKET}qa10
+  [[ $SCHEMA =~ veqa3 ]] && SRC=${MARKET}qa31
+  [[ $SCHEMA =~ vtrn1 && -z $MARKET ]] && SRC=qa37
+  [[ $SCHEMA =~ vtrn1 && $MARKET = "CAN"  ]] && SRC=qa38
+fi
+
+if [[ -z $SRC ]]
+then 
+  ECM=$(get-ecm-env $BRAND $ENVIRO | sed -es/ecmagent-service-//g)
+fi
+[[ -z $SRC ]] && SRC=${MARKET}rgs1
+
+DB=$(getschema $BRAND $ENVIRO | awk -F: '{ print $2 }')
+[[ $DB =~ veqa ]] && SRC=${MARKET}uat3
+
+# maybe some day I'll get clever and grab the existing gen to determine if it's prod or non-prod
+host=$(gethost $BRAND $ENVIRO | awk -F\. '{ print $1 }')
+summary=https://$host/admin/summary.html
+gen=$(curl $TIMEOUT -fqsk --user $DP_LOGIN $summary | grep "id='CAT'" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{ print $1 }' | egrep -iv "NO_SELECTION")
+g="${gen:0:1}"
+
+[[ $g = 3 ]] && REALM=prod || REALM=qa
+[[ $ENVIRO =~ int ]] && REALM=prod
+[[ $ENVIRO = qa32 ]] && REALM=prod
+
+if [[ -n $TICKET ]]
+then
+  #jira-label "$TICKET" "$LABEL"
+  ECM_ENV=$(get-ecm-env $BRAND $ENVIRO)
+  [[ -z $ECM_ENV ]] && jira-comment "$TICKET" "${ICON_WARN}$BRAND $ENVIRO is not configured in any ECM publishing environment"
+  #[[ -n $ECM_ENV ]] && jira-comment "$TICKET" "${ICON_INFO}$BRAND $ENVIRO is configured in the $ECM_ENV publishing environment"
+fi
+
+dc=$(jenkins-jnlp list-jobs | grep -i "deploy-$ENVIRO-$BRAND-CONTENT" | wc -l)
+[[ $dc -gt 1 ]] && echo "More than one content job for $BRAND $ENVIRO"
+[[ $dc -gt 1 && -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN} More than one content job for $BRAND $ENVIRO"
+CONTENT=$(jenkins-jnlp list-jobs | grep -i "deploy-$ENVIRO-$BRAND-CONTENT" | tail -1)
+[[ -z $CONTENT ]] && echo "Can't find content job for $BRAND $ENVIRO"
+
+# first grab a good CMX generation to set
+gen=$(get-cmx-generation $BRAND $ENVIRO)
+eval jenkins-jnlp build set-generation \
+    -p RunBy=$RUNBY \
+    -p Ticket=$TICKET \
+    -p Brand=$BRAND \
+    -p Destination_Environment=$ENVIRO \
+    -p Generation=$gen \
+    -p SubSystem=CMX
+
+eval jenkins-jnlp build set-generation \
+    -p RunBy=$RUNBY \
+    -p Ticket=$TICKET \
+    -p Brand=$BRAND \
+    -p Destination_Environment=$ENVIRO \
+    -p Generation=0.0 \
+    -p SubSystem=PROMOS
+
+bgb=$(get-bgb-host $BRAND $ENVIRO | awk -F\. '{ print $1 }' | sed -es/-rk1v//g -es/-sac1v//g -es/bgb-//g)
+jenkins-jnlp build stage-cmx-generation -p Brand=$BRAND -p Environment=$ENVIRO -p Generation=$gen -p BGB=$bgb -p Ticket=$TICKET >/dev/null 2>&1 &
+
+eval jenkins-jnlp build copy-generations \
+  -p Ticket=$TICKET \
+  -p Brand=$BRAND \
+  -p Source_Environment=$SRC \
+  -p Destination_Environment=$ENVIRO \
+  -p Update_Archive_Locator=true \
+  -p Deploy_War=$DEPLOY \
+  -p Deploy_Content=$DEPLOY \
+  -p CMX=true \
+  -p CAT=true \
+  -p RunBy=$RUNBY \
+  -p AutoClose=true 
+
+jenkins-jnlp build wcm-update-generation -p SITE=$BRAND -p ENV=$ENVIRO -p SyncCatalog=true -p Ticket=$TICKET
+
+eval jenkins-jnlp build checkenv -p Brand=$BRAND -p Environment=$ENVIRO -p Options=Rebuild-Config -p Options=Check-Schema -p Ticket=$TICKET >/dev/null 2>&1 &
+eval jenkins-jnlp build $CONTENT -p FORCEBUILD=true -p TICKET=$TICKET >/dev/null 2>&1
+
+[[ -n $CLOSE && -n $TICKET ]] && jira-close -t $TICKET
+
+# update app-scan data
+#eval jenkins-jnlp build app-scan-nonprd -p Restart=false -p HostList=$host >/dev/null 2>&1 &
+
+exit 0

@@ -1,0 +1,45 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+export PATH
+
+DP_LOGIN="pkqaenv:Ca8tWh33l"
+TIMEOUT="--connect-timeout 30  --max-time 60"
+USER_AGENT="--user-agent $(basename $0)"
+TMP=/tmp/$(basename $0)
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  echo "Usage: $(basename $0) <brand> <enviro> <setting>"
+  exit 255
+}
+
+BRAND=$1
+ENVIRO=$2
+SETTING=$(tr '[:lower:]' '[:upper:]' <<< $3)
+[[ -z $SETTING ]] && BailOut
+SETTING_GROUP=$(awk -F\. '{ print $1 }' <<< $SETTING)
+SETTING_NAME=$(awk -F\. '{ print $2 }' <<< $SETTING)
+
+DP_HOST=$(gethost $BRAND $ENVIRO)
+[[ -z $DP_HOST ]] && BailOut "Can't find a host for $BRAND $ENVIRO"
+
+# set tmp files for json output
+mkdir -p $TMP
+JSON_LGC=$TMP/$BRAND-$ENVIRO-lgc.json
+JSON_CFG=$TMP/$BRAND-$ENVIRO-cfg.json
+JSON_OVR=$TMP/$BRAND-$ENVIRO-ovr.json
+JSON_FF=$TMP/$BRAND-$ENVIRO-ff.json
+
+# use curl to grab the json
+curl $TIMEOUT $USER_AGENT -q -s -k https://$DP_HOST/admin/settings/settings.json > $JSON_LGC
+#curl $TIMEOUT $USER_AGENT -q -s -k https://$DP_HOST/admin/configuration/basic-view.json > $JSON_CFG
+#curl $TIMEOUT $USER_AGENT -q -s -k https://$DP_HOST/admin/configuration/override-view.json > $JSON_OVR
+#curl $TIMEOUT $USER_AGENT -q -s -k https://$DP_HOST/admin/configuration/featureflags.json > $JSON_FF
+
+#JSON_RES=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group,name,value} | join(",")' $JSON_LGC 2>/dev/null | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3- | sed -z 's/\n/ /g')
+JSON_RES=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group,name,value} | join(",")' $JSON_LGC 2>/dev/null | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3- | sort -u)
+[[ -n $JSON_RES ]] && echo "$JSON_RES"
+
+rm -rf $TMP
+
+exit 0

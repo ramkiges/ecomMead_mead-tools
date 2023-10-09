@@ -1,0 +1,137 @@
+#!/bin/bash
+# generates Mashery API key and pom file entries
+# https://confluence.wsgc.com/display/PS/Howto%3A+Create+Mashery+Encrypted+Keys
+# https://confluence.wsgc.com/display/PS/Howto%3A+Create+New+Mashery+API+KEYs
+# 
+# the pom updating is automatic now
+# You will need to update 
+# ^devops/application/frontend-2.1/common/config/trunk/src/main/resources/tomcat/conf/Catalina/localhost/ROOT.xml 
+# ^devops/application/frontend-2.1/qa/config/app/trunk
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps:~/bin
+#EMAIL=ecomMead@wsgc.com
+EMAIL=tfitzpatrick@wsgc.com
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0)"
+	echo
+	exit 1
+}
+
+# constants
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk"
+ENV=uat5 # this is just an env to use to borrow the tomcat encryption utility
+
+# use the last digit of the year as our proxySecret index
+YEAR=$(date +"%Y")
+NEW_SECRET=${YEAR: -1}
+DEBUG=true
+
+# checkout the frontend
+TMP=/tmp/$(basename $0)
+mkdir -p $TMP
+svn co -q $FRONTEND $TMP/frontend
+
+# do some skullduggery to create a new key
+ECDEPLOY=ecdeploy-prd-rk1v
+MASHERY_RANDOM=/tmp/mashery-random
+MASHERY_ROOT_XML=/tmp/mashery-resource.txt
+MASHERY_INSTALL=/tmp/mashery-install.sh
+MASHERY_KEY="X7YNpdUiRUaqki1SbyePpQaWi/R+FY6OL6FtRCRVjkU="
+TOMCAT_KEY="MyTxh2H7gDjbcVOyIIluUg\=\="
+MASHERY_POM="/tmp/mashery.pom"
+MASHERY_MSG="/tmp/mashery.msg"
+MASHERY_URL="https://williamssonoma.admin.mashery.com/control-center/api-definitions"
+MASHERY_CONFLUENCE="https://confluence.wsgc.com/display/PS/Howto%3A+Create+Mashery+Encrypted+Keys"
+
+# create JNDI value
+cat > $MASHERY_RANDOM.exp << EOF
+#!/usr/bin/expect -f
+# created by $(basename $0) $(date +'%Y-%m-%d')
+set timeout 300
+match_max 7500
+set expect_out(buffer) {}
+send "cd /apps/staging/Mashery\r"
+spawn java -jar /apps/staging/Mashery/randomgenerator-1.0.2-jar-with-dependencies.jar
+expect "hoice"
+send "1\r"
+expect "ProxySecret"
+send "$NEW_SECRET\r"
+expect "placeholder"
+EOF
+
+chmod 755 $MASHERY_RANDOM.exp
+scp -q $MASHERY_RANDOM.exp $ECDEPLOY:/tmp
+ssh -q $ECDEPLOY eval $MASHERY_RANDOM.exp | grep -i JNDI | tail -2  | dos2unix > $MASHERY_RANDOM.txt
+
+echo "TomcatKey: $TOMCAT_KEY"
+
+JNDI_NAME=$(grep -i "jndi name" $MASHERY_RANDOM.txt | awk '{ print $NF }')
+JNDI_VALUE=$(grep -i "jndi value" $MASHERY_RANDOM.txt | awk '{ print $NF }')
+echo " JNDI_NAME: $JNDI_NAME"
+echo "JNDI_VALUE: $JNDI_VALUE"
+
+# create ENC value
+echo
+CMD="cd /apps/tomcat/conf;/apps/java/bin/java -jar /apps/tomcat/lib/tomcat-crypto-factory-2.0.2.jar encrypt '$TOMCAT_KEY' '$JNDI_VALUE' "
+[ -n "$DEBUG" ] && echo "CMD: $CMD"
+host=$(get-host ws $ENV)
+MASHERY_ENC=$(ssh -q $host "$CMD" | awk '{ print $NF }')
+echo "MASHERY_ENC: $MASHERY_ENC"
+[[ -z $MASHERY_ENC ]] && BailOut "MASHERY_ENC is blank"
+
+# create mashery API endpoint key
+echo
+MACID=$(echo "$JNDI_VALUE" | awk -F, '{ print $1 }')
+JNDI=$(echo "$JNDI_VALUE" | awk -F, '{ print $2 }')
+CMD="java -jar /apps/staging/Mashery/encrypt.jar '$JNDI' '$MASHERY_KEY'"
+[ -n "$DEBUG" ] && echo "CMD: $CMD"
+API_KEY=$(ssh -q $ECDEPLOY "$CMD")
+echo "API_KEY: $API_KEY"
+
+# create config strings
+RESOURCE="<Resource name=\"$JNDI_NAME\" type=\"java.lang.String\" factory=\"com.wsgc.tomcat.CryptoFactory\" factoryx=\"com.wsgc.tomcat.StringFactory\" value=\"$MASHERY_ENC\"/>"
+POM="<frontend.$JNDI_NAME>$MASHERY_ENC</frontend.$JNDI_NAME>"
+POM=$(echo "$POM" | sed -e s/ProxySecret/proxySecret/g)
+echo "$RESOURCE" > $MASHERY_ROOT_XML
+echo "$POM" > $MASHERY_POM
+propset -f $TMP/frontend/pom.xml -p "frontend.$JNDI_NAME" -v "$MASHERY_ENC"
+propset -f $TMP/frontend/pom.xml -p "frontend.macId${NEW_SECRET}" -v "$MACID"
+propset -f $TMP/frontend/pom.xml -p "frontend.encrypted_secret${NEW_SECRET}" -v "$API_KEY"
+
+# display new keys
+cat > $MASHERY_MSG << EOF
+Generated: $(date +'%Y-%m-%d')
+
+New Mashery key: $JNDI_NAME 
+
+Add to ROOT.xml: 
+$RESOURCE
+
+Add to pom.xml: 
+$POM
+
+Mashery key - install at $MASHERY_URL
+encrypted_secret:$API_KEY 
+mac_id:$MACID 
+
+See also: $MASHERY_CONFLUENCE
+
+EOF
+
+cat $MASHERY_MSG
+
+svn commit $TMP/frontend/pom.xml -m "Update mashery key frontend.$JNDI_NAME"
+
+mailx -s "New Mashery QA key - $JNDI_NAME" $EMAIL < $MASHERY_MSG
+
+ssh -q -tt ecombuild "jenkins-jnlp build wsgc-devops-frontend21-common"
+sleep 5
+ssh -q -tt ecombuild "jenkins-jnlp build wsgc-devops-frontend21-qa-app-config"
+for BRAND in $(getbrandlist)
+do
+  ssh -q -tt ecombuild "jenkins-jnlp build wsgc-devops-frontend21-qa-$BRAND-app-config </dev/null &"
+  sleep 5
+done
+
+

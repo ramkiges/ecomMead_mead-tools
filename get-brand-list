@@ -1,0 +1,102 @@
+#!/bin/bash
+# generates a list of brands by looking for the frontend poms
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+
+# pattern to match for prd
+REALM_PRD=".*prd|.*preprd"
+#caprdab|caprdsac|capreprdab|capreprdsac|prdab|prdrk|prdsac|preprdab|preprdrk
+
+# start with an empty list
+BRAND_LIST=
+REVERSE=r
+
+# these brands are not yet ready for some automation tasks
+INACTIVE=""
+# these brands are excluded from prod until they're ready for prime time
+EXCLUDE_PROD="$INACTIVE "
+
+Usage() {
+  echo "$(basename $0): [-d delimiter] [-a] [-p] [env]
+    -d  - output delimiter (eg -d,)
+    -a  - only list active brands (ie brands in production, and for which there are valid configs under development)
+    -p  - only list brands actively used in production (ie only brands that are live) 
+    env - narrow down the search to a specific environment (eg qa54) " >&2
+  exit 0
+}
+
+while [ $# -gt 0 ]
+do
+  case $1 in
+    -h* | --h* ) Usage;;
+    -r* ) REVERSE=true
+      shift;;
+    -a* ) ACTIVE_ONLY=true
+      shift;;
+    -p* ) PROD_ONLY=true
+      shift;;
+    -d* ) DELIM=$(sed -es/-d//g <<< $1)
+      shift;;
+    * ) ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $1 )
+      shift;;
+  esac
+done
+
+[[ -z $DELIM ]] && DELIM=' '
+
+# determine if we're looking at prd or non-prd
+# this is a hot mess because we're not consistent with our naming
+[[ $ENVIRO = aktest ]] && ENVIRO=prdrk
+[[ $ENVIRO = prd || $ENVIRO = prod ]] && ENVIRO=prdrk
+[[ $ENVIRO = preprd || $ENVIRO = preprd-dc || $ENVIRO = preprod ]] && ENVIRO=preprdrk
+[[ $ENVIRO = caprod || $ENVIRO = caprd ]] && ENVIRO=caprdsac
+[[ $ENVIRO = caprdrk ]] && ENVIRO=caprdsac
+[[ $ENVIRO = capreprd || $ENVIRO = capreprod ]] && ENVIRO=capreprdsac
+[[ $ENVIRO = prod-east || $ENVIRO = prod-east-dc ]] && ENVIRO=prdab
+[[ $ENVIRO = prod-west || $ENVIRO = prod-west-dc ]] && ENVIRO=prdrk
+[[ $ENVIRO =~ prd || $ENVIRO =~ prod ]] && REALM=prd || REALM=qa
+FRONTEND=https://repos.wsgc.com/svn/devops/application/frontend-2.1/$REALM/config/app/trunk
+
+# this will be a list of _all_ brands
+BRANDS=$(svn ls $FRONTEND | grep "/$" | egrep -vi "pom.xml|src/" | sort -ur | sed -es%/%%g )
+if [[ -n $ACTIVE_ONLY ]]
+then
+  for b in $INACTIVE
+  do
+    BRANDS=$(sed -es/$b//g <<< $BRANDS)
+  done
+fi
+
+if [[ -n $PROD_ONLY ]]
+then
+  for b in $EXCLUDE_PROD
+  do
+    BRANDS=$(sed -es/$b//g <<< $BRANDS)
+  done
+fi
+
+# if a specific environment was not specified, print the list and happily exit or if it's jukebox environment.
+# We must exit early if its a jukebox env because the jukebox env is deployed via k8s
+# which means we won't see jukebox brands in the frontend config repo.
+if [[ -z $ENVIRO || "$ENVIRO" =~ "jukebox" ]]
+then
+  #[[ -z $REVERSE ]] && BRAND_LIST=$(echo "$BRANDS" | xargs -n1 | sort -u | tr '\n' "$DELIM" | sed -es%$DELIM$%%g)
+  #[[ -z $REVERSE ]] && BRAND_LIST=$(echo "$BRANDS" | xargs -n1 | sort -u | tr '\n' "$DELIM" | sed -es%$DELIM$%%g)
+  BRAND_LIST=$(echo "$BRANDS" | xargs -n1 | sort -u | tr '\n' "$DELIM" | sed -es%$DELIM$%%g)
+
+  echo "$BRAND_LIST"
+  exit 0
+fi
+
+# cycle through all the possible brands and see if the frontend config exists for that brand
+for b in $BRANDS
+do
+  svn ls $FRONTEND/$b/$ENVIRO >/dev/null 2>&1 || continue
+  BRAND_LIST="${b}${DELIM}${BRAND_LIST}"
+done
+
+# sort the list
+BRAND_LIST=$(echo "$BRAND_LIST" | xargs -n1 | sort -u | tr '\n' "$DELIM" | sed  -es%"$DELIM$DELIM"%%g -es%"$DELIM"$%%g)
+
+echo "$BRAND_LIST"
+
+exit 0

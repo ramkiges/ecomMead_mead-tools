@@ -1,0 +1,190 @@
+#!/bin/bash
+# gets service endpoint from etcd-syncappconfig
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/opt/homebrew/bin:~/bin:$PATH
+
+JENKINS_URL=https://ecombuild.wsgc.com/jenkins
+JENKINS_JOBS=git@github.wsgc.com:eCommerce-DevOps/jenkins-jobs.git
+RUNDECK_JOBS=git@github.wsgc.com:eCommerce-DevOps/rundeck-jobs.git
+STRING_PROP=/project/properties/hudson.model.ParametersDefinitionProperty/parameterDefinitions/hudson.model.StringParameterDefinition
+SYNCAPPCONFIG_ORG=eCommerce-Tahoe
+SYNCAPPCONFIG_BRANCH=all-nonprod-session
+SYNCAPPCONFIG_REPO=etcd-syncappconfig-helm-config.git
+SERVICE_EXCLUDE="dp|---"
+uri=
+DEBUG=
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+  exit 255
+}
+
+Usage() {
+  echo "Usage: $(basename $0) <env> <svc> " >&2
+  [[ -n $1 ]] && echo "$*" >&2
+}
+
+cleanUp() {
+  [[ $CLEAR = "true" && -n $TMP ]] && rm -rf $TMP
+}
+trap cleanUp EXIT
+
+ENVIRO=$1
+SERVICE=$2
+
+# environment snowflakes
+[[ $ENVIRO = "uat" ]] && ENVIRO=uat1
+
+# clean up old runs
+find /tmp -name "$(basename $0)-*" -maxdepth 1 -type d -mmin +10 -exec rm -rf {} \; 2>/dev/null &
+find /tmp -name "tmp.$(basename $0).*" -maxdepth 1 -type d -mmin +10 -exec rm -rf {} \; 2>/dev/null &
+rm -rf $HOME/get-svc-endpoint.d 
+
+# translation of service names and environments
+ENVIRO=$(sed -es/aktest/preprod/gi <<< $ENVIRO)
+ENVIRO=$(sed -es/prd/prod/gi <<< $ENVIRO)
+[[ $ENVIRO = "prod" ]] && ENVIRO=prod-west
+# need to come up with a regex for these
+[[ $ENVIRO = "capreprod" ]] && ENVIRO=ca-preprd-west
+[[ $ENVIRO = "caprod" ]] && ENVIRO=ca-prod-west
+
+# some service name translations for convenience
+case $SERVICE in
+  ecom-svc-content  ) SERVICE=contentSvc ;;
+  ecom-svc-customer ) SERVICE=EcomSvcCusotmer ;;
+  ecom-svc-catalog  ) SERVICE=catalogAppService ;;
+  ecom-svc-order-servicing )  SERVICE=orderServicing ;;
+
+  ecom-app-product  ) SERVICE=productMfe ;;
+  ecom-app-customer ) SERVICE=customerMfe ;;
+  ecom-app-content  ) SERVICE=contentMfe ;;
+  ecom-app-customer ) SERVICE=customerMfe ;;
+  ecom-app-shop     ) SERVICE=shopMfe ;;
+  ecom-app-registry ) SERVICE=registryMfe ;;
+  ecom-app-global   ) SERVICE=globalMfe ;;
+  ecom-app-product  ) SERVICE=productMfe ;;
+  ecom-app-phygital ) SERVICE=phygitalMfe ;;
+  ecom-svc-phygital ) SERVICE=svcPhygital ;;
+  ecom-app-order-servicing ) SERVICE=orderservicingMfe ;;
+
+  platform-svc-session ) SERVICE=sessionSvc ;;
+esac
+
+TMP=$(mktemp -d -t tmp.$(basename $0).XXX )
+
+if [[ -n $ENVIRO ]]
+then
+  # fetch syncapp version from prod RunDeck job
+  if [[ $ENVIRO =~ prod || $ENVIRO =~ prd ]]
+  then
+    SYNCAPPCONFIG_ORG=eCommerce-Kubernetes-Bedrock 
+    SYNCAPPCONFIG_BRANCH=release
+
+    [[ -e $HOME/.rundeck-jobs/.git ]] || git clone --depth 1 -q $RUNDECK_JOBS $HOME/.rundeck-jobs 2>/dev/null || BailOut "Unable to clone $RUNDECK_JOBS [$TMP]"
+    git -C $HOME/.rundeck-jobs pull >/dev/null 2>&1
+    job=$HOME/.rundeck-jobs/deploy/prd/prdsac/mfe-brand-config/mfe-config-prod-with-tkg.yml
+    [[ -e $job ]] || BailOut "Can't find RunDeck job $job"
+    SYNCAPPCONFIG_VERS=$(grep -A+2 'name:.*SyncApp_version' $job | grep 'value:' | head -1 | awk '{ print $NF }' | sed -es/\'//g)
+  else
+    SYNCAPPCONFIG_VER=$(get-manifest -k ver -e $ENVIRO -s etcd-syncapp-config)
+    if [[ -n $SYNCAPPCONFIG_VER ]]
+    then
+      SYNCAPPCONFIG_ORG=
+      SYNCAPPCONFIG_BRANCH=
+    else
+      SYNCAPPCONFIG=$(get-manifest -k pkg_branch -e $ENVIRO -s etcd-syncapp-config)
+      SYNCAPPCONFIG_ORG=$(awk -F/ '{ print $1 }' <<< $SYNCAPPCONFIG)
+      SYNCAPPCONFIG_BRANCH=$(awk -F/ '{ print $NF }' <<< $SYNCAPPCONFIG)
+    fi
+  fi
+
+  if [[ -n $SYNCAPPCONFIG_VER ]] 
+  then
+    # need to figure out how to get the actual release bits
+    SYNCAPPCONFIG_ORG=eCommerce-Kubernetes-Bedrock 
+    SYNCAPPCONFIG_BRANCH=release
+    APP_CONFIG_URL=http://artifactory.wsgc.com/artifactory/helm-configs/etcd-syncappconfig-$SYNCAPPCONFIG_VER.zip
+    mkdir -p $TMP 
+    pushd $TMP >/dev/null 2>&1
+    curl -sqk -O $APP_CONFIG_URL
+    popd >/dev/null 2>&1
+    unzip -q -o $TMP/$(basename $APP_CONFIG_URL) -d $TMP || BailOut "Unable to extract $(basename $APP_CONFIG_URL) [$TMP]"
+    cd $TMP/helm-config || BailOut "Unable to cd to  $TMP/helm-config"
+  else
+    [[ -z $SYNCAPPCONFIG_ORG ]] && SYNCAPPCONFIG_ORG=$(get-manifest -e $ENVIRO -s etcd-syncapp -k org)
+    [[ -z $SYNCAPPCONFIG_BRANCH ]] && SYNCAPPCONFIG_BRANCH=$(get-manifest -e $ENVIRO -s etcd-syncapp -k bch)
+    [[ -z $SYNCAPPCONFIG_ORG ]] && BailOut "Why is etcd-syncapp org blank?"
+    [[ -z $SYNCAPPCONFIG_BRANCH ]] && BailOut "Why is etcd-syncapp branch blank?"
+
+    SYNCAPPCONFIG=git@github.wsgc.com:$SYNCAPPCONFIG_ORG/$SYNCAPPCONFIG_REPO
+    git clone -q $SYNCAPPCONFIG $TMP >/dev/null 2>&1 || BailOut "Unable to clone $SYNCAPPCONFIG [$ENVIRO $SERVICE] [$TMP]"
+    cd $TMP
+    git branch --all >/dev/null 2>&1
+    git fetch --all >/dev/null 2>&1
+    git checkout $SYNCAPPCONFIG_BRANCH -q #>/dev/null 2>&1 || BailOut "Unable to checkout $SYNCAPPCONFIG_BRANCH"
+    git pull -q >/dev/null 2>&1
+    cd $TMP/config || BailOut "Unable to cd to $TMP/config"
+  fi
+fi
+
+# by this point, we should have either the repo checked out or the zip file extracted
+values_com=values.yaml
+values_env=$ENVIRO/values.yaml
+
+if [[ -n $ENVIRO && -z $SERVICE ]] 
+then
+  #echo "SyncAppConfig=$SYNCAPPCONFIG" >&2
+  echo "Available services for $ENVIRO:" >&2
+  yq eval '.services | keys' $values_com $values_env 2>/dev/null | awk '{ print $NF }' | egrep -iv "$SERVICE_EXCLUDE" | sort -u
+  exit 0
+fi
+
+if [[ -z $ENVIRO ]] 
+then
+  Usage
+#  Usage "Available services:
+#$(yq eval '.services | keys' $values_com */values.yaml 2>/dev/null | awk '{ print $NF }' | egrep -iv "$SERVICE_EXCLUDE" | sort -u)"
+  exit 0
+fi
+
+#yq eval $values_env
+if [[ -e $values_env ]]
+then 
+  uri=$(yq eval ".services.$SERVICE.uri" $values_env | sed -es/null//g)
+  [[ -z $uri ]] && uri=$(yq eval ".services.$SERVICE.uri" $values_com | sed -es/null//g)
+else
+  echo "$(basename $0): $values_env note tound" >&2
+fi
+
+[[ -n $SYNCAPPCONFIG_VER ]] && rm -rf $TMP
+if [[ -n $uri ]]
+then 
+  [[ -n $DEBUG ]] && echo "$(basename $0):$SYNCAPPCONFIG_ORG/$SYNCAPPCONFIG_REPO" >&2
+  echo "$uri"
+  exit 0
+fi
+
+ENVIRO=$1
+OVERRIDE=$(get-override-url ws $ENVIRO)
+[[ -z $OVERRIDE ]] && BailOut "Can't find svn override for ws $ENVIRO"
+SERVICE=$(tr '[:upper:]' '[:lower:]' <<< $SERVICE)
+case $SERVICE in
+  *sessionsvc*        ) SETTING=PLATFORM_SESSION_SERVICE.SERVICE_URI ;;
+  *favorites*         ) SETTING=FAVORITES.SERVICE_URL ;;
+  *profile*           ) SETTING=ACCOUNT_SERVICES.PROFILE_SERVICE_URL ;;
+  *registry*          ) SETTING=REGISTRY.FOUNDATION_URL ;;
+  *cart-checkout*     ) SETTING=CART_CHECKOUT.SERVICE_URI ;;
+  *inventory-service* ) SETTING=INVENTORY.INVENTORY_MICROSERVICE_URI ;;
+  *                   ) BailOut "No setting key for $SERVICE" ;;
+esac
+
+[[ -z $SETTING ]] && exit 128
+
+uri=$(svn --non-interactive cat $OVERRIDE | grep "$SETTING\.$ENVIRO\." | egrep -iv "^#" | cut -d= -f2-)
+if [[ -n $uri ]]
+then 
+  #echo "$(basename $0): appsetting: $SETTING" >&2
+  echo "$uri"
+  exit 0 
+fi
+
+exit 1

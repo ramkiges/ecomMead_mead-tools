@@ -1,0 +1,113 @@
+#!/bin/bash
+# several of the scripts are just symlinks to other scripts
+# *this* script re-establishes those links because git sometimes screws them up
+
+for s in get-bgb-url get-bgb-schema get-bgb-host get-bgb-env get-buildsystem-host get-buildsystem-url get-cmx-schema get-bgb-service get-cmx-path get-cat-path get-bgb-stage get-bgb-installation
+do
+  ln -sf get-deployment-properties $s
+  git add $s
+done
+
+for s in k8s-get-logs k8s-kill k8s-list k8s-list-apps k8s-list-namespaces k8s-list-ns k8s-logs k8s-pod-delete k8s-pod-list k8s-pods k8s-quota k8s-restart k8s-start k8s-status k8s-stop k8s-uninstall deploy-mfe
+do
+  ln -sf k8s-utils $s
+  git add $s
+done
+
+for s in job-disable job-enable job-no-autodeploy job-nochild job-no-sched job-sched job-slack
+do
+  ln -sf jobtools $s
+  git add $s
+done
+
+ln -sf set-backend-ws_app_owner set-backend-ws_app_owner:webqa2
+
+ln -sf set-backend-eqa1 set-backend-dtc_app_owner
+ln -sf set-backend-eqa1 set-backend-dtc_app_owner:webqa2 
+
+ln -sf set-backend-eqa2 set-backend-dtcmou_app_owner
+ln -sf set-backend-eqa2 set-backend-dtcmou_app_owner:webqa2
+
+ln -sf set-backend-eqa3 set-backend-eqa3_app_owner
+ln -sf set-backend-eqa3 set-backend-eqa3_app_owner:eqa3_app_owner
+
+ln -sf set-backend-veqa1 set-backend-ws_app_owner:veqa1
+ln -sf set-backend-veqa2 set-backend-ws_app_owner:veqa2
+ln -sf set-backend-veqa3 set-backend-ws_app_owner:veqa3
+ln -sf set-backend-vtrn1 set-backend-ws_app_owner:vtrn1
+
+git add set-backend*
+
+for s in get-ecm-env get-ecm-path get-ecm-schema get-ecm-server
+do
+  ln -sf get-ecm-info $s
+done
+
+ln -sf getdb get-db
+ln -sf getdomain get-domain 
+ln -sf getschema get-schema
+ln -sf getschema get-dp-schema
+ln -sf get-etcd-info get-etcd-env
+ln -sf getsiteid get-site-id
+ln -sf getsiteid get-siteid
+
+ln -sf get-market getmarket
+
+ln -sf stage-wcm-generation wcm-update-cat
+ln -sf get-wcm-generation get-cat-generation
+ln -sf generation-check generation-clear
+
+ln -sf get-adg-info get-adg-env
+ln -sf get-adg-info get-adg-branch
+ln -sf get-adg-info get-adg-url
+ln -sf get-adg-info get-adg-org
+ln -sf get-adg-info get-adg-summary
+
+ln -sf get-catalog get-catalog-env
+ln -sf get-catalog get-catalog-url
+ln -sf get-catalog get-catalog-schema
+ln -sf get-catalog get-catalog-gen-cur
+ln -sf get-catalog get-catalog-gen-act
+ln -sf get-host get-catalog-vm
+
+ln -sf set-manifest-property get-manifest-property
+
+ln -sf get-akamai getakamai
+
+ln -sf mfe-config-template-manifest mfe-config-template
+
+ln -sf get-env-list getenvlist
+
+ln -sf set-debug set-info
+ln -sf set-debug set-trace
+ln -sf set-debug set-warn
+ln -sf set-debug set-error
+
+ln -sf jira-util jira-stop 
+ln -sf jira-util jira-start
+ln -sf jira-util jira-reopen
+
+ln -sf propget propset
+ln -sf propget propcopy
+
+ln -sf restart-jenkins jenkins-restart
+
+ln -sf checkcontent chkcontent
+ln -sf checkcontent chkcmx
+
+ln -sf wsi-settings.sh wsi_settings.sh
+
+ln -sf commit-check commit-clear
+
+ln -sf schema-switch switch-schema
+
+ln -sf checksvc chksvc
+
+git add get-*
+
+for l in k8s-*
+do
+  [[ $l = "k8s-deploy" || $l = "k8s-utils" || $l = "k8s-auth" ]] && continue
+  ln -sf k8s-utils $l
+done
+

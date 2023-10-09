@@ -1,0 +1,33 @@
+#!/bin/bash
+# finds the WCM generation deployed for an environment
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin
+REPO=/bgb/buildsystem-2.0-work/artifact_repository
+
+LOGVIEW="logview:System@111"
+LOGIN="ptqaenv:ta8PoLe"
+TIMEOUT="--connect-timeout 20 --max-time 120"
+USER_AGENT="--user-agent GetWCMGeneration"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0)[$(hostname)] $* " >&2
+  exit 1
+}
+
+BRAND=$1
+ENVIRO=$2
+[[ -z $BRAND ]] && BailOut "Need brand"
+
+dp=$(gethost $BRAND $ENVIRO)
+[[ -z $dp ]] && BailOut "Can't find host for $BRAND $ENVIRO"
+
+# try to get the gen from the summary page
+summary=https://$dp/admin/summary.html
+gen=$(curl -fsqk -H 'Cache-Control: no-cache' $TIMEOUT $USER_AGENT --user $LOGIN $summary 2>/dev/null |grep -iw "CAT" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{print $1 }' | head -1)
+[[ -n $gen ]] && { echo "WCM src=summary" >&2; echo "$gen"; exit 0; }
+
+## try to get the gen from the logs
+#log=https://$dp:38666/wsgc-tomcat-frontend/application.log
+#gen=$(curl -fsqk $TIMEOUT $USER_AGENT --user $LOGVIEW $log | grep "Unable to get template zip file for site.* generation" | tail -1 | awk '{ print $NF }')
+#[[ -n $gen ]] && { echo "WCM src=log" >&2; echo "$gen"; exit 0; }
+
+exit 0

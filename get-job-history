@@ -1,0 +1,46 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/scripts/env_summary:$HOME/bin:$PATH
+
+[[ -z $DEPTH ]] && DEPTH=25
+BailOut() {
+  [[ -n $1 ]] && echo "$*" 
+  echo "Usage: $(basename $0): <job>"
+  echo "output: job,timestamp,buildId,node,result,duration"
+
+  exit 255
+}
+
+[[ -z $1 ]] && BailOut
+
+JOB=$1
+JOB=$(sed -es%https://ecombuild.wsgc.com/jenkins/job/%%g <<< $JOB)
+LABEL=$(sed -es%/job%%g <<< $JOB | sed -es%/$%%g)
+
+url="https://ecombuild.wsgc.com/jenkins/job/$JOB"
+id=$(curl -sqk $url/lastBuild/api/json?tree=id | jq -r .id 2>/dev/null | tr "[:upper:]" "[:lower:]")
+[[ -z $id ]] && exit 0
+e=$(expr $id - $DEPTH)
+[[ $e -lt 1 ]] && e=1
+echo "$DEPTH $JOB" >&2
+
+for id in $(eval echo {$id..$(expr $id - $DEPTH + 1)})
+do
+  console="$url/$id/consoleText"
+  duration=$(curl -sqk $url/$id/api/json?tree=duration | jq -r .duration 2>/dev/null | tr "[:upper:]" "[:lower:]")
+  #echo "$url/$id/api/json?tree=duration" >&2
+  [[ -z $duration ]] && continue
+
+  result=$(curl -sqk $url/$id/api/json?tree=result | jq -r .result 2>/dev/null | tr "[:upper:]" "[:lower:]")
+  [[ $result =~ null ]] && continue
+  #[[ $result =~ aborted ]] && continue
+
+  node=$(curl -sqk $url/$id/api/json?tree=builtOn | jq -r .builtOn 2>/dev/null | tr "[:upper:]" "[:lower:]" | grep -iv "null")
+
+  ts=$(curl -sqk $url/$id/api/json?tree=timestamp | jq -r .timestamp 2>/dev/null | tr "[:upper:]" "[:lower:]")
+  ts=${ts:0:10}
+  ts=$(date -d@${ts} +'%Y%m%d%H%M%S' 2>/dev/null)
+
+  echo "$LABEL,$ts,$id,$node,$result,$duration"
+done
+
+exit 0

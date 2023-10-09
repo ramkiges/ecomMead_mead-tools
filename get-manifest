@@ -1,0 +1,204 @@
+#!/bin/bash
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:~/bin
+
+REPO=git@github.wsgc.com:eCommerce-DevOps/env-manifest.git
+BRCH=release
+
+#REPO=git@github.wsgc.com:eCommerce-Echo/env-manifest.git
+#BRCH=2.0-TESTING
+
+CLEAR=false # for now we're going to wipe it each time
+QUIET=false
+DEBUG=
+VERBOSE=
+value=
+
+BailOut() {
+  [[ -n $1 && $QUIET = "false" ]] && echo "$(basename $0): $*"  >&2
+  exit 255
+}
+
+printDebug() {
+  [[ $DEBUG =~ true ]] && { echo; echo "# $(basename $0): $*" >&2; }
+}
+
+Usage() {
+  echo "$(basename $0) -b <brand> -e <enviro> -s <service> [-l]
+  -e  - environment [required]
+  -b  - brand
+  -s  - service to query
+  -k  - search key to query
+  -l  - list available services " >&2
+  exit 0
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  [[ $CLEAR = "true" && -n $TMP ]] && rm -rf $TMP
+}
+trap cleanUp EXIT
+
+which yq >/dev/null 2>&1 || BailOut "Need to install yq"
+
+[[ $# -eq 0 ]] && Usage
+
+while getopts "cp:k:s:a:e:t:b:hlqdv" opt 
+do
+    case ${opt} in
+      v ) VERBOSE=true;;
+      c ) CLEAR=true;;
+      d ) DEBUG=true;;
+      q ) QUIET=true;;
+      l ) LIST=true;;
+      p ) PROPERTY=$OPTARG;;
+      b ) BRAND=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG);;
+      s ) SERVICE=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG);;
+      k ) KEY=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG);;
+      e ) ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG);;
+      t ) TICKET=$(echo $OPTARG | tr '[:lower:]' '[:upper:]' | sed -es/','/' '/g);;
+      h ) Usage; exit 0;;
+    esac
+done
+
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+[[ -z $SERVICE ]] && LIST=true
+
+#find /tmp /var/tmp -maxdepth 1 -mindepth 1 -name "tmp.$(basename $0)*" -type d -cmin +5 -amin +5 -exec rm -rf {} \; >/dev/null 2>&1 &
+if [[ $CLEAR = "true" ]] 
+then
+  TMP=$(mktemp -d -t tmp.$(basename $0).XXX )
+else
+  TMP="$HOME/.manifest.d-$BRCH"
+fi
+
+# clone manifest repo
+if [[ ! -e $TMP/.git ]]
+then 
+  mkdir -p $TMP
+  git clone -q --depth 1 -b $BRCH $REPO $TMP #>/dev/null 2>&1 || { rm -rf $TMP; mkdir -p $TMP; }
+  [[ -e $TMP/.git ]] || git clone -q --depth 1 -b $BRCH $REPO $TMP >/dev/null 2>&1 || BailOut "Unable to clone $REPO to $TMP"
+fi
+
+# make sure we're on the branch on which we need to be
+cd $TMP/manifest || BailOut "Unable to cd to $TMP/manifest"
+git checkout -q $BRCH || BailOut "Can't checkout $BRCH"
+git pull -q --no-rebase #2>/dev/null
+
+# find the working directory
+[[ -e env-manifest/$ENVIRO ]] && E_YML=env-manifest/$ENVIRO/services-manifest.yaml
+[[ -z $E_YML && -e services-collection-manifest/$ENVIRO ]] && E_YML=services-collection-manifest/$ENVIRO/services-manifest.yaml
+[[ -z $E_YML ]] && BailOut "Unable to determine manifest directory for $ENVIRO"
+[[ -e $E_YML ]] || BailOut "Unable to find manifest file $E_YML"
+
+# this just prints out a list of available services
+if [[ $LIST =~ true ]]
+then
+  S_YML=services-collection-manifest/$ENVIRO/services-manifest.yaml
+  if [[ -n $KEY ]]
+  then
+    egrep -ih -B+1 "configuration:|name:" $E_YML $S_YML | egrep -iv "configuration:|name:|--" | sed -es/://g | egrep -iv "_version|pkg_|app_" | grep -i "$KEY" | sort -u
+  else
+    egrep -hi -B+1 "configuration:|name:" $E_YML $S_YML | egrep -iv "configuration:|name:|--" | sed -es/://g | egrep -iv "_version|pkg_|app_" | sort -u
+  fi
+  exit 0
+fi
+
+# this is for DP
+[[ -n $BRAND ]] && SERVICE="frontend-$BRAND"
+
+if [[ -n $SERVICE ]]
+then
+  [[ $SERVICE =~ delivery-gateway || $SERVICE =~ adg ]] && SERVICE=delivery-gateway
+  [[ $SERVICE =~ etcd || $SERVICE =~ syncapp ]] && SERVICE=etcd-syncapp-config
+  [[ $SERVICE = "etcd-syncapp-config" && $KEY = "branch" ]] && KEY=pkg_branch
+
+  S_ENV=$(yq eval ".services.$SERVICE.configuration.services-collection-manifest" $E_YML 2>/dev/null | egrep -iv 'null')
+  S_YML=services-collection-manifest/$S_ENV/services-manifest.yaml
+
+  printDebug "Environment:  $E_YML"
+  printDebug "Services:     $S_YML"
+
+  [[ -n $VERBOSE && -n $KEY ]] && /bin/echo -ne "$ENVIRO:$SERVICE:$KEY="
+  [[ -n $VERBOSE && -n $PROPERTY ]] && /bin/echo -ne "$ENVIRO:$SERVICE:$PROPERTY="
+
+  [[ $KEY =~ env ]] && { echo "$S_ENV"; exit 0; }
+
+  if [[ -n $PROPERTY ]]
+  then
+    printDebug "Property:     $PROPERTY"
+    value=$(yq eval ".services.$SERVICE.$PROPERTY" $E_YML | egrep -iv "null")
+    [[ -z $value ]] && value=$(yq eval ".services.$SERVICE.$PROPERTY" $S_YML | egrep -iv "null")
+    [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+  fi
+
+  if [[ $KEY =~ namespace || $KEY =~ ns ]]
+  then
+    printDebug "Key:          $KEY"
+    value=$(yq eval ".services.$SERVICE.app_namespace" $E_YML 2>/dev/null | egrep -iv 'null')
+    [[ -z $value ]] && value=$(yq eval ".services.$SERVICE.app_namespace" $S_YML 2>/dev/null | egrep -iv 'null')
+    [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+  fi
+
+  if [[ $KEY = "pkg_version" ]]
+  then
+    printDebug "Key:          $KEY"
+    value=$(yq eval ".services.$SERVICE.packaging.pkg_version" $E_YML 2>/dev/null | egrep -iv 'null')
+    [[ -z $value ]] && value=$(yq eval ".services.$SERVICE.packaging.pkg_version" $S_YML 2>/dev/null | egrep -iv 'null')
+    [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+  fi
+
+  if [[ $KEY = "app_version" || $KEY =~ ver ]]
+  then
+    printDebug "Key:          $KEY"
+    value=$(yq eval ".services.$SERVICE.packaging.app_version" $E_YML 2>/dev/null | egrep -iv 'null')
+    [[ -z $value ]] && value=$(yq eval ".services.$SERVICE.packaging.app_version" $S_YML 2>/dev/null | egrep -iv 'null')
+    [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+  fi
+
+  if [[ $KEY = "pkg_branch" || $KEY =~ pkg ]]
+  then
+    printDebug "Key:          $KEY"
+    value=$(yq eval ".services.$SERVICE.packaging.pkg_branch" $E_YML 2>/dev/null | egrep -iv 'null')
+    [[ -z $value ]] && value=$(yq eval ".services.$SERVICE.packaging.pkg_branch" $S_YML 2>/dev/null | egrep -iv 'null')
+    [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+  fi
+
+  # if we fall through then print some additional info
+  if [[ $KEY = "app_branch" || $KEY =~ app ]]
+  then
+    printDebug "Key:          $KEY"
+    value=$(yq eval ".services.$SERVICE.packaging.app_branch" $E_YML 2>/dev/null | egrep -iv 'null')
+    [[ -z $value ]] && value=$(yq eval ".services.$SERVICE.packaging.app_branch" $S_YML 2>/dev/null | egrep -iv 'null')
+    [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+  fi
+
+  if [[ $KEY =~ branch || $KEY =~ bch ]]
+  then
+    printDebug "Key:          $KEY"
+    value=$(yq eval ".services.$SERVICE.packaging.app_branch" $E_YML 2>/dev/null | egrep -iv 'null')
+    [[ -z $value ]] && value=$(yq eval ".services.$SERVICE.packaging.app_branch" $S_YML 2>/dev/null | egrep -iv 'null')
+    value=$(awk -F/ '{ print $NF }' <<< $value)
+    [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+  fi
+
+  if [[ $KEY =~ org ]]
+  then
+    printDebug "Key:          $KEY"
+    value=$(yq eval ".services.$SERVICE.packaging.app_branch" $E_YML 2>/dev/null | egrep -iv 'null')
+    [[ -z $value ]] && value=$(yq eval ".services.$SERVICE.packaging.app_branch" $S_YML 2>/dev/null | egrep -iv 'null')
+    value=$(awk -F/ '{ print $1 }' <<< $value)
+    [[ -n $value ]] && { echo "$value"; exit 0; } || exit 64
+  fi
+
+  [[ -n $KEY ]] && { echo; echo "*** $(basename $0): No key matching \"$KEY\" found ***" >&2; }
+  #S=$(yq eval ".services.$SERVICE.packaging" $E_YML 2>/dev/null | egrep -iv 'null')
+  #[[ -z $S ]] && S=$(yq eval ".services.$SERVICE" $S_YML 2>/dev/null | egrep -iv 'null')
+  #echo "$S" >&2
+
+  #printDebug "exited without finding anything for $ENVIRO $SERVICE $KEY"
+  exit 128
+fi
+
+# additional future functionality would go here
+
+exit 1

@@ -1,0 +1,31 @@
+#!/bin/bash
+# fetch the backend name
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+BACKEND=
+
+BailOut() {
+	[[ -n $1 ]] && echo "$(basename $0): $*" >&2
+  #echo "Usage: $(basename $0) <brand> [env]" >&2
+  exit 0
+}
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $2)
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+SCHEMA=$(get-schema $BRAND $ENVIRO)
+
+[[ -z $SCHEMA ]] && BailOut "Can't figure out schema for $BRAND $ENVIRO"
+
+case $SCHEMA in
+  *veqa1    ) BACKEND=veqa1 ;;
+  *veqa2    ) BACKEND=veqa2 ;;
+  *veqa3    ) BACKEND=veqa3 ;;
+  *dtcmou*  ) BACKEND=eqa2 ;;
+  *dtc_app* ) BACKEND=eqa1 ;;
+#  * ) BailOut "Can't determine backend for $SCHEMA ($BRAND $ENVIRO)"
+esac
+
+[[ -n $BACKEND ]] && echo "$BACKEND"
+
+exit 0

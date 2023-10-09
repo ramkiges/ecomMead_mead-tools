@@ -1,0 +1,46 @@
+#!/bin/bash
+# fetch the installation from a frontend pom in SVN - intended to be used in scripts
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/opt/homebrew/bin:~/bin
+export PATH
+
+FRONTEND_URL="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$(basename $0): $*" >&2
+  exit 0
+}
+
+[[ $# -lt 1 ]] && { echo "Usage: $(basename $0) <brand> <env>" >&2; exit 0; }
+
+if [[ $# -eq 2 ]]
+then
+  BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+  ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $2)
+else
+  BRAND=ws
+  ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $1)
+fi
+
+[[ -z $ENVIRO ]] && BailOut "Something went wrong"
+
+[[ $ENVIRO = "uat" ]] && ENVIRO=uat1
+[[ $ENVIRO = "regression" ]] && ENVIRO=rgs1
+[[ $ENVIRO = "int" ]] && ENVIRO=int1
+[[ $ENVIRO = "integration" ]] && ENVIRO=int1
+[[ $ENVIRO = "integration1" ]] && ENVIRO=int1
+[[ $ENVIRO = "integration2" ]] && ENVIRO=int2
+
+[[ $BRAND =~ admin ]] && { echo "$ENVIRO"; exit 0; }
+
+BRAND=${BRAND: -2}
+POM_URL=$FRONTEND_URL/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+
+INSTALLATION=$(svn cat $POM_URL 2>/dev/null | xmlstarlet sel -N pom=http://maven.apache.org/POM/4.0.0 -t -v /pom:project/pom:properties/pom:frontend.installation 2>/dev/null | egrep -iv "frontend.environment" | tr -d "[:space:]" | sort -u)
+[[ -z $INSTALLATION ]] && INSTALLATION=$(svn cat $POM_URL 2>/dev/null | xmlstarlet sel -N pom=http://maven.apache.org/POM/4.0.0 -t -v /pom:project/pom:properties/pom:frontend.environment 2>/dev/null | tr -d "[:space:]" | sort -u)
+
+[[ $ENVIRO =~ jukebox ]] && INSTALLATION=$ENVIRO
+
+echo "$INSTALLATION"
+
+exit 0

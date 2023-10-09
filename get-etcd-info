@@ -1,0 +1,95 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin:$PATH
+STORE=$HOME/.etcd-info
+
+BailOut() {
+  { set +x; } 2>/dev/null
+  [[ -n $1 ]] && echo "$(hostname --short)/$(basename $0): $*" >&2
+  exit 255
+}
+
+# temporary until all nodes have the new repo
+#rm -rf $STORE
+rm -rf $HOME/.etcd.d
+
+# secret cleanup flag
+echo "$*" | egrep -iq "clea" && { rm -rf $STORE; exit 0; }
+
+[[ $# -eq 1 ]] && { ENVIRO=$1; }
+[[ $# -eq 2 ]] && { BRAND=$1; ENVIRO=$2; }
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+[[ $ENVIRO = "regression" ]] && ENVIRO="rgs1"
+[[ $ENVIRO = "regression1" ]] && ENVIRO="rgs1"
+[[ $ENVIRO = "regression2" ]] && ENVIRO="rgs2"
+[[ $ENVIRO = "integration" ]] && ENVIRO="int1"
+[[ $ENVIRO = "integration2" ]] && ENVIRO="int2"
+[[ $ENVIRO = "qa99" ]] && ENVIRO="qa99"
+
+MODE=$(basename $0)
+[[ $MODE =~ env && $ENVIRO =~ fktest ]] && { echo "qa"; exit 0; }
+[[ $MODE =~ env && $ENVIRO =~ localdev ]] && { echo "qa"; exit 0; }
+
+if [[ $ENVIRO =~ prod || $ENVIRO =~ prd || $ENVIRO =~ aktest || $ENVIRO =~ preprd ]] 
+then
+  # just use the prod-west values for now
+  ENVIRO=prod-west
+  SYNCAPP_ORG=eCommerce-Kubernetes-Bedrock
+  SYNCAPP_BCH=release
+  SYNCAPP_REPO=git@github.wsgc.com:$SYNCAPP_ORG/etcd-syncappconfig-helm-config.git
+  TMP=$(echo "$STORE/$SYNCAPP_ORG:$SYNCAPP_BCH" | tr '[:upper:]' '[:lower:]')
+else
+  SYNCAPP=$(get-manifest -e $ENVIRO -s syncapp -k pkg_branch)
+  SYNCAPP_ORG=$(awk -F/ '{ print $1 }' <<< $SYNCAPP)
+  SYNCAPP_BCH=$(awk -F/ '{ print $2 }' <<< $SYNCAPP)
+  SYNCAPP_REPO=git@github.wsgc.com:$SYNCAPP_ORG/etcd-syncappconfig-helm-config.git
+  TMP=$(echo "$STORE/$SYNCAPP_ORG:$SYNCAPP_BCH" | tr '[:upper:]' '[:lower:]')
+fi
+
+[[ -e $TMP/.git ]] || git clone -q --depth 1 -b $SYNCAPP_BCH $SYNCAPP_REPO $TMP >/dev/null 2>&1 || BailOut "Unable to clone $SYNCAPP_REPO"
+cd $TMP
+git reset --hard >/dev/null 2>&1
+git pull -q origin >/dev/null 2>&1 
+if [[ $? -ne 0 ]]
+then
+  set -x
+  git pull -q origin #|| BailOut "Unable to git pull $TMP"
+  { set +x; } 2>/dev/null
+fi
+
+[[ -e $TMP/config ]] || BailOut "Can't find $TMP/config"
+cd $TMP/config || BailOut "Unable to cd to $TMP/config"
+[[ $ENVIRO = caperf && ! -e $ENVIRO ]] && ENVIRO=perf
+[[ -e $ENVIRO ]] || BailOut "Unable to find $ENVIRO in syncapp"
+cd $ENVIRO || BailOut "Unable to cd to $TMP/config/$ENVIRO"
+
+if [[ $MODE =~ env ]]
+then
+  #get-manifest -e $ENVIRO -s etcd-syncapp-config -k pkg_branch
+  ep=$(yq eval '."syncconfig"."etcd.server.endpoints"' values.yaml 2>/dev/null | egrep -iv 'null')
+
+  ETCD=$(echo "$ep" | \
+    awk '{ print $NF}' | \
+    awk -F/ '{ print $3 }' | \
+    awk -F: '{ print $1 }' | \
+    sed -es/.svc.cluster.local//gi -es/etcd.ecommerce-etcd-//g)
+
+  if [[ -z $ETCD ]]
+  then
+    [[ $ENVIRO =~ fktest ]] && ETCD=qa
+    [[ $ENVIRO =~ localdev ]] && ETCD=qa
+    [[ $ENVIRO =~ ^uat ]] && ETCD=uat
+    [[ $ENVIRO =~ perf ]] && ETCD=perf
+    [[ $ENVIRO =~ caperf ]] && ETCD=caperf
+  fi
+  [[ -z $ETCD ]] && BailOut "Can't figure out etcd env for $ENVIRO"
+
+  # temp hacks
+  [[ $1 =~ qa99[a-z][a-z] ]] && { echo "*** etcd snowflake hack-around ***" >&2; ETCD=qa; }
+
+  export ETCD=$ETCD
+  echo $ETCD
+  exit 0
+fi
+
+exit 0

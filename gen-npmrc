@@ -1,0 +1,40 @@
+#!/bin/bash
+
+DATE=$(date +'%Y%m%d')
+[ -f ~/.npmrc ] && email=$(grep -i 'email=' ~/.npmrc | awk -F= '{ print $2 }')
+
+
+if [ -z "$email" ] 
+then
+	read -p "Email: [$LOGNAME@wsgc.com] " email
+	email=${email:-$LOGNAME@wsgc.com}
+fi
+
+/bin/echo -n "WSGC pass for for $email " 
+read -s pass
+echo
+
+set -x
+
+AUTH=$(echo "$email:$pass" | openssl base64)
+
+[ -f ~/.npmrc ] && cp ~/.npmrc ~/.npmrc.$DATE
+
+if [ ! -f ~/.npmrc ]
+then
+	cat > ~/.npmrc << EOF
+	_auth=$AUTH
+	always-auth=true
+	strict-ssl=false
+	email=$email
+	//registry=https://npmrepo-dev.wsgc.com/repository/wsgc-npm/
+	registry=https://npmrepo.wsgc.com/repository/wsgc-npm-local/
+	sass_binary-site=https://npmrepo-dev.wsgc.com/repository/wsgc-raw-local/
+	//npmrepo-dev.wsgc.com/repository/wsgc-npm/:_authToken=$AUTH
+	//npmrepo-dev.wsgc.com/repository/wsgc-npm-snapshot-local/:_authToken=$AUTH
+	//npmrepo.wsgc.com/repository/wsgc-npm-local/:_authToken=$AUTH
+	//npmrepo.wsgc.com/repository/wsgc-npm/:_authToken=$AUTH
+EOF
+fi
+
+npm login --registry https://npmrepo-dev.wsgc.com/repository/wsgc-npm/

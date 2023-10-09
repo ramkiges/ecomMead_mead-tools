@@ -1,0 +1,47 @@
+#!/bin/bash
+# does a brute-force grep through jenkins and rundeck to find an un-allocated port for ETCD
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+
+JENKINS_JOBS=git@github.wsgc.com:eCommerce-DevOps/jenkins-jobs.git
+RUNDECK_JOBS=git@github.wsgc.com:eCommerce-DevOps/rundeck-jobs.git
+TMP=/tmp/$(basename $0)-$$
+PORTS=$TMP/etcd-ports.txt
+umask 000
+
+BailOut() {
+	[ -n "$1" ] && echo "$1" >&2
+  exit 1
+}
+
+rm -rf $TMP
+mkdir -p $TMP
+
+# force-add the etcd port
+echo "2379" >> $PORTS
+
+git clone -q --depth 1 -q $RUNDECK_JOBS $TMP/rundeck 2>/dev/null || BailOut "Unable to clone $RUNDECK_JOBS"
+git clone -q --depth 1 -q $JENKINS_JOBS $TMP/jenkins 2>/dev/null || BailOut "Unable to clone $JENKINS_JOBS"
+
+cd $TMP || BailOut "Unable to cd to $TMP"
+
+# rundeck ports
+cd $TMP || BailOut "Unable to cd to $TMP"
+YML=$(find rundeck -name "mfe-config-*" | egrep -iv "/prd/")
+grep -h -A+3 -i "name:.*ETCD_PORT" $YML 2>/dev/null | grep "value" | awk -F: '{ print $2 }' | grep "[0-9].*" | awk '{ print $1 }' | sed -es/\'//g | egrep -iv "^$" | sort -nu >> $PORTS
+
+# jenkins job ports
+cd $TMP || BailOut "Unable to cd to $TMP"
+XML=$(find jenkins -name "config-*-mfe.xml" )
+grep -h -A+4 -i "ETCD_PORT" $XML 2>/dev/null | grep "defaultValue" | awk -F '[<>]' '{ print $3 }' | sort -nu >> $PORTS
+
+for i in {3000..4000}
+do
+    grep -iq $i $PORTS || break
+done
+
+echo "$i"
+
+cd /tmp
+rm -rf $TMP
+
+exit 0
