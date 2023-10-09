@@ -1,0 +1,41 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin::/apps:~/bin:/wsgc/bin:$PATH
+
+BailOut() {
+    [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+    echo "Usage: $(basename $0) <brand> <enviro> <pattern>" >&2
+    [[ -n $TMP ]] && rm -rf $TMP
+    exit 1
+}
+
+BRAND=$1
+ENVIRO=$2
+PATTERN=$3
+
+[[ -z $PATTERN ]] && BailOut 
+
+# parse adhoc log entry
+#if [[ -e /apps/adhoc-appsetting.log ]]
+#then
+#  SETTING=$(awk -F\. '{ print $1 "." $2 }' <<< $PATTERN)
+#  cat /apps/adhoc-appsetting.log | grep "$SETTING" | grep -- "--env .*$ENVIRO.*--brand .*$BRAND" | tail -2
+#fi
+
+APPSETTINGS="https://repos.wsgc.com/svn/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site"
+SCHEMA=$(get-schema $BRAND $ENVIRO)
+SCHEMA_PATH=$(awk -F: '{ print $1 }' <<< $SCHEMA)
+DB_PATH=$(get-db $SCHEMA 2>/dev/null | awk -F\| '{ print $5 }')
+OVERRIDE=$APPSETTINGS/$DB_PATH/$SCHEMA_PATH/$BRAND/override
+
+TMP=$(mktemp -d -t tmp.$(basename $0)XXX)
+svn co --non-interactive -q $OVERRIDE $TMP || BailOut "svn co failed for $OVERRIDE"
+
+# find the last commit that matches the pattern
+COMMIT=$(svn blame --non-interactive $TMP/override.properties | grep -iE "$PATTERN" | awk '{ print $1 }' | sort | tail -1)
+
+# grab the details from that commit
+[[ -n $COMMIT ]] && svn log --non-interactive "$TMP/override.properties" -r $COMMIT | egrep -vi -- "^$|^---"
+
+rm -rf $TMP
+
+exit 0

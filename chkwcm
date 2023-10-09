@@ -1,0 +1,43 @@
+#!/bin/bash
+# this script attempts to fix a WCM installation by installing the most recent release version
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:$PATH
+RUNBY=$(sed -es/a_//g <<< $LOGNAME)
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <brand> <env> [ticket]"
+	echo
+	exit 1
+}
+
+BRAND=$1
+ENVIRO=$2
+TICKET=$(echo $3 |  tr '[:lower:]' '[:upper:]')
+
+[[ -z $ENVIRO ]] && BailOut
+
+#WCM_VERSION=$(getversion wcm)
+WCM_VERSION=6.7.9
+#WCM_VERSION=6.3.8
+[[ -z $WCM_VERSION ]] && WCM_VERSION=6.4.11
+
+[[ -n $TICKET ]] && jira-comment $TICKET "${ICON_INFO} $(basename $0): Attempting fix WCM $BRAND $ENVIRO by installing WCM $WCM_VERSION [$RUNBY]"
+
+#eval jenkins-jnlp build -s eCommerce-DevOps/job/wcm-common-config/job/master/
+#eval jenkins-jnlp build -s eCommerce-DevOps/job/wcm-deployment-rerun-module/job/master/
+
+eval jenkins-jnlp build wcm-rerun-update -p Brand=$BRAND -p Environment=$ENVIRO -p Ticket=$TICKET -p RunBy=$RUNBY
+
+eval jenkins-jnlp build wcm-clear-logs -p Brand=$BRAND -p Environment=$ENVIRO -p Ticket=$TICKET -p Days=0 -p RunBy=$RUNBY
+
+eval jenkins-jnlp build -s config-wcm-nonprd -p WCM_VERSION=$WCM_VERSION -p Env=$ENVIRO -p Ticket=$TICKET -p Brand=$BRAND -p RunBy=$RUNBY 
+
+#eval jenkins-jnlp build deploy-wcm-nonprd-any -p Brand=$BRAND -p Env=$ENVIRO -p Ticket=$TICKET -p RunBy=$RUNBY 
+

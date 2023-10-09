@@ -1,0 +1,9 @@
+#!/bin/bash
+# clean old versions of mead-tools
+
+FILES="adhoc-appsetting brand2site checkenv clear-jmx clear-jmx get-artifact-ids getbrand getdb getdb getdomain get-host get-host getpom getpom getschema getschema geturls geturls getversion jira-close jira-comment jira-create jira-delete mead-tools/get-env-list mead-tools/getenvlist propcopy propcopy propget propget propset propset set-debug set-debug set-error set-error set-info set-info setjmx setjmx set-trace set-trace set-warn set-warn site2brand update-apple-dev-cert update-content-paths custom-frontend-deployer deploy-pricing-stack checkenv-wrapper chksvc checkenv.tests jenkins-jnlp jmxclient.jar manage-automerge perf-env-config perf-env-deploy publish-npm-artifact update-dp-release-deployers SSLPoke.class"
+
+for file in $FILES
+do
+  sudo rm -f /apps/$(basename $file) $HOME/bin/$(basename $file)
+done

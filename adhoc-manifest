@@ -1,0 +1,277 @@
+#!/bin/bash
+# Script to make simple Manifest changes
+# called by https://ecombuild.wsgc.com/jenkins/job/adhoc-manifest/
+PATH=usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/release-tools:/apps/scm-tools
+TMP=/tmp/$(basename $0)-$LOGNAME
+ret=0
+
+BailOut() {
+  echo
+  [[ -n $1 ]] && echo ">>> $(hostname --short)/$(basename $0) - ERROR: $*" >&2
+  echo
+  deleteBranch
+  exit 255
+}
+
+Usage() {
+  echo "$(basename $0) -b [Brand] -e <Environment> -a <Application> -m <MFE spec> -t [Ticket]"
+}
+
+deleteBranch() {
+  [[ -z $MANIFEST_BRANCH ]] && return
+  cd $MANIFEST 
+  #echo "*** Manifest PR not needed ***"
+  hub reset -q --hard
+  hub checkout -q release
+  hub branch -q -D "$MANIFEST_BRANCH"
+  hub push mead -q -f -d "$MANIFEST_BRANCH"
+  cd /tmp
+  #[[ -n $MANIFEST ]] && rm -rf $MANIFEST
+}
+
+createBranch() {
+  [[ -n $TICKET ]] && MSG=$TICKET || MSG=$(basename $0)
+  [[ -n $BUILD_NUMBER ]] && LABEL=$BUILD_NUMBER || LABEL=$(date +'%y%m%d%H%M')
+  MANIFEST_BRANCH="${MSG}_${APP}_${ENVIRO}-$LABEL"
+  echo "*** Create manifest branch $MANIFEST_BRANCH ***"
+  hub checkout -q -b "$MANIFEST_BRANCH"
+  hub push -q -f --set-upstream mead "$MANIFEST_BRANCH" >/dev/null 2>&1
+}
+
+updateManifest() {
+  echo "*** $FUNCNAME $APP $(basename $ENV_YML) ***"
+
+  # capture the 'before'
+  B=$(yq eval "(.services.[] | select(has(\"name\")) | select(.name == \"$APP\")).helm_config_packaging[0].packaging.branch_only_config.app_branch" $ENV_YML 2>/dev/null)
+  [[ -z $B || $B =~ null ]] && B=$(yq eval "(.services.[] | select(has(\"name\")) | select(.name == \"$APP\")).helm_config_packaging[0].packaging.branch_only_config.app_version" $ENV_YML 2>/dev/null)
+
+  # edit the manifest env file
+  if [[ $VER =~ ^[0-9]+\.[0-9]+ ]]
+  then
+    echo "~~~ update app_version $VER ~~~"
+
+    # grab the tag to validate the version
+    tag=$(git ls-remote git@github.wsgc.com:eCommerce-Bedrock/${APP}.git refs/tags/$VER)
+    [[ -z $tag ]] && BailOut "No tag for $APP $VER found"
+
+    # use yq to delete the app branch and set app_version
+#set -x
+    yq eval "del(.services.$APP | select(has(\"name\")) | select(.name == \"$APP\")).helm_config_packaging[0].packaging.branch_only_config.app_branch" -i $ENV_YML
+    yq eval "(.services.$APP | select(has(\"name\")) | select(.name == \"$APP\")).helm_config_packaging[0].packaging.branch_only_config.app_version=\"$VER\"" -i $ENV_YML 
+    { ret=$? set +x; } 2>/dev/null
+
+    # get the 'after'
+    A=$(yq eval "(.services.$APP | select(has(\"name\")) | select(.name == \"$APP\")).helm_config_packaging[0].packaging.branch_only_config.app_version" $ENV_YML 2>/dev/null)
+  else
+    echo "~~~ update app_branch $ORG/$BCH ~~~"
+
+    # grab the branch to validate
+    bch=$(git ls-remote git@github.wsgc.com:${ORG}/${APP}.git refs/heads/$BCH)
+    [[ -z $bch ]] && BailOut "Branch $BCH not found for $ORG/$APP"
+
+    # use yq to delete the app_version and set app_branch
+#set -x
+    yq eval "del(.services.$APP | select(has(\"name\")) | select(.name == \"$APP\")).helm_config_packaging[0].packaging.branch_only_config.app_version" -i $ENV_YML
+    yq eval "(.services.$APP| select(has(\"name\")) | select(.name == \"$APP\")).helm_config_packaging[0].packaging.branch_only_config.app_branch=\"$ORG/$APP/$BCH\"" -i $ENV_YML
+    { ret=$? set +x; } 2>/dev/null
+
+    # get the 'after'
+    A=$(yq eval "(.services.$APP | select(has(\"name\")) | select(.name == \"$APP\")).helm_config_packaging[0].packaging.branch_only_config.app_branch" $ENV_YML 2>/dev/null)
+  fi
+
+  # check the return code from the yq edit
+  [[ $ret -ne 0 && $ret -ne 130 ]] && BailOut "Manifest update for $APP failed [$ret]"
+
+  # this little ditty is to allow us to compare A and B case-insensitive-ly
+  orig_nocasematch=$(shopt -p nocasematch; true)
+  shopt -s nocasematch
+
+  # we only bother committing if there's an actual change
+  if [[ "$A" != "$B" ]]
+  then 
+    createBranch
+    MANIFEST_PR=true
+    # commit our changes
+#set -x
+    hub status -bs
+    hub diff --no-color -w | egrep "^-|^\+" 
+    hub add $ENV_YML
+    hub commit -q --author=$RUNBY -m "[$MSG] update $ENVIRO manifest $APP ($RUNBY)" $ENV_YML
+{ set +x; } 2>/dev/null
+  else
+    echo "*** Manifest PR not needed ***"
+    [[ $DEBUG = "true" ]] && hub status -bs
+    [[ $DEBUG = "true" ]] && hub diff --no-color -w | egrep "^-|^\+" 
+  fi
+
+  # reset casematch
+  $orig_nocasematch
+}
+
+[[ $# -eq 0 ]] && Usage
+
+# parse options
+while getopts "a:b:e:t:m:r:h" opt 
+do
+    case ${opt} in
+      a ) APP=$(echo $OPTARG | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]');;
+      b ) BRAND=$(echo $OPTARG | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]');;
+      e ) ENVIRO=$(echo $OPTARG | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]');;
+      m ) APP_SPEC=$(echo $OPTARG | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]');;
+      t ) TICKET=$(echo $OPTARG | tr '[:lower:]' '[:upper:]' | sed -es/','/' '/g);;
+      r ) RUNBY=$(echo $OPTARG | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | awk -F@ '{ print $1 }');;
+      h ) Usage; exit 0;;
+    esac
+done
+
+for util in jq yq hub xmlstarlet
+do
+  which $util >/dev/null 2>&1 || BailOut "Need to install $util"
+done
+
+[[ -z $APP ]] && BailOut "Need application"
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+[[ -z $APP_SPEC ]] && BailOut "Need MFE spec"
+mkdir -p $TMP
+
+#[[ -n $RUNBY ]] && echo "$(basename $0)-$RUNBY: $RUNBY"
+
+[[ $APP = "ecom-app-checkout" ]] && { echo "$APP not yet supported"; exit 0; }
+
+export GITHUB_TOKEN=$(grep "ciuser_org_owner_token" $HOME/.credentials | awk '{ print $NF }')
+[[ -z $GITHUB_TOKEN ]] && BailOut "Can't get GHE Token"
+
+#echo "*** pre-clean filesystem ***"
+/apps/mead-tools/clean-jenkins
+
+#echo "*** Clone manifest repo ***"
+MANIFEST_PR=
+MANIFEST=$TMP/$ENVIRO
+rm -rf $MANIFEST
+
+hub clone -q git@github.wsgc.com:eCommerce-Mead/env-manifest.git $MANIFEST
+cd $MANIFEST || BailOut "Can't cd to $MANIFEST"
+hub remote remove origin
+hub remote add mead git@github.wsgc.com:eCommerce-Mead/env-manifest.git
+hub remote add devops git@github.wsgc.com:eCommerce-DevOps/env-manifest.git
+hub fetch -q --all --prune >/dev/null 2>&1
+hub checkout -q release
+#set -x
+hub merge -q --no-edit --commit -m "[Ad-Hoc]" devops/release
+hub rebase -q devops/release
+#hub pull -q --rebase --autostash git@github.wsgc.com:eCommerce-DevOps/env-manifest.git
+hub push -q -f --set-upstream git@github.wsgc.com:eCommerce-Mead/env-manifest.git release >/dev/null 2>&1
+{ set +x; } 2>/dev/null
+
+# constants for various manifest yaml files
+#SVC_YML=$MANIFEST/manifest/services-manifest.yaml
+#[[ -e $SVC_YML ]] || BailOut "Can't find Manifest $SVC_YML"
+
+#SHR_YML=$MANIFEST/manifest/shared-registry.yaml
+#[[ -e $SHR_YML ]] || BailOut "Can't find Manifest $SHR_YML"
+
+ENV_YML=$MANIFEST/manifest/$ENVIRO/$ENVIRO-services-manifest.yaml
+[[ -e $ENV_YML ]] || BailOut "Can't find Manifest $ENV_YML"
+
+# extract the app name/org/branch
+APP_SPEC=$(sed -es%/$APP%%g <<< $APP_SPEC)
+ORG=$(awk -F/ '{ print $1 }' <<< $APP_SPEC)
+BCH=$(awk -F/ '{ print $2 }' <<< $APP_SPEC)
+
+# if they've passed in a static version instead of an org/branch
+if [[ $ORG =~ ^[0-9]+\.[0-9]+ ]]
+then
+  VER=$ORG
+  ORG=
+  BCH=
+else
+  VER=
+  [[ -z $BCH ]] && BailOut "Why is BCH empty?"
+  [[ -z $ORG ]] && BailOut "Why is ORG empty?"
+  [[ $ORG =~ ecommerce-bedrock ]] && ORG=eCommerce-Bedrock
+  ORG=$(sed -es/ecommerce/eCommerce/gi <<< $ORG)
+fi
+
+# figure out if the service is shared
+# set -x
+#SHARED=$(yq eval "(.services.$APP | select(has(\"name\")) | select(.name == \"$APP\")).shared" $ENV_YML | tr '[:upper:]' '[:lower:]' | grep -iv null)
+SHARED=$(get-manifest -e $ENVIRO -s $APP -k shared)
+#{ set +x; } 2>/dev/null
+if [[ $SHARED != false ]]
+then
+  echo "###
+### Config for $ENVIRO $APP is shared with other environments - cannot update Manifest [$SHARED]
+###"
+  deleteBranch
+  exit 128
+fi
+
+##set -x
+#SHARED_ENV=$(yq eval "(.services.$APP | select(has(\"name\")) | select(.name == \"$APP\")).configuration.shared" $ENV_YML | tr '[:upper:]' '[:lower:]' | grep -iv null)
+#{ set +x; } 2>/dev/null
+#if [[ -n $SHARED_ENV && $SHARED != true ]]
+#then
+#  e=$(awk -F- '{ print $1 }' <<< $SHARED_ENV)
+#  echo "###
+#### Config for $ENVIRO $APP is derived from shared \"$e\" manifest - please update $e instead
+####"
+#  deleteBranch
+#  exit 128
+#fi
+
+#[[ -z $SHARED ]] && SHARED=$(yq eval "(.services.[] | select(has(\"name\")) | select(.name == \"$APP\")).type" $ENV_YML | tr '[:upper:]' '[:lower:]' | grep -iv null)
+#[[ -n $SHARED ]] && echo "*** $APP shared: $SHARED ***"
+
+updateManifest
+
+if [[ -n $MANIFEST_PR ]]
+then
+  cd $MANIFEST 
+  echo "*** Submit Manifest PR ***"
+#set -x
+  hub push -q -f
+  hub rebase -q devops/release >/dev/null 2>&1
+  MANIFEST_PR=$(hub pull-request -b eCommerce-DevOps:release -h "eCommerce-Mead:$MANIFEST_BRANCH" -m "[$MSG] Update $APP $ENVIRO ($RUNBY)")
+  PR_NUM=$(echo "$MANIFEST_PR" | grep "https:" | awk -F/ '{ print $NF }')
+  PR_BUILD="https://ecombuild.wsgc.com/jenkins/job/eCommerce-DevOps/job/env-manifest/job/PR-$PR_NUM"
+  echo "/// PR:     $MANIFEST_PR"
+  echo "/// Build:  $PR_BUILD"
+  cd /tmp
+
+  unbuffer /bin/echo -ne "Waiting for build result"
+  for try in {1..30}
+  do
+    unbuffer /bin/echo -ne "."
+    sleep 15 || true
+    result=$(curl -fsk -H 'Cache-Control: no-cache' $PR_BUILD/lastBuild/api/json?tree=result | jq -rMS .result)
+    [[ $result != "null" ]] && break
+  done
+  unbuffer echo " $result"
+  [[ $result =~ FAIL ]] && ret=255 || ret=0
+  [[ -n $TICKET ]] && jira-comment $TICKET "${ICON_INFO}$MANIFEST_PR $PR_BUILD [$result]"
+  #rm -rf $MANIFEST
+
+  if [[ $SHARED = "true" ]]
+  then
+set -x
+    echo "
+PR: $MANIFEST_PR
+Build ($result): $PR_BUILD 
+" | mailx -s "$(basename $0): PR approval for $APP $ENVIRO needed" $RUNBY@wsgc.com 
+{ set +x; } 2>/dev/null
+
+    echo "
+***
+*** This service is shared by other environments; please get a manager to approve this PR
+***
+"
+  fi
+
+else
+  deleteBranch
+fi
+
+# run manifest job
+[[ $ret -eq 0 ]] && echo jenkins-jnlp build -s trigger-ManifestDeployer -p ENV_NAME=${ENVIRO} -p TERRAFORM_TARGET_MODULE=ecom-app-$APP -p DRY_RUN_FLAG=false
+
+exit $ret

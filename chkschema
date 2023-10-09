@@ -1,0 +1,412 @@
+#!/bin/bash
+# TODO: get-manifest-property -e perf -s ecom-svc-order-servicing -p '"configuration"."applicationProperties"."catalogservice.serviceUrl"'
+# TODO: https://github.wsgc.com/eCommerce-Mead/ecom-svc-content-helm-config/pull/1 
+
+PATH=/apps/mead-tools:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin:$PATH
+ERROR=
+CAVEAT="// this may not be an issue, but deserves a closer look"
+CONCERN="// this is a significant problem"
+
+CATALOG=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-svc-catalog-helm-config.git
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_INFO=" (i) "
+ICON_WARN=" (!) "
+
+BailOut() {
+	[[ -n $1 ]] && echo "$*" >&2
+  exit
+  rm -f $MSG
+	exit 1
+}
+
+Usage() {
+	echo "Usage: $(basename $0) <brand> <env> [ticket]" >&2
+	exit 0
+}
+
+[[ $# -lt 2 ]] && Usage
+
+BRAND=$1
+ENVIRO=$2
+TICKET=$3
+MSG=/tmp/$(basename $0)-$BRAND-$ENVIRO-$LOGNAME.msg
+rm -f $MSG
+
+# this little ditty is to allow us to compare A and B case-insensitive-ly
+orig_nocasematch=$(shopt -p nocasematch; true)
+shopt -s nocasematch
+
+INSTALLATION=$(get-installation $BRAND $ENVIRO)
+SITE=$(brand2site $BRAND $ENVIRO)
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+POM=$FRONTEND/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+P_POM=$FRONTEND/qa/config/app/trunk/$BRAND/pom.xml
+
+# market
+MARKET=$(get-market $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+MARKET_UC=$(tr '[:lower:]' '[:upper:]' <<< $MARKET)
+MARKET_CFG=$MARKET
+[[ $MARKET_CFG =~ us ]] && MARKET_CFG=
+
+# DP summary and feedgen
+USER_AGENT="--user-agent $(basename $0)"
+DP_TIMEOUT="--connect-timeout 20 --max-time 120"
+DP_LOGIN="ptqaenv:ta8PoLe"
+DP_HOST=$(get-host $BRAND $ENVIRO 2>/dev/null | awk -F\. '{ print $1 }')
+DP_SUMMARY=https://$DP_HOST.wsgc.com/admin/summary.html
+
+OVR=$(get-override-url $BRAND $ENVIRO)
+DOMAIN_KEY=$(svn  --non-interactive cat $OVR | grep "DOMAIN_PUBLISHER_CLIENT.DOMAIN_PUBLISHER_OVERRIDE_KEY.$ENVIRO" | awk -F= '{ print $2 }')
+[[ -z $DOMAIN_KEY ]] && DOMAIN_KEY=$(curl $USER_AGENT $DP_TIMEOUT -fsqk --user $DP_LOGIN $DP_SUMMARY | grep -i "DOMAIN_KEY" | awk -F '[<>]' '{ print $9 }')
+[[ $DOMAIN_KEY =~ uat ]] && FEEDGEN=git@github.wsgc.com:eCommerce-DevOps/oss-feedgen-service-uat-config.git
+[[ $DOMAIN_KEY =~ qa && $MARKET_CFG =~ can ]] && FEEDGEN=git@github.wsgc.com:eCommerce-DevOps/oss-feedgen-service-ca-qa-config.git
+[[ $DOMAIN_KEY =~ qa && -z $MARKET_CFG ]] && FEEDGEN=git@github.wsgc.com:eCommerce-DevOps/oss-feedgen-service-qa1-config.git
+if [[ -n $FEEDGEN ]]
+then
+  FG_SRC=$(awk -F/ '{ print $NF }' <<< $FEEDGEN | sed -es/\.git//g)
+  FTMP=$(mktemp -d -t tmp.$(basename $0).XXX )
+  git clone -q --depth 1 $FEEDGEN $FTMP
+  FEED_PROP=$FTMP/src/main/resources/standalone-feedgen/$SITE-config.properties
+  [[ -e $FEED_PROP ]] && FG_CIB=$(grep feed_generator.catalog_image_url_base $FEED_PROP | egrep -iv "#" | awk '{ print $NF }')
+  FG_CIB=$(sed -es%/qa/%/qark/%g <<< $FG_CIB)
+  cd /tmp
+  rm -rf $FTMP
+fi
+
+# content service
+cnt_svc=$(get-manifest -k pkg_branch -e $ENVIRO -s ecom-svc-content)
+cnt_svc_org=$(awk -F/ '{ print $1 }' <<< $cnt_svc)
+cnt_svc_bch=$(awk -F/ '{ print $3 }' <<< $cnt_svc)
+cnt_svc_env=$(get-manifest -k env -e $ENVIRO -s ecom-svc-content)
+if [[ -n $cnt_svc_org && -n $cnt_svc_bch ]]
+then
+  TMP=$(mktemp -d -t tmp.$(basename $0).XXX )
+  git clone -q --depth 1 -b $cnt_svc_bch git@github.wsgc.com:$cnt_svc_org/ecom-svc-content-helm-config.git $TMP
+  VALUES=$TMP/config/$cnt_svc_env/values.yaml
+  if [[ -e $VALUES ]]
+  then
+    o=$(yq eval ".applicationConfigYaml.market.markets.[] | select(has(\"marketCode\")) | select(.marketCode == \"$MARKET_UC\").datasourceTableOwner" $VALUES)
+    u=$(yq eval ".applicationConfigYaml.market.markets.[] | select(has(\"marketCode\")) | select(.marketCode == \"$MARKET_UC\").datasourceUrl" $VALUES | awk -F/ '{ print $NF }')
+    [[ -n $o && -n $u ]] && SCHEMA_CONTENT_SVC="$o:$u"
+    CONTENT_SVC_INST=$(yq eval ".applicationConfigYaml.app.\"data.installation\"" $VALUES | egrep -vi "null")
+  else
+    echo "Can't find ecom-svc-content $VALUES" >&2
+  fi
+  cd /tmp
+  rm -rf $TMP
+fi
+
+DOMAIN=$(get-domain $BRAND $ENVIRO)
+ECM=$(get-ecm-env $BRAND $ENVIRO)
+ECM_COUNT=$(echo "$ECM" | wc -l)
+BGB=$(get-bgb-host $BRAND $ENVIRO | awk -F\. '{ print $1 }')
+BGB_STAGE=$(get-bgb-stage $BRAND $ENVIRO)
+BGB_INST=$(get-bgb-installation $BRAND $ENVIRO)
+
+SCHEMA_DP=$(get-dp-schema $BRAND $ENVIRO | sed 's/^[ \t]*//;s/[ \t]*$//') 
+
+SCHEMA_CMX=$(get-cmx-schema $BRAND $ENVIRO | sort -u | sed 's/^[ \t]*//;s/[ \t]*$//')
+[[ -z $SCHEMA_CMX ]] && SCHEMA_CMX="<none>"
+
+SERVER_ECM=$(get-ecm-server $BRAND $ENVIRO | sort -u | tr '\n' ' ' | sed 's/^[ \t]*//;s/[ \t]*$//')
+[[ -z $SERVER_ECM ]] && SERVER_ECM="<none>"
+
+SCHEMA_ECM=$(get-ecm-schema $BRAND $ENVIRO | sort -u | tr '\n' ' ' | sed 's/^[ \t]*//;s/[ \t]*$//')
+[[ -z $SCHEMA_ECM ]] && SCHEMA_ECM="<none>"
+
+SCHEMA_BGB=$(get-bgb-schema $BRAND $ENVIRO | tr '\n' ' ' | sed 's/^[ \t]*//;s/[ \t]*$//')
+[[ -z $SCHEMA_BGB ]] && SCHEMA_BGB="<none>"
+
+SCHEMA_SVC=$(get-bgb-service $BRAND $ENVIRO | tr '\n' ' ' | sed 's/^[ \t]*//;s/[ \t]*$//')
+[[ -z $SCHEMA_SVC ]] && SCHEMA_SVC="<none>"
+
+CMX=$(svn  --non-interactive cat $POM | grep "<frontend.cmx>" | awk -F '[<>]' '{ print $3 }' | sort -u)
+[[ -z $CMX ]] && CMX=$(svn --non-interactive cat $P_POM | grep "<frontend.cmx>" | awk -F '[<>]' '{ print $3 }')
+
+WCM=$(svn  --non-interactive cat $POM | grep "<frontend.wcm>" | awk -F '[<>]' '{ print $3 }' | sort -u)
+[[ -z $WCM ]] && WCM=$(svn --non-interactive cat $P_POM | grep "<frontend.wcm>" | awk -F '[<>]' '{ print $3 }')
+
+ADG=$(get-adg-branch $BRAND $ENVIRO)
+EIU=$(get-adg-info $BRAND $ENVIRO ecmImagesUrl)
+EIU=$(sed -es%[a-z][a-z]-images/%%gi <<< $EIU)
+EIU=$(sed -es%qark-images.[a-z][a-z]imgs.com/%%gi <<< $EIU)
+EIU=$(sed -es%/qa/%/qark/%g <<< $EIU)
+[[ -z $EIU ]] && dEIU="<none>" || dEIU=$EIU
+
+IAU=$(get-adg-info $BRAND $ENVIRO imagesAssetUri)
+IAU=$(sed -es/'${frontend.brand}'/$BRAND/g <<< $IAU)
+IAU=$(sed -es/'${frontend.cmx}'/$CMX/g <<< $IAU)
+IAU=$(sed -es/'${frontend.wcm}'/$WCM/g <<< $IAU)
+IAU=$(sed -es%[a-z][a-z]-images/%%gi <<< $IAU)
+IAU=$(sed -es%qark-images.[a-z][a-z]imgs.com/%%gi <<< $IAU)
+IAU=$(sed -es%/qa/%/qark/%g <<< $IAU)
+[[ -z $IAU ]] && dIAU="<none>" || dIAU=$IAU
+
+cntIB=$(svn  --non-interactive cat $POM | grep "<frontend.secureContentImageBase>" | awk -F '[<>]' '{ print $3 }')
+cntIB=$(sed -es/'${frontend.brand}'/$BRAND/g <<< $cntIB)
+cntIB=$(sed -es%/qa/%/qark/%g <<< $cntIB)
+cntIB=$(sed -es%/qa/%/qark/%g <<< $cntIB)
+
+docIB=$(svn  --non-interactive cat $POM | grep "<frontend.secureDocImageBase>" | awk -F '[<>]' '{ print $3 }')
+docIB=$(sed -es/'${frontend.brand}'/$BRAND/g <<< $docIB)
+docIB=$(sed -es/'${frontend.cmx}'/$CMX/g <<< $docIB)
+docIB=$(sed -es/'${frontend.wcm}'/$WCM/g <<< $docIB)
+docIB=$(sed -es/'${frontend.domain}'/$DOMAIN/g <<< $docIB)
+docIB=$(sed -es%/qa/%/qark/%g <<< $docIB)
+
+catIB=$(svn  --non-interactive cat $POM | grep "<frontend.secureCatImageBase>" | awk -F '[<>]' '{ print $3 }')
+catIB=$(sed -es/'${frontend.brand}'/$BRAND/g <<< $catIB)
+catIB=$(sed -es/'${frontend.cmx}'/$CMX/g <<< $catIB)
+catIB=$(sed -es/'${frontend.wcm}'/$WCM/g <<< $catIB)
+catIB=$(sed -es/'${frontend.domain}'/$DOMAIN/g <<< $catIB)
+catIB=$(sed -es%/qa/%/qark/%g <<< $catIB)
+
+# catalog
+CATALOG_ACT=$(get-catalog-gen-act $BRAND $ENVIRO)
+CATALOG_CUR=$(get-catalog-gen-cur $BRAND $ENVIRO)
+SCHEMA_CAT=$(get-catalog-schema $BRAND $ENVIRO)
+CATALOG_ENV=$(get-catalog-env $BRAND $ENVIRO)
+CATALOG_URL=$(get-catalog-url $BRAND $ENVIRO)
+CATALOG_INST=$(get-catalog-installation $BRAND $ENVIRO)
+CATALOG_DP=$(get-dp-generations $BRAND $ENVIRO CAT)
+
+# trying to parse this stuff out of the manifest is a hot mess
+#C_ENV=$(get-manifest -e $ENVIRO -s ecom-svc-order-servicing -k env)
+#CATALOG_ENV=$(get-manifest -e $ENVIRO -s ecom-svc-order-servicing -p '"configuration"."applicationProperties"."catalogservice.serviceUrl"')
+#CATALOG_URL=$(sed -es/%s/$BRAND/g <<< $CATALOG_ENV)
+#CATALOG_URL=$(awk -F/ '{ print $3 }' <<< $CATALOG_URL)
+
+# grab the WCM generation from DP
+DP_GEN=$(get-wcm-generation $BRAND $ENVIRO 2>/dev/null)
+
+# grab some info from Akamai
+AKAMAI=$(get-akamai $BRAND $ENVIRO 2>/dev/null)
+AKAMAI_Q="curl $USER_AGENT $DP_TIMEOUT -fsqk --user $DP_LOGIN $AKAMAI/admin/summary.html"
+DEPLOYED_INST=$($AKAMAI_Q | grep -i "Installation" | awk -F '[<>]' '{ print $13 }') # | awk -F= '{ print $2 }' | tr -d "'")
+
+# output section
+
+if [[ $INSTALLATION = "$ENVIRO" ]]
+then
+  echo "Environment:        $BRAND $ENVIRO $SITE $MARKET" >> $MSG
+else
+  echo "Environment:        $BRAND $ENVIRO ($INSTALLATION) $SITE $MARKET" >> $MSG
+fi
+
+echo "
+--- Schemas ---
+DP schema:              $SCHEMA_DP [Frontend $ENVIRO/pom.xml]
+CMX schema:             $SCHEMA_CMX [Deployment properties $ENVIRO/$BRAND$MARKET_CFG.properties]
+BGB server:             $BGB [Deployment properties $ENVIRO/$BRAND$MARKET_CFG.properties]
+BGB schema:             $SCHEMA_BGB [BGB dp${INSTALLATION}]
+BGB serviceId:          $SCHEMA_SVC [BGB environmentConfig.xml]
+BGB stage:              $BGB_STAGE [Deployment properties $ENVIRO/$BRAND$MARKET_CFG.properties]
+BGB installation:       $BGB_INST [Deployment properties $ENVIRO/$BRAND$MARKET_CFG.properties]
+ECM server:             $SERVER_ECM [ECM Agent ecm-pubagent-config.json] " >> $MSG
+
+[[ $SCHEMA_ECM != "<none>" ]] && echo "ECM schema:             $SCHEMA_ECM [ECM Agent ecm-pubagent-config.json]" >> $MSG
+
+echo "
+--- Catalog Service ---" >> $MSG
+[[ -n $DP_GEN ]] && echo "DP CAT generation:      $DP_GEN" >> $MSG
+[[ -n $CATALOG_ACT ]] && echo "Catalog active gen:     $CATALOG_ACT" >> $MSG
+[[ -n $CATALOG_ACT ]] && echo "Catalog current gen:    $CATALOG_CUR" >> $MSG
+[[ -n $CATALOG_ENV ]] && echo "Catalog svc:            $CATALOG_ENV" >> $MSG
+#[[ -n $CATALOG_URL ]] && echo "Catalog URL:            $CATALOG_URL" >> $MSG
+[[ -n $CATALOG_GEN ]] && echo "Catalog svc CAT gen:    $CATALOG_GEN" >> $MSG
+[[ -z $CATALOG_ENV ]] && echo "Catalog svc:            <undefined>" >> $MSG
+[[ -n $SCHEMA_CAT ]] && echo "Catalog svc schema:     $SCHEMA_CAT [ecom-svc-catalog-helm-config/$CATALOG_ENV]" >> $MSG
+[[ -z $SCHEMA_CAT ]] && echo "Catalog svc schema:     <none>" >> $MSG
+[[ -n $CATALOG_INST ]] && echo "Catalog svc inst.:      $CATALOG_INST" >> $MSG
+
+echo "
+--- Content Service ---" >> $MSG
+[[ -n $cnt_svc_env ]] &&        echo "Content svc:            $cnt_svc_env" >> $MSG
+[[ -n $SCHEMA_CONTENT_SVC ]] && echo "Content svc schema:     $SCHEMA_CONTENT_SVC [$cnt_svc_org/ecom-svc-content-helm-config/$cnt_svc_bch]" >> $MSG
+[[ -z $SCHEMA_CONTENT_SVC ]] && echo "Content svc schema:     <none>" >> $MSG
+#[[ -n $DOMAIN_KEY ]] && echo "FeedGen DomainKey:      $DOMAIN_KEY" >> $MSG
+
+#[[ -n $DOMAIN_KEY ]] && echo "Domain key:         $DOMAIN_KEY" >> $MSG
+
+echo "
+--- Content Paths ---" >> $MSG
+[[ -n $WCM ]] && echo "WCM path:             $WCM [Frontend $ENVIRO/pom.xml]" >> $MSG
+echo "CMX path:             $CMX [Frontend $ENVIRO/pom.xml]
+DocImageBase:         $docIB [Frontend $ENVIRO/pom.xml]
+CatImageBase:         $catIB [Frontend $ENVIRO/pom.xml]
+ContentImageBase:     $cntIB [Frontend $ENVIRO/pom.xml]
+imagesAssetUri:       $dIAU [ADG $ADG]
+ecmImagesUrl:         $dEIU [ADG $ADG]" >> $MSG
+
+[[ -n $FG_CIB ]] && echo "FeedGen CatImageBase: $FG_CIB [$FG_SRC $(basename $FEED_PROP)]" >> $MSG
+[[ ! -e $FEED_PROP ]] || echo "FeedGen CatImageBase: <none> [missing $FG_SRC $(basename $FEED_PROP)]" >> $MSG
+
+#ECM environment:  $(echo $ECM  | tr '\n' ' ' | sed 's/^[ \t]*//;s/[ \t]*$//')  [ECM Agent ecm-pubagent-config.json]
+
+# now we look for possible issues
+
+[[ -z $SERVER_ECM || $SERVER_ECM =~ none ]] && ERROR="* Not configured in an ECM environment - this could cause erratic ECM generation behavior
+$ERROR"
+
+[[ $BGB_INST != "$INSTALLATION" ]] && ERROR="* BGB 'installation' [$BGB_INST] does not match DP [$INSTALLATION]
+$ERROR"
+
+if [[ -n $SCHEMA_CONTENT_SVC ]]
+then
+  [[ $SCHEMA_CONTENT_SVC != "$SCHEMA_ECM" ]] && ERROR="* ecom-svc-content schema [$SCHEMA_CONTENT_SVC] does not match ECM schema [$SCHEMA_ECM] $CAVEAT
+$ERROR"
+
+  [[ $CONTENT_SVC_INST != "$INSTALLATION" ]] && ERROR="* ecom-svc-content 'installation' [$CONTENT_SVC_INST] does not match DP [$INSTALLATION] $CAVEAT
+$ERROR"
+else
+  ERROR="* Did not find a content svc config
+$ERROR"
+fi
+
+[[ $SCHEMA_DP != "$SCHEMA_CMX" ]] && ERROR="* CMX schema [$SCHEMA_CMX] does not match DP schema [$SCHEMA_DP]
+$ERROR"
+
+[[ $SCHEMA_DP != "$SCHEMA_BGB" ]] && ERROR="* BGB schema [$SCHEMA_BGB] does not match DP schema [$SCHEMA_DP]
+$ERROR"
+
+[[ $SCHEMA_CMX != "$SCHEMA_BGB" ]] && ERROR="* BGB schema [$SCHEMA_BGB] does not match CMX schema [$SCHEMA_CMX]
+$ERROR"
+
+[[ $SCHEMA_SVC != "$SCHEMA_BGB" ]] && ERROR="* BGB schema [$SCHEMA_BGB] does not match BGB service schema [$SCHEMA_SVC]
+$ERROR"
+
+[[ $SCHEMA_ECM != '<none>' && $SCHEMA_DP != "$SCHEMA_ECM" ]] && ERROR="* ECM schema [$SCHEMA_ECM] does not match DP schema [$SCHEMA_DP]
+$ERROR"
+
+
+#if [[ $MARKET =~ can ]]
+#then
+#  [[ $CMX =~ cauat || $CMX =~ cabpv ]] && ERROR="* <frontend.cmx> is probably incorrect ($CMX)
+#$ERROR"
+#fi
+
+if [[ $MARKET =~ us ]]
+then 
+  [[ $CMX =~ cargs ]] && ERROR="* <frontend.cmx> is probably incorrect ($CMX)
+$ERROR"
+fi
+
+# grab the recommend docimagebase and remove the brand-imgs portion
+DOC_IMAGE=$(get-cmx-path $BRAND $ENVIRO 2>/dev/null)
+DOC_IMAGE=$(sed -es/${BRAND}-images//g -es/${BRAND}mgs//g -es%/qa/%/qark/%g <<< $DOC_IMAGE)
+if [[ -n $DOC_IMAGE ]]
+then 
+  [[ $docIB =~ $DOC_IMAGE ]] || ERROR="* docImageBase should contain: $DOC_IMAGE [actual: $docIB]
+$ERROR"
+
+  RIB=$(svn  --non-interactive cat $POM | grep "<frontend.secureRemoteProxyImageBase>" | awk -F '[<>]' '{ print $3 }')
+  RIB=$(sed -es/'${frontend.brand}'/$BRAND/g <<< $RIB)
+  RIB=$(sed -es/'${frontend.cmx}'/$CMX/g <<< $RIB)
+  RIB=$(sed -es%/qa/%/qark/%g <<< $RIB)
+  [[ $RIB =~ $DOC_IMAGE ]] || ERROR="* remoteProxyImageBase should contain: $DOC_IMAGE [actual: $RIB]
+$ERROR"
+
+  SSP=$(svn  --non-interactive cat $POM | grep "<frontend.scriptSubPath>" | awk -F '[<>]' '{ print $3 }')
+  SSP=$(sed -es/'${frontend.brand}'/$BRAND/g <<< $SSP)
+  SSP=$(sed -es/'${frontend.cmx}'/$CMX/g <<< $SSP)
+  SSP=$(sed -es%/qa/%/qark/%g <<< $SSP)
+  [[ $SSP =~ $DOC_IMAGE ]] || ERROR="* scriptSubPath should contain: $DOC_IMAGE [actual: $SSP]
+$ERROR"
+else
+  ERROR="+ Can't validate docImageBase
+$ERROR"
+fi
+
+CONTENT_IMAGE=$(get-ecm-path $BRAND $ENVIRO | xargs -n1 | sort -u | tr '\n' ' ')
+if [[ -n $CONTENT_IMAGE ]]
+then 
+  CONTENT_IMAGE=$(sed -es/${BRAND}-images//g -es/${BRAND}mgs//g -es%/qa/%/qark/%g <<< $CONTENT_IMAGE)
+
+  [[ $cntIB =~ $CONTENT_IMAGE ]] || ERROR="* ContentImageBase should contain: $CONTENT_IMAGE [actual: $cntIB]
+$ERROR"
+
+# TODO: double-check how this is used
+#  [[ $EIU =~ $CONTENT_IMAGE ]] || ERROR="* ecmImagesUrl should contain: $CONTENT_IMAGE [actual: $dEIU]
+#$ERROR"
+else
+  ERROR="+ Can't validate contentImageBase
+$ERROR"
+fi
+
+if [[ -n catIB ]]
+then
+  [[ $catIB =~ $IAU ]] || ERROR="* imagesAssetUri should contain: $IAU [actual: $(cut -d/ -f4- <<< $catIB)]
+$ERROR"
+fi
+
+[[ $ECM_COUNT -gt 1 ]] && ERROR="* Multiple ECM Agent environments [$(echo $ECM | tr '\n' ' ' | sed 's/^[ \t]*//;s/[ \t]*$//')]
+$ERROR"
+
+[[ -n $FG_CIB && $FG_CIB != "$catIB" ]] && ERROR="* FeedGen catImageBase ($(cut -d/ -f4- <<< $FG_CIB)) does not match DP catImageBase ($(cut -d/ -f4- <<< $catIB))
+$ERROR"
+
+if [[ -n $SCHEMA_CAT ]]
+then
+  #SCHEMA_DP_DB=$(awk -F: '{ print $1 }' <<< $SCHEMA_DP)
+  [[ $SCHEMA_CAT != "$SCHEMA_DP" ]] && ERROR="* Catalog schema [$SCHEMA_CAT] does not match DP [$SCHEMA_DP] schema $CAVEAT
+$ERROR"
+else
+  ERROR="* Did not find a catalog instance 
+$ERROR"
+fi
+
+if [[ -n $CATALOG_ACT || -n $CATALOG_CUR || -n $CATALOG_DP ]]
+then
+  [[ -n $CATALOG_ACT && -n $CATALOG_CUR && $CATALOG_ACT != "$CATALOG_CUR" ]] && ERROR="* Catalog 'active' generation ($CATALOG_ACT) does not match 'current' generation ($CATALOG_CUR)
+$ERROR"
+  [[ -n $CATALOG_ACT && -n $CATALOG_DP && $CATALOG_ACT != "$CATALOG_DP" ]] && ERROR="* Catalog 'active' generation ($CATALOG_ACT) does not match DP CAT generation ($CATALOG_DP)
+$ERROR"
+[[ -n $CATALOG_CUR && -n $CATALOG_DP && $CATALOG_CUR != "$CATALOG_DP" ]] && ERROR="* Catalog 'current' generation ($CATALOG_CUR) does not match DP CAT generation ($CATALOG_DP)
+$ERROR"
+fi
+
+# putting this one last so it ends up first in the output
+DP_INSTALLATION=$INSTALLATION
+[[ $DP_INSTALLATION = "rgs1" ]] && DP_INSTALLATION="regression"
+[[ $DP_INSTALLATION = "uat1" ]] && DP_INSTALLATION="uat"
+if [[ $DP_INSTALLATION != "$ENVIRO" ]]
+then
+  ERROR="* DP Installation [$DP_INSTALLATION] does not match environment name [$ENVIRO] $CONCERN
+$ERROR"
+fi
+
+if [[ -n $DEPLOYED_INST && $DEPLOYED_INST != "$DP_INSTALLATION" ]]
+then
+  ERROR="* DP Installation [$DP_INSTALLATION] does not match Deployed Installation [$DEPLOYED_INST] $CONCERN
+$ERROR"
+fi
+
+# report on any issues found
+if [[ -n $ERROR ]]
+then 
+  echo "
+--- Possible issues ---
+$ERROR" >> $MSG
+
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "$ICON_WARN $(basename $0) $BRAND $ENVIRO
+$(cat $MSG)"
+
+  cat $MSG
+
+  BailOut 
+else
+  echo "
+Schema configurations look OK" >> $MSG
+
+  cat $MSG
+  echo
+
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "$ICON_INFO $(basename $0) $BRAND $ENVIRO
+$(cat $MSG)"
+
+  rm -f $MSG 
+fi
+
+exit 0

@@ -1,0 +1,65 @@
+#!/bin/bash
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:~/bin
+PROPS=/apps/mead-tools/jenkins-job-properties.txt
+[[ -z $RUNBY ]] && RUNBY=$(sed -es/a_//gi <<< $LOGNAME)
+
+BailOut() {
+  echo "$(basename $0): $*"  >&2
+  exit 255
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  [[ -n $TMP ]] && rm -rf $TMP
+}
+trap cleanUp EXIT
+
+ENVIRO=$1
+
+[[ -e $PROPS ]] || BailOut "Can't find properties file ($PROPS)"
+
+[[ -z $ENVIRO ]] && BailOut "Need target"
+
+FRONTEND=https://repos.wsgc.com/svn/devops/application/frontend-2.1/prd/config/app/trunk
+
+# this works on the assumption that the 3rd index is the release that prod is running
+# what I really need to do is parse the frontend pom and infer the release name from that
+RELEASE=$(grep "shortcuts=" $PROPS | awk -F, '{ print $3 }')
+echo "Release: $RELEASE" 
+
+TEAM=$(get-env-team $ENVIRO)
+echo "Team: $TEAM"
+
+jenkins-jnlp build -f jenkins-update-frontend-deploy \
+  -p ENV=$ENVIRO \
+  -p NEW_SHORTCUT_NAME=$RELEASE \
+  -p AFFINITY_TEAM=$TEAM \
+  -p Deploy=false 
+
+for b in $(get-brand-list $ENVIRO)
+do
+  jenkins-jnlp build checkenv \
+    -p Brand=$b \
+    -p Environment=$ENVIRO \
+    -p Options=Rebuild-Config \
+    -p Options=Deploy-War \
+    -p Options=Deploy-Content \
+    -p Options=Force-Content \
+    -p Options=Clear-Logs \
+    -p RunBy=$LOGNAME 
+done
+
+#  -p RunBy=$RUNBY \
+#  -p Ticket=$TICKET >/dev/null 2>&1 &
+
+exit 0
+
+for b in $(get-brand-list -a)
+do
+  POM=$FRONTEND/$b/pom.xml
+  WAR="<frontend.war.version>"
+  #war_version=$(svn --non-interactive cat $POM | grep "$WAR" | awk -F '[<>]' '{ print $3 }')
+
+  echo "$b $war_version"
+
+done

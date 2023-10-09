@@ -1,0 +1,109 @@
+#!/bin/bash
+# add/update/delete setting from default scope
+PATH=/opt/homebrew/bin:/usr/local/bin:/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:$PATH
+export PATH
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"
+  #echo "$(basename $0) --brands <brands> --envs <envs> [update|delete] <setting> --type <type> <value>"
+  exit 1
+}
+
+case $(uname) in
+    Darwin ) 
+        SQLPLUS="DYLD_LIBRARY_PATH=~/instantclient sqlplus"
+        alias SQLPLUS="DYLD_LIBRARY_PATH=~/instantclient sqlplus"
+    ;;
+
+    Linux )
+        if [ -e /usr/lib/oracle/instantclient_19_6 ] 
+        then
+            export PATH=$PATH:/usr/lib/oracle/instantclient_19_6
+            SQLPLUS=/usr/lib/oracle/instantclient_19_6/sqlplus
+            ORACLE_INSTANTCLIENT_LIB_DIR=/usr/lib/oracle/instantclient_19_6/
+            export LD_LIBRARY_PATH="${ORACLE_INSTANTCLIENT_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+        fi
+    ;;
+
+    * ) echo "Don't know how to handle $(uname)"        
+    ;;
+esac
+
+[[ -z $SQLPLUS ]] && BailOut "Can't find sqlplus"
+
+while getopts "b:e:t:s:t:j:v:a:d:" opt 
+do
+  case ${opt} in
+    t ) TICKET=$(tr '[:lower:]' '[:upper:]' <<< $OPTARG) ;;
+    b ) BRAND_LIST=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+    e ) ENVIRO_LIST=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+    a ) ACTION=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+    s ) SETTING=$(tr '[:lower:]' '[:upper:]' <<< $OPTARG) ;;
+    d ) TYPE=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+    v ) VALUE=$OPTARG ;;
+  esac
+done 
+
+[[ -z $ENVIRO_LIST ]] && BailOut "Need environment(s)"
+[[ -z $BRAND_LIST ]] && BailOut "Need brand(s)"
+[[ -z $SETTING ]] && BailOut "Need setting"
+[[ -z $ACTION ]] && ACTION="update"
+[[ $ACTION = "update" && -z $TYPE ]] && BailOut "Need type for $ACTION"
+
+GROUP=$(awk -F\. '{ print $1 }' <<< $SETTING)
+NAME=$(awk -F\. '{ print $2 }' <<< $SETTING)
+[[ -z $GROUP || -z $NAME ]] && BailOut "Need proper setting ($GROUP.$NAME)"
+
+for ENVIRO in $ENVIRO_LIST
+do
+  for BRAND in $BRAND_LIST
+  do
+    SCHEMA=$(get-schema $BRAND $ENVIRO)
+    SITE=$(get-siteid $BRAND $ENVIRO)
+    [[ -z $SCHEMA ]] && BailOut "Can't get schema for $BRAND $ENVIRO"
+
+    # getdb is a script which returns the db connections params for a given schema
+    DB=$(getdb $SCHEMA)
+    [[ -z $SCHEMA ]] && BailOut "Can't get DB props for $ENVIRO ($SCHEMA)"
+    [[ -z $DB ]] && BailOut "Can't get creds for $SCHEMA $BRAND $ENVIRO"
+    dbHost=$(awk -F\| '{ print $1 }' <<< $DB)
+    dbOwner=$(awk -F\| '{ print $2 }' <<< $DB)
+    dbUser=$(awk -F\| '{ print $3 }' <<< $DB)
+    dbPass=$(awk -F\| '{ print $4 }' <<< $DB)
+    dbSID=$(awk -F\| '{ print $5 }' <<< $DB)
+    dbPort=$(awk -F\| '{ print $6 }' <<< $DB)
+    dbTable=$(awk -F\| '{ print $7 }' <<< $DB)
+
+    # we don't care about the value if we're deleting it
+    [ "$ACTION" = "delete" ] && VALUE=
+
+    #echo "$(basename $0): schema for $BRAND $ENVIRO: $SCHEMA"
+
+    CONNECT="${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+    #echo "Delete $GROUP.$NAME from default scope"
+    D="set define off;
+delete from $dbOwner.WW_SETTING_VALUES where (SITE=$SITE and SETTING_SCOPE='default' and SETTING_GROUP='$GROUP' and SETTING_NAME='$NAME');"
+echo "$(basename $0):delete $D"
+    echo "$D" | $SQLPLUS -S "$CONNECT"
+    echo "commit;" | $SQLPLUS -S "$CONNECT"
+
+    [[ $ACTION = "delete" ]] && continue
+
+    #echo "Insert $GROUP.$NAME into default"
+    I="set define off;
+insert into $dbOwner.WW_SETTING_VALUES (SITE,SETTING_SCOPE,SETTING_GROUP,SETTING_NAME,SETTING_TYPE,SETTING_VALUE) values ($SITE,'default','$GROUP','$NAME','$TYPE','$VALUE');"
+echo "$(basename $0):insert $I"
+    echo "$I" | $SQLPLUS -S "$CONNECT"
+  done
+
+  echo "commit;" | $SQLPLUS -S "$CONNECT"
+done
+
+exit 0

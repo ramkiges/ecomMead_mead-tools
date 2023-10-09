@@ -1,0 +1,88 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+
+SUB="*"
+TMP=/tmp/$(basename $0)-$LOGNAME
+IMGSVR_PRD=img-prd-rk1v
+IMGSVR_QA=img-qa-rk1v
+ECMSVR_PRD_CA=ecmagent-ca-prd-rk1v
+IMGDIR=/images/ecom-images/internal/tmpl
+ODISSVR_PRD=invadj-prd-rk1v
+ODISSVR_QA=invadj-qa1-rk1v
+ODISDIR=/apps/odis-display-season-artifacts
+umask 000
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*" >&2
+  exit 1
+}
+
+[[ -n $2 ]] && { BRAND=$1; shift; }
+GEN=$(echo $1 | awk -F\. '{ print $1 }')
+[[ -z $GEN ]] && BailOut "Need generation"
+
+G="${GEN:0:1}"
+[[ $G = "8" ]] && SUB="ecm"
+[[ -n $BRAND ]] && SUB="$BRAND"
+
+mkdir -p $TMP
+
+# if the generation contains a dash, assume it's a directory
+if ! echo "$GEN" | grep -q "-" 
+then
+  DIR=$(gen2dir $GEN)
+else
+  DIR=$GEN
+fi 
+
+[[ -z $DIR ]] && BailOut "Can't figure out the asset directory for $GEN"
+ZIP=$(ssh -q $IMGSVR_PRD "ls $IMGDIR/$SUB/*$DIR.zip" 2>/dev/null | grep -i ".zip")
+
+# look in CA ECM server
+[[ -z $ZIP ]] && ECM=$(ssh -q $ECMSVR_PRD_CA "ls /apps/ecmimages/ecmbuilds/*/*/*$DIR.zip" 2>/dev/null | grep -i ".zip")
+[[ -z $ECM ]] && ECM=$(ssh -q $ECMSVR_PRD_CA "ls /apps/ecmimages/ecmbuilds/*/*/*$DIR/*.zip" 2>/dev/null | grep -i ".zip")
+
+# look in ODIS server
+[[ -z "$ZIP" && -z $ECM ]] && ODIS=$(ssh -q $ODISSVR_PRD "ls $ODISDIR/*$DIR.zip" 2>/dev/null | grep -i ".zip")
+
+[[ -z $ZIP && -z $ODIS && -z $ECM ]] && BailOut "Unable to find zip file for $GEN ($DIR)"
+set +x
+
+if [[ -n $ECM ]]
+then
+  ssh -q -tt $IMGSVR_QA "mkdir -p $TMP"
+  for file in $ECM
+  do
+    scp -q $ECMSVR_PRD_CA:$file $TMP || BailOut "Unable to scp $ECMSVR_PRD_CA:$file"
+    scp -q $TMP/$(basename $file) $IMGSVR_QA:$TMP
+    ssh -q -tt $IMGSVR_QA "sudo -u tomcat bash -c \"umask 002; cp $TMP/$(basename $file) /images/ecom-images/internal/tmpl/ecm 2>/dev/null \" "
+    ssh -q -tt $IMGSVR_QA "ls -lh /images/ecom-images/internal/tmpl/ecm/$(basename $file)"
+  done
+fi
+
+if [[ -n $ZIP ]] 
+then 
+  ssh -q -tt $IMGSVR_QA "mkdir -p $TMP"
+  scp -q $IMGSVR_PRD:$ZIP $TMP || BailOut "Unable to scp $IMGSVR_PRD:$ZIP"
+  scp -q $TMP/$(basename $ZIP) $IMGSVR_QA:$TMP
+  ssh -q -tt $IMGSVR_QA "ls -lh $ZIP 2>/dev/null"
+  ssh -q -tt $IMGSVR_QA "sudo -u tomcat bash -c \"umask 002; cp $TMP/$(basename $ZIP) $ZIP 2>/dev/null \" "
+  ssh -q -tt $IMGSVR_QA "ls -lh $ZIP"
+  ssh -q -tt $IMGSVR_QA "rm -f $TMP/$(basename $ZIP)"
+fi
+
+if [[ -n $ODIS ]]
+then
+  ssh -q -tt $ODISSVR_QA "mkdir -p $TMP"
+  scp -q $ODISSVR_PRD:$ODIS $TMP || BailOut "Unable to scp $ODISSVR_PRD:$ODIS"
+  scp -q $TMP/$(basename $ODIS) $ODISSVR_QA:$TMP
+  ssh -q -tt $ODISSVR_QA "ls -lh $ODIS 2>/dev/null"
+  ssh -q -tt $ODISSVR_QA "sudo -u tomcat bash -c \"umask 002; cp $TMP/$(basename $ODIS) $ODIS 2>/dev/null \" "
+  ssh -q -tt $ODISSVR_QA "ls -lh $ODIS"
+  ssh -q -tt $ODISSVR_QA "rm -f $TMP/$(basename $ODIS)"
+fi
+
+rm -rf $TMP
+
+exit 0 
+

@@ -1,0 +1,113 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin
+
+# this is a list of all of the available appsetting datatypes
+TYPES="a b h i l m n p r s t"
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk"
+APPSETTINGS=https://repos.wsgc.com/svn/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site/
+DEVOPS=https://repos.wsgc.com/svn/devops
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+
+umask 000
+
+BailOut() {
+  [[ -n $ ]] && echo "$(basename $0): $*"
+  echo "Usage: $(basename $0) <brand> <src> <dst>"
+  rm -rf $TMP
+
+  exit 255
+}
+
+BRAND=$1
+SRC=$2
+DST=$3
+TICKET=$4
+
+[[ -z $DST ]] && BailOut
+
+[[ -n $TICKET ]] && MSG=$TICKET || MSG="DEVOPS"
+[[ $BUILD_USER_ID =~ svc || $BUILD_USER_ID =~ ciuser || $RUNBY =~ svc || $RUNBY =~ ciuser ]] || RUNBY=${BUILD_USER_ID}
+[[ -z $RUNBY ]] && RUNBY=${BUILD_USER_ID}
+
+TMP="/tmp/$(basename $0)-$BRAND-$LOGNAME"
+rm -rf $TMP
+svn co -q $APPSETTINGS $TMP
+
+SRC_INST=$(get-installation $BRAND $SRC)
+SRC_SCHEMA=$(getschema $BRAND $SRC | awk -F: '{ print $1 }')
+SRC_DB=$(getschema $BRAND $SRC | awk -F: '{ print $2 }')
+SRC_OVER="$TMP/$SRC_DB/$SRC_SCHEMA/$BRAND/override/override.properties"
+SRC_MARKET=$(getmarket $BRAND $SRC)
+
+DST_INST=$(get-installation $BRAND $DST)
+DST_SCHEMA=$(getschema $BRAND $DST | awk -F: '{ print $1 }')
+DST_DB=$(getschema $BRAND $DST | awk -F: '{ print $2 }')
+DST_OVER="$TMP/$DST_DB/$DST_SCHEMA/$BRAND/override/override.properties"
+DST_MARKET=$(getmarket $BRAND $DST)
+
+[[ -e $SRC_OVER ]] || BailOut "Can't find SRC override for $BRAND $SRC"
+[[ -e $DST_OVER ]] || BailOut "Can't find DST override for $BRAND $DST"
+
+[[ $SRC_MARKET != $DST_MARKET ]] && BailOut "Source and destination markets do no match ($SRC:$SRC_MARKET $DST:$DST_MARKET)"
+
+svn cleanup $(dirname $SRC_OVER) || BailOut "SVN problem with $SRC_OVER"
+svn cleanup $(dirname $DST_OVER) || BailOut "SVN problem with $DST_OVER"
+svn up -q $SRC_OVER $DST_OVER
+
+rm -f $DST_OVER.new
+
+/bin/echo -ne "Remove $BRAND $DST ($DST_INST) appsettings from $DST_SCHEMA "
+for setting in $(awk -F\. '{ print $1 "." $2 }' $DST_OVER $SRC_OVER | egrep -vi "^#|^$" | sort -u)
+do
+  egrep -i "^$setting\." $DST_OVER | sort -u | egrep -iv "^$setting\.${DST_INST}\.|^$setting\.${DST}\." >> $DST_OVER.new 
+done
+echo "- done"
+
+/bin/echo -ne "Clone $BRAND appsettings from $SRC_INST ($SRC_SCHEMA) to $DST_INST ($DST_SCHEMA) "
+for setting in $(awk -F\. '{ print $1 "." $2 }' $DST_OVER $SRC_OVER | egrep -vi "^#|^$" | sort -u)
+do
+  egrep -i "^$setting\.$SRC_INST\." $SRC_OVER | sed -es/"\.${SRC_INST}\."/"\.${DST_INST}\."/gi | sort -u >> $DST_OVER.new 
+done
+echo "- done"
+
+mv $DST_OVER.new $DST_OVER || BailOut "Unable to mv $DST_OVER.new $DST_OVER"
+
+# validation
+echo "Validation
+src count: $(grep "\.$SRC_INST\." $SRC_OVER | wc -l)
+dst count: $(grep "\.$DST_INST\." $DST_OVER | wc -l)
+"
+
+cd $(dirname $DST_OVER)
+#svn diff $DST_OVER | egrep "^-|^\+" | grep -iv $(basename $DST_OVER)
+svn up -q
+svn commit -m "[$MSG] $(basename $0) - Clone $BRAND appsettings from $SRC to $DST [$RUNBY]" $DST_OVER
+
+echo "Run appsettings job"
+# trigger jenkins appsetting job
+for job in $(jenkins-jnlp list-jobs | egrep -i "appsettings-${DST_DB}-${DST_SCHEMA}-${BRAND}|appsettings-${DST_SCHEMA}-${BRAND}")
+do
+  jenkins-jnlp build -s $job
+done
+
+eval jenkins-jnlp build checkenv \
+      -p Brand=${BRAND} \
+      -p Environment=${DST} \
+      -p Ticket=${TICKET} \
+      -p RunBy=$(basename $0) \
+      -p Options=Validate-Appsettings
+
+if [[ -n $TICKET ]]
+then
+  jira-comment "$TICKET" "${ICON_INFO} Clone $BRAND appsettings from $SRC to $DST [$RUNBY]"
+  #jira-label "$TICKET" "Clone-AppSettings"
+fi
+
+exit 0
+

@@ -1,0 +1,269 @@
+#!/bin/bash
+# post-build script that examines bgb and buildsystem logs for problems
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps/mead-tools:~/bin
+umask 000
+
+BailOut() {
+  [ -n "$1" ] && echo "$(basename $0): $*"
+  rm -rf $TMP
+	exit 0
+}
+
+Notation() { unbuffer echo "### $* "; }
+
+ret=0
+IMG_QA=img-qa-rk1v
+
+# how long to wait for BGB staging/activation
+SLEEP=30
+
+#CLEAN_DATE='s/\[ \] //; s/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} //; s/\[[^][]*\] //'
+CLEAN_DATE='s/^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} //g; s/\[[^][]*\] //'
+
+MEAD_TOOLS="git@github.wsgc.com:eCommerce-Mead/mead-tools.git"
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+
+# expressions to find content job (buildsystem/bgb) failures
+#HINTS_BGB="failure|problems|^ERROR |MISMATCH|ERR:|Detected failure|code not zero "
+#HINTS_BGB="^ERROR |status: failed |action: failed|severe problems:|severeProblems|NullPointerException"
+BGB_ERROR=":failed|DBI connect"
+
+BSYS_FAILURE="Server returned HTTP response|returned exit code:|NullPointerException|Configuration problem:|OutOfMemoryError:"
+BSYS_APP_HINTS="OutOfMemoryError:|Corrupted STDOUT"
+BSYS_FTL_HINTS="FreeMarker template error:"
+
+#HINTS_BUILD="Configuration problem:|\[main\] ERROR \[|ProcessException:|Not implemented:"
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BRAND=$1
+ENVIRO=$2
+[[ -z $TICKET ]] && TICKET=$(tr '[:lower:]' '[:upper:]' <<< $3)
+
+[[ -z $ENVIRO ]] && BailOut "Need enviro"
+[[ -z $BRAND ]] && BailOut "Need brand"
+MARKET=$(getmarket $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+MARKET_LABEL=$MARKET
+[[ $MARKET = "us" ]] && MARKET=
+
+Notation "$(basename $0) results for $BRAND $ENVIRO"
+TMP=/tmp/$(basename $0).d-$LOGNAME/$BRAND-$ENVIRO
+PKG_DIR=$TMP/mead-tools
+rm -rf $PKG_DIR
+git clone -q --depth 1 $MEAD_TOOLS $PKG_DIR >/dev/null 2>&1 || BailOut "Unable to clone $MEAD_TOOLS as $LOGNAME"
+# load hints file
+. $TMP/mead-tools/checkenv.hints
+
+# this would be the env-specific deployment properties file
+DEPLOY_PROPS="https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties/${ENVIRO}/${BRAND}${MARKET}.properties"
+
+# extract BGB and BuildSystem hostnames
+BGB_HOST=$(svn cat $DEPLOY_PROPS 2>/dev/null | grep -i "bgburi" | grep -vi '#' | tail -1)
+[[ -z $BGB_HOST && -n $MARKET ]] && BailOut "Did not file ${BRAND}${MARKET}.properties - this is probably a config error"
+[[ -z $BGB_HOST ]] && BGB_HOST=$(svn cat $(dirname $(dirname $DEPLOY_PROPS))/deploy.properties | grep -i "bgburi" | grep -vi '#' | tail -1)
+[[ -z $BGB_HOST ]] && BailOut "Can't find bgb host (bgburi)"
+BGB_HOST=$(echo $BGB_HOST | awk -F= '{ print $2 }' | awk -F\. '{ print $1 }' | sed -es/http[s]//g -es"/[^[:alnum:]-]//g")
+BGB_LOG="http://$BGB_HOST.wsgc.com:38667/wsgc-tomcat-bgb/application.log"
+BGB_CATALINA="http://$BGB_HOST.wsgc.com:38667/wsgc-tomcat-bgb/catalina.out"
+#bgb=$(get-bgb-host $BRAND $ENVIRO | awk -F\. '{ print $1 }' | sed -es/-rk1v//g -es/-sac1v//g -es/bgb-//g)
+bgb=$(echo $BGB_HOST | awk -F\. '{ print $1 }' | sed -es/-rk1v//g -es/-sac1v//g -es/bgb-//g)
+
+BSYS_HOST=$(svn cat $DEPLOY_PROPS 2>/dev/null | grep -i "bsuri" | grep -vi '#' | tail -1)
+[[ -z $BSYS_HOST && -n $MARKET ]] && BailOut "Did not file ${BRAND}${MARKET}.properties - this is probably a config error"
+[[ -z $BSYS_HOST ]] && BSYS_HOST=$(svn cat $(dirname $(dirname $DEPLOY_PROPS))/deploy.properties | grep -i "bsuri" | grep -vi '#' | tail -1)
+[[ -z $BSYS_HOST ]] && BailOut "Can't find buildsystem host (bsuri)"
+BSYS_HOST=$(echo $BSYS_HOST | awk -F= '{ print $2 }' | awk -F\. '{ print $1 }' | sed -es/http[s]//g -es"/[^[:alnum:]-]//g")
+for log in application.log buildsystem.log catalina.out
+do
+  curl -fsqk http://$BSYS_HOST:38667/wsgc-tomcat-buildsystem/$log >/dev/null 2>&1 && { BSYS_LOG=http://$BSYS_HOST:38667/wsgc-tomcat-buildsystem/$log; break; }
+done
+[[ -z $BSYS_LOG ]] && echo "Can't find buildsystem log http://$BSYS_HOST:38667/wsgc-tomcat-buildsystem"
+
+# figure out the jenkins job info
+job=$(eval $JENKINS list-jobs | grep -iw "${BRAND}" |grep -iw "${ENVIRO}" | grep -i "content")
+[[ -z $job ]] && BailOut "Can't find recent content job for $BRAND $ENVIRO"
+result_url=$JENKINS_URL/job/$job/lastBuild/api/json?tree=result
+console_url=$JENKINS_URL/job/$job/lastBuild/consoleText 
+CONTENT_STATUS=$(curl --fail $TIMEOUT $USER_AGENT -s -k -H 'Cache-Control: no-cache' $result_url | jq -r .result)
+
+CONTENT_CONSOLE=$TMP/console-content.out
+curl --fail $TIMEOUT $USER_AGENT -s -k -H 'Cache-Control: no-cache' $console_url > $CONTENT_CONSOLE
+
+# this is a hackaround until we fix the sources.xml config file in BGB 
+jenkins-jnlp build -s stage-cmx-generation \
+    -p Brand=$BRAND \
+    -p Environment=$ENVIRO \
+    -p BGB=$bgb \
+    -p Generation=$GEN \
+    -p RunBy=$(basename $0) 
+
+/bin/echo -ne "Fetching build information"
+for x in {1..30}
+do
+  GEN=$(grep -i 'new generation id' $CONTENT_CONSOLE | head -1 | awk '{ print $NF }'| sed -e s/\*//g)
+  BUILD=$(grep -i 'new build number' $CONTENT_CONSOLE | head -1 | awk '{ print $NF }'| sed -e s/\*//g)
+  VAL=$(egrep -i '\[sql\] TMPL|\[sql\] MISC|\[sql\] MSG' $CONTENT_CONSOLE | head -1 | awk -F, '{ print $2 }')
+  [[ -n $GEN ]] && break
+  /bin/echo -ne "."
+  sleep 60 
+done
+echo
+[[ -z $GEN || -z $BUILD ]] && BailOut "No generation? Giving up"
+
+# this is the env-specific deployment data file
+BUILD_DATA="https://repos.wsgc.com/svn/deployments/content/trunk/build_data/content-deploy/${ENVIRO}/${BRAND}${MARKET}.properties"
+
+# CMX build log
+BUILD_LOG="http://${BSYS_HOST}/buildsystem2/builds/${BRAND}${MARKET}dp_UI/cmx-build-${BUILD}/BUILD.LOG"
+
+[[ -n $TICKET ]] && Notation "Ticket:         $TICKET "
+Notation "Brand:          $BRAND "
+Notation "Environment:    $ENVIRO "
+Notation "Market:         $MARKET_LABEL "
+Notation "Job Status:     $CONTENT_STATUS "
+Notation "Generation:     $GEN [$VAL]"
+Notation "BuildID:        $BUILD "
+Notation "BGB:            $BGB_HOST "
+Notation "BGB Log:        $BGB_LOG "
+Notation "BuildSys:       $BSYS_HOST "
+Notation "BuildSys Log:   $BSYS_LOG "
+[[ -n $CMX_URL ]] && Notation "CMX Build URL:  $CMX_URL "
+Notation "CMX Build Log:  $BUILD_LOG "
+Notation "CMX Build Data: $BUILD_DATA "
+
+if [[ -n $VAL && -n $GEN && $VAL != $GEN ]]
+then 
+  echo "*** Validated generation does not match generation from CONTENT job"
+  jenkins-jnlp build set-ecm-generation \
+    -p Brand=$BRAND \
+    -p Destination_Environment=$ENVIRO \
+    -p Generation=$GEN \
+    -p SubSystem=CMX \
+    -p AutoClose=false \
+    -p Ticket=$TICKET \
+    -p RunBy=CONTENT
+  #[[ -n $TICKET ]] && jira-label $TICKET "CMX-MisMatch"
+fi
+
+[[ $BUILD = '${bnumber}' ]] && BailOut "Invalid BuildID "
+[[ $GEN = '${genname}' ]] && BailOut "Invalid Generation "
+
+BSYS_PROBLEMS_1=$(curl $USER_AGENT -sqk $BSYS_LOG 2>/dev/null | egrep -i -A+3 "ERROR \[.*$BUILD" | tail -5 )
+BSYS_PROBLEMS_2=$(curl $USER_AGENT -sqk $BSYS_LOG 2>/dev/null | egrep -i -A+3 "$BUILD|$GEN" | egrep -i -B+1 -A+5 "$BSYS_FAILURE")
+BSYS_CONSOLE_ERRORS=$(egrep -i "$HINTS_CONTENT_CONSOLE" $CONTENT_CONSOLE | egrep -iv "$CONTENT_EXCLUDE")
+BSYS_APP_ERRORS=$(curl $USER_AGENT -sqk $BSYS_LOG 2>/dev/null | egrep -i "$BSYS_APP_HINTS" | egrep -iv "$CONTENT_EXCLUDE" | sed -r "$CLEAN_DATE" | sort -u | tail -10)
+BSYS_FTL_ERR=$(curl $USER_AGENT -sqk $BSYS_LOG 2>/dev/null | egrep -i -A+20 "ERROR \[.*$BUILD" | egrep -i -B+1 "$BSYS_FTL_HINTS")
+
+#BGB_PROBLEMS=$(curl $USER_AGENT -sqk $BGB_LOG | egrep -i "ERROR.*$BUILD|ERROR.*$GEN" | egrep -i "$HINTS_BGB" | egrep -iv "$BGB_EXCLUDE" | sort -u | tail -10)
+BGB_PROBLEMS=$(curl $USER_AGENT -sqk $BGB_LOG | egrep -i "$BUILD|$GEN" | egrep -i "$HINTS_BGB" | egrep -iv "$BGB_EXCLUDE" | sed -r "$CLEAN_DATE" | sort -u | tail -10)
+BGB_SCRIPTS=$(curl $USER_AGENT -sqk $BGB_LOG | egrep -i "$BUILD|$GEN" | egrep -i "launcher|bin/updategen|bin/getgens" | cut -d ' ' -f 8- | sort -u | sed -es/'--source='/'-v --source='/g)
+
+curl $USER_AGENT -sqk $BGB_LOG >/dev/null 2>&1 || BGB_PROBLEMS="Can't read BGB Log"
+curl $USER_AGENT -sqk $BSYS_LOG >/dev/null 2>&1 || BSYS_PROBLEMS="Can't read BuildSystem Log"
+
+BUILD_LOG_PROBLEMS=$(curl $USER_AGENT -sqk $BUILD_LOG 2>/dev/null | egrep -i "$HINTS_CONTENT_LOG" | egrep -iv "$CONTENT_EXCLUDE" | uniq | head -25)
+if [[ -n $BUILD_LOG_PROBLEMS ]]
+then 
+  echo "BUILD_LOG_PROBLEMS: 
+$BUILD_LOG_PROBLEMS"
+  [[ -n $TICKET ]] && jira-comment $TICKET "${ICON_FAIL} {noformat:title=Content Build Problems}$BUILD_LOG_PROBLEMS{noformat}"
+fi
+
+if [[ -n $BSYS_PROBLEMS_1 || -n $BSYS_PROBLEMS_2 || -n $BSYS_CONSOLE_ERRORS ]]
+then 
+  echo "BSYS_PROBLEMS: 
+$BSYS_PROBLEMS_1
+$BSYS_PROBLEMS_2
+$BSYS_CONSOLE_ERRORS
+"
+  [[ -n $TICKET ]] && jira-comment $TICKET "${ICON_FAIL} {noformat:title=Problems found in buildsystem application log $BSYS_LOG}$BSYS_PROBLEMS_1 $BSYS_PROBLEMS_2 $BSYS_CONSOLE_ERRORS{noformat}"
+fi
+
+if [[ -n $BSYS_APP_ERRORS ]]
+then 
+  echo "BuildSystem application errors: 
+$BSYS_APP_ERRORS"
+  [[ -n $TICKET ]] && jira-comment $TICKET "${ICON_WARN} Please note: these may not be directly related to $BUILD, but should be investigated {noformat:title=BuildSystem application errors}$BSYS_APP_ERRORS{noformat}"
+fi
+
+[[ -n $BGB_PROBLEMS ]] && echo "BGB Problems: 
+$BGB_PROBLEMS
+"
+[[ -n $BGB_SCRIPTS ]] && echo "BGB deployment scripts: 
+$BGB_SCRIPTS
+"
+#  if [[ -z $BGB_SCRIPTS ]]
+#  then 
+#    BGB_PROBLEMS="*** No staging/activation activities found for $GEN/$BUILD ***
+#$BGB_PROBLEMS"
+#    #ret=255
+#  fi
+
+if [[ -z $BGB_PROBLEMS && -z $BUILD_LOG_PROBLEMS && -z $BSYS_PROBLEMS_1 && -z $BSYS_PROBLEMS_2 && -z $BSYS_CONSOLE_ERRORS ]]
+then 
+  Notation "$(basename $0): No issues found"
+  [[ -n $TICKET ]] && jira-comment $TICKET "${ICON_SUCC}CMX generation $GEN ($BUILD) for $BRAND $ENVIRO sucessfully staged and activated"
+  rm -rf $TMP
+  exit 0
+fi
+
+BGB_ISSUE=
+echo "$BGB_PROBLEMS" | egrep -i "blocked" && BGB_ISSUE="blocked"
+echo "$BGB_PROBLEMS" | egrep -i "staging" && BGB_ISSUE="staging"
+echo "$BGB_PROBLEMS" | egrep -i "mismatch" && BGB_ISSUE="mismatch"
+echo "$BGB_PROBLEMS" | egrep -i "DB load" && BGB_ISSUE="db load"
+echo "$BGB_PROBLEMS" | egrep -i "partially loaded" && BGB_ISSUE="partially loaded data"
+[[ -n $BGB_ISSUE && -n $BGB_PROBLEMS ]] && echo "BGB issue: $BGB_ISSUE"
+
+TTY=$(tty) 
+## only create if non-interactive
+#[[ -z $TTY ]] && echo jira-create \
+#      -p MEAD \
+#      -s "BGB staging problem $BRAND $ENVIRO" \
+#      -d "${ICON_FAIL}BGB Staging problem for $BRAND $ENVIRO 
+#Problem:  $BGB_ISSUE
+#BGB:      https://$BGB_HOST
+#Market:   $MARKET
+#Gen:      $GEN
+#Build:    $BUILD
+#{noformat:title=$BGB_LOG}$BGB_PROBLEMS{noformat} "
+
+if [[ -n $TICKET ]]
+then
+  jira-comment "$TICKET" "${ICON_FAIL}Content Build/Staging problem for $BRAND $ENVIRO ($MARKET_LABEL)
+BGB:            https://$BGB_HOST
+BuildSystem:    https://$BSYS_HOST
+ContentBranch:  $CONTENT_BRANCH
+Job Status:     $CONTENT_STATUS
+Gen:            $GEN
+Build:          $BUILD
+ForceBuild:     $FORCEBUILD
+BGB Issue:    $BGB_ISSUE 
+{noformat:title=$BGB_LOG}$BGB_PROBLEMS{noformat} "
+fi
+
+#echo "BGB had problems staging $GEN "
+
+##if [[ $BGB_ISSUE = "mismatch" ]]
+##then
+#  #echo "*** BGB Reports a 'mismatch' - aka 'asset name collision'"
+#  IMG_QA_CMX=$(ssh -q imageuser@$IMG_QA "ls -l /images/ecom-images/internal/tmpl/$BRAND*$BUILD* 2>/dev/null")
+#  if [[ -n $IMG_QA_CMX ]] 
+#  then
+#    echo "*** Found $BUILD on $IMG_QA ***"
+#    SEQ=$(echo $BUILD | awk -F- '{ print $1 }')
+#    ssh -q imageuser@$IMG_QA "ls -roght /images/ecom-images/internal/tmpl/$BRAND*$BUILD* 2>/dev/null | tail -10" | awk '{ print $7,$4,$5,$6,$3 }' 
+#    #echo "*** Other builds for $SEQ ***"
+#    #ssh -q imageuser@$IMG_QA "ls -rogh /images/ecom-images/internal/tmpl/$BRAND*$SEQ* 2>/dev/null" | awk '{ print $7,$4,$5,$6 }'
+#  fi
+##fi
+
+rm -rf $TMP
+
+echo "$(basename $0) done"
+exit $ret

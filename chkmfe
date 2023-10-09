@@ -1,0 +1,419 @@
+#!/bin/bash
+# https://confluence.wsgc.com/display/ES/Non-Prod+MFE+Configuration
+# https://confluence.wsgc.com/display/ES/MFE+Initial+Setup+-+Non-Prod
+# https://confluence.wsgc.com/pages/viewpage.action?pageId=249304178
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps/mead-tools:/apps:~/bin:~/bin/localdeployer
+COUNT_ERROR=0
+COUNT_WARN=0
+STRICT=
+TMP=$HOME/$(basename $0)
+DATA=$(dirname "${BASH_SOURCE[0]}")/$(basename $0).data
+MFE_LIST="shop"
+# this script is deprecated
+exit 1
+
+# these keywords will be stripped from the log output
+LOG_HIDE="NODE_TLS_REJECT_UNAUTHORIZED"
+
+ECOM_APP_SHOP=git@github.wsgc.com:eCommerce-Bedrock/ecom-app-shop.git
+
+#CFG_SCHED=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-schedule-apps.git
+CFG_SCHED=git@github.wsgc.com:eCommerce-Tahoe/ecom-app-schedule-apps.git#branch/update-preprd
+
+CFG_SYNCAPP=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/etcd-syncappconfig-helm-config.git
+
+CFG_LANDING=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-landing-page-helm-config.git
+CFG_ALL_HELM=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-config-all-helm-config.git
+CFG_ADG=git@github.wsgc.com:eCommerce-Tahoe/delivery-gateway-helm-config.git
+CFG_ETCD_HELM=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/etcd-config-builder-helm-config.git
+CFG_ETCD_CONFIG=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/etcd-config-tool-k8s-package.git
+#CFG_GLOBAL_LOADER=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-global-config-loader.git
+#CFG_SHOP_LOADER=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-shop-config-loader.git
+MFE_GLOBAL=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-global-helm-config.git
+MFE_SHOP=git@github.wsgc.com:eCommerce-Kubernetes-Bedrock/ecom-app-shop-helm-config.git
+RUNDECK_JOBS=git@github.wsgc.com:eCommerce-DevOps/rundeck-jobs.git
+REPO_LIST=$(grep "git@github.wsgc.com" $0 | egrep -vi "grep|^#" | awk -F= '{ print $2 }')
+
+NAMESPACES=https://ecommerce-kubernetesdashboard-release.services.west.nonprod.wsgc.com/namespaces
+JENKINS_JOBS="delivery-gateway ecom-app-global ecom-app-shop ecom-app-product ecom-app-registry ecom-app-landing-page ecom-app-customer ecom-app-global-brand-configs ecom-app-shop-brand-configs ecom-app-config-all"
+
+AUTH_USER="svcaecjnk"
+
+TIMEOUT="--connect-timeout 20  --max-time 60"
+USER_AGENT="--user-agent CheckMFE"
+DP_LOGIN="ptqaenv:ta8PoLe"
+
+Usage() {
+  echo "$(basename $0) <env> [strict] [clean]
+https://confluence.wsgc.com/display/ES/MFE+Initial+Setup+-+Non-Prod
+-e - environment - enviroment to check
+-b - brand - specific brand to check
+-s - strict  - stops when any error is found
+-c - clear   - performs a fresh checkout of all repos
+-m - MFE     - list of MFE's to test
+"
+}
+
+bailOut() { [ -n "$1" ] && echo "$*"; Usage; exit 1; }
+
+Error() { 
+  COUNT_ERROR=$(expr $COUNT_ERROR + 1) 
+  echo " !  $*"; 
+  [[ -n $TICKET ]] && jira-comment $TICKET "$(basename $0): $*"
+  [[ -n $STRICT ]] && exit 1; 
+}
+
+Warning() {
+  COUNT_WARN=$(expr $COUNT_WARN + 1) 
+  echo " *  $*"; 
+}
+
+Notation() { echo;echo "### $* "; }
+
+deCrypt() {
+  base=$1
+  source activatehelmwrapper >/dev/null 2>&1 || bailOut "Can't source activatehelmwrapper"
+
+  cd $base || bailOut "$FUNCNAME - Can't cd to $base"
+  for dir in $(find . -name secrets.yaml|egrep -iv "prod|prd")
+  do
+    #[ -e "$dir/secrets.yaml.dec" ] && continue
+    cd $(dirname $dir)
+    rm -f secrets.yaml.dec
+    helm secrets dec secrets.yaml >/dev/null 2>&1
+    cd $base
+  done
+}
+
+chkSchema() {
+  MFE_SCHEMA=$(grep oracle.tablePrefix "$ENV/values.yaml" 2>/dev/null | awk '{ print $NF }' | sed -es/\\.//g | tr "a-z" "A-Z")
+  if [ -z "$MFE_SCHEMA" ]
+  then
+    echo "Env-specific schema not found for $ENV"
+    MFE_SCHEMA=$(grep oracle.tablePrefix "values.yaml" 2>/dev/null | awk '{ print $NF }' | sed -es/\\.//g | tr "a-z" "A-Z")
+  fi
+  echo "MFE Schema: $MFE_SCHEMA"
+  for b in $BRAND_LIST
+  do
+    sch=$(getschema $b $ENV | awk -F: '{ print $1 }' | tr "a-z" "A-Z")
+    [ "$MFE_SCHEMA" != "$sch" ] && Error "Schema for $b ($sch) does not match MFE schema ($MFE_SCHEMA)"
+  done
+}
+
+for util in geturls get-host
+do
+  which $util >/dev/null 2>&1 || bailOut "Need $util - did you install mead-tools locally"
+done
+HELMWRAPPER=$(which activatehelmwrapper 2>/dev/null)
+HELM=$(which helm 2>/dev/null)
+
+pdir=$(pwd)
+while getopts "ghscfe:t:b:m:" opt 
+do
+    case ${opt} in
+      m ) MFE_LIST="$(echo $OPTARG | tr 'A-Z' 'a-z' | sed -es/','/' '/g)";;
+      b ) BRAND_LIST="$BRAND_LIST $(echo $OPTARG | tr 'A-Z' 'a-z' | sed -es/','/' '/g)";;
+      e ) ENV=$(echo $OPTARG | tr "A-Z" "a-z");;
+      t ) TICKET=$(echo $OPTARG | tr "A-Z" "a-z" | sed -es/','/' '/g);;
+      s ) STRICT=true;;
+      g ) MATRIX=true;;
+      c|f ) rm -rf $TMP;;
+      h ) Usage; exit 0;;
+    esac
+done
+
+[[ -z $1 ]] && { Usage; exit 0; }
+[[ -z $ENV ]] && bailOut "Need env"
+[[ -z $BRAND_LIST ]] && BRAND_LIST="mg pb pk pt we ws"
+[[ -f $DATA ]] || bailOut "Can't find data file $DATA"
+
+AKAMAI=$(geturls ws $ENV |grep -i akamai|awk '{ print $NF }' | tr 'A-Z' 'a-z')
+HOST=$(get-host ws $ENV | awk '{ print $NF }')
+
+AUTH_FILE=~/.credentials.d/jenkins-$AUTH_USER-user
+[ -e $AUTH_FILE ] || bailOut "Auth file ($AUTH_FILE) not found"
+AUTH_USER=$( (source "$AUTH_FILE"; echo "$USERNAME") )
+AUTH_PASS=$( (source "$AUTH_FILE"; echo "$PASSWORD") )
+AUTH_TOKEN=$( (source "$AUTH_FILE"; echo "$JENKINS_TOKEN") )
+# this URL contains the creds
+JENKINS_K8S=https://${AUTH_USER}:${AUTH_TOKEN}@ecombuild.wsgc.com/jenkins/job/k8s-deployers/job/ecom/job
+# this URL is to for displaying - without the credss
+JENKINS_K8S_SHOW=https://ecombuild.wsgc.com/jenkins/job/k8s-deployers/job/ecom/job
+JENKINS_K8S_PROPS="<propertiesContent>|K8S_PACKAGE|HELM_PROJECT"
+
+# optionally clean up any prior checkouts
+echo "$*" | egrep -iq "clean|force|clear" && rm -rf $TMP
+echo "$*" | egrep -iq "strict" && STRICT=true
+
+mkdir -p $TMP
+for url in $REPO_LIST
+do
+  org="origin"
+  cd $TMP
+  repo=$(echo "$url" | awk -F\# '{ print $1 }')
+  branch=$(echo "$url" | awk -F\# '{ print $2 }'| sed -es!branch/!!g )
+  repo_dir=$(basename $repo | sed -es/\.git//g)
+  echo "$repo" | grep -iq "bedrock" && org=devops
+  echo "$repo" | grep -iq "mead" && org=mead
+  #echo "$repo" | grep -iq "tahoe" && org=tahoe
+  echo "$repo" | grep -iq "tahoe" && org=devops
+  if [ ! -d $repo_dir ]
+  then
+    Notation "Checkout $url"
+    git clone -q $repo || bailOut "Unable to clone $repo"
+    cd $TMP/$repo_dir
+    git checkout release >/dev/null 2>&1
+    git pull --all
+
+    REPO_MEAD=$(git remote -v show | awk '{ print $2 }' | head -1 | sed -es/DevOps/Mead/g -es/eCommerce-Kubernetes-Bedrock/eCommerce-Mead/g -es/eCommerce-Tahoe/eCommerce-Mead/g )
+    git remote rename origin devops >/dev/null 2>&1
+    git remote remove mead >/dev/null 2>&1
+    git remote add mead $REPO_MEAD >/dev/null 2>&1 || bailOut "Unable to add remote for mead" 
+  fi
+  cd $TMP/$repo_dir
+  git pull -q >/dev/null 2>&1 
+  git fetch --all --prune >/dev/null 2>&1 
+  git branch --all >/dev/null 2>&1 
+  [ -n "$branch" ] && git checkout --track $org/$branch 2>/dev/null
+  git merge devops/release >/dev/null 2>&1 
+done
+
+###################################
+#Notation "Checking Shop MFE etcd-config-builder-helm-config"
+#WORK=etcd-config-builder-helm-config/config
+#cd $TMP/$WORK || bailOut "Unable to cd to $TMP/$WORK"
+#[ -d "$ENV" ] || Error "Missing directory $WORK/$ENV"
+#for key in ecommerce-ecom-app-global ecommerce-ecom-app-shop 
+#do
+#  egrep -iq "$key.*$ENV|$ENV.*$key" $ENV/values.yaml >/dev/null 2>&1 || Warning "Missing entry for $key in $ENV in $WORK/$ENV/values.yaml"
+#done
+#iURI=$(echo $HOST | sed -es/mg/ws/g -es/pb/ws/g -es/pk/ws/g -es/pt/ws/g -es/we/ws/g | awk -F\. '{ print $1 }' | sed -es/sac1v/sac1/g -es/rk1v/rk1/g)
+#egrep -iq "internalUri:.*$iURI" $ENV/values.yaml >/dev/null 2>&1 || Error "Missing/incorrect entry for $ENV in internalUri ($iURI) $WORK"
+#iURI2=$(egrep -i "internalUri:" $ENV/values.yaml 2>/dev/null | awk '{ print $NF }' | awk -F/ '{ print $3 }' | awk -F\. '{ print $1 }' | tr "A-Z" "a-z")
+#IP=$(host $iURI2 2>/dev/null | grep -i address | awk '{ print $NF }')
+#[ -z "$IP" ] && Error "No IP for internalUri $iURI2"
+#eURI=$(geturls ws $ENV | grep -i "akamai" | awk '{ print $NF }')
+#egrep -iq "externalUri:.*$eURI" $ENV/values.yaml >/dev/null 2>&1 || Error "Missing/incorrect entry for $ENV in externalUri ($eURI) $WORK"
+
+###################################
+Notation "Checking ADG delivery-gateway-k8s-package"
+WORK=delivery-gateway-k8s-package/src/main/helm/config
+envId=$ENV
+echo "$ENV" | grep -iq "qa" && envId=$(echo "intdev$ENV" | sed -es/qa//g)
+cd $TMP/$WORK || bailOut "Can't cd to $TMP/$WORK"
+grep -irq "envId:.*$envId" . || Error "Missing/incorrect entry for $ENV ($envId) in envId in $WORK"
+urlPrefix=$(echo "$AKAMAI" | sed -es%https://%%g | sed -es/markandgraham.com//g -es/potterybarn.com//g -es/potterybarnkids.com//g -es/pbteen.com//g -es/westelm.com//g -es/williams-sonoma.com//g -es/\.$//g)
+grep -ir "urlPrefix:" . | grep -qw "$urlPrefix" || Error "Missing/incorrect urlPrefix ($urlPrefix) entry for $ENV in $WORK"
+
+# check secrets
+if [ -n "$HELM" ]
+then
+  deCrypt $(pwd)
+  grep -iq "name:.*$ENV" */*.dec || Error "Missing/incorrect secrets for $ENV in $WORK"
+fi
+
+####################################
+#Notation "Checking Global Config Loader ecom-app-global-config-loader (NOT MEAD)"
+#WORK=ecom-app-global-config-loader/config
+#cd $TMP/$WORK || bailOut 
+#[ -d "$ENV" ] || Error "Missing directory '$ENV' in $WORK"
+#[ -e "$ENV/values.yaml" ] || Error "Missing values.yaml in $WORK"
+
+####################################
+#Notation "Checking Shop Config Loader ecom-app-shop-config-loader (NOT MEAD)"
+#WORK=ecom-app-shop-config-loader/config
+#cd $TMP/$WORK || bailOut "Unable to cd to $WORK"
+#[ -d "$ENV" ] || Error "Missing directory $WORK/$ENV"
+
+###################################
+Notation "Checking etcd-config-tool-k8s-package"
+WORK=etcd-config-tool-k8s-package/src/main/helm/config 
+cd $TMP/$WORK || bailOut "Unable to cd to $TMP/$WORK"
+[ -d "$ENV" ] || Error "Missing directory $WORK/$ENV"
+grep -iqw "$ENV" "$ENV/values.yaml" 2>/dev/null || Error "Missing $ENV in $WORK/$ENV/values.yaml"
+for key in etcd.targetPrefix syncschedule.ecommerce/US/MG syncschedule.ecommerce/US/PB syncschedule.ecommerce/US/PK syncschedule.ecommerce/US/PT syncschedule.ecommerce/US/WE syncschedule.ecommerce/US/WS
+do
+  egrep -iq "$key.*$ENV|$ENV.*$key" $ENV/values.yaml >/dev/null 2>&1 || echo "* Missing/incorrect entry for $key in $WORK/$ENV"
+done
+
+## check secrets
+#[[ -n $HELM ]] && deCrypt $(pwd)
+
+###################################
+Notation "Checking Global MFE ecom-app-global-helm-config"
+WORK=ecom-app-global-helm-config/config
+cd $TMP/$WORK || bailOut "Unable to cd to $TMP/$WORK"
+[ -d "$ENV" ] || Error "Missing directory $WORK/$ENV'"
+mp=$(grep -i "mountPath:" $ENV/values.yaml 2>/dev/null)
+[ -n "$mp" ] && { grep -qi "mountPath.*$ENV" $ENV/values.yaml 2>/dev/null || Error "Incorrect mountPath for $ENV in $WORK/$ENV/values.yaml"; }
+echo "  Deploy: $(grep -A+5 'deployment:' $ENV/values.yaml 2>/dev/null | grep 'tag:' | awk '{ print $NF }' )"
+
+###################################
+Notation "Checking Shop MFE ecom-app-shop-helm-config"
+WORK=ecom-app-shop-helm-config/config
+cd $TMP/$WORK || bailOut "Unable to cd to $TMP/$WORK"
+[ -d "$ENV" ] || Error "Missing directory $WORK/$ENV"
+mp=$(grep -i "mountPath:" $ENV/values.yaml 2>/dev/null)
+[ -n "$mp" ] && { grep -iq "mountPath.*$ENV" $ENV/values.yaml 2>/dev/null || Error "Incorrect mountPath for $ENV in $WORK/$ENV/values.yaml"; }
+echo "  Deploy: $(grep -A+5 'deployment:' $ENV/values.yaml 2>/dev/null | grep 'tag:' | awk '{ print $NF }' )"
+
+###################################
+Notation "Checking ecom-app-config-all-helm-config"
+WORK=ecom-app-config-all-helm-config/config
+cd $TMP/$WORK || bailOut "Unable to cd to $TMP/$WORK"
+[ -d "$ENV" ] || Error "Missing directory $WORK/$ENV"
+
+###################################
+Notation "Checking etcd-syncappconfig-helm-config"
+WORK=etcd-syncappconfig-helm-config/config
+cd $TMP/$WORK || bailOut "Unable to cd to $TMP/$WORK"
+[ -d "$ENV" ] || Error "Missing directory $WORK/$ENV"
+#iURI=$(get-host ws $ENV | awk -F\. '{ print $1 }' | sed -es/sac1v/sac1/g -es/rk1v/rk1/g)
+iURI=$(echo $HOST | sed -es/mg/ws/g -es/pb/ws/g -es/pk/ws/g -es/pt/ws/g -es/we/ws/g | awk -F\. '{ print $1 }' | sed -es/sac1v/sac1/g -es/rk1v/rk1/g)
+egrep -iq "internalUri:.*$iURI" $ENV/values.yaml >/dev/null 2>&1 || Error "Missing/incorrect entry for $ENV in internalUri ($iURI) $WORK"
+iURI2=$(egrep -i "internalUri:" $ENV/values.yaml 2>/dev/null | awk '{ print $NF }' | awk -F/ '{ print $3 }' | awk -F\. '{ print $1 }' | tr "A-Z" "a-z")
+IP=$(host $iURI2 2>/dev/null | grep -i address | awk '{ print $NF }')
+[ -z "$IP" ] && Error "No IP for internalUri $iURI2"
+eURI=$(geturls ws $ENV | grep -i "akamai" | awk '{ print $NF }')
+egrep -iq "externalUri:.*$eURI" $ENV/values.yaml >/dev/null 2>&1 || Error "Missing/incorrect entry for $ENV in externalUri ($eURI) $WORK"
+
+###################################
+Notation "Checking ecom-app-schedule-apps"
+WORK=ecom-app-schedule-apps/
+cd $TMP/$WORK || bailOut "Unable to cd to $TMP/$WORK"
+for mfe in $MFE_LIST
+do
+  echo "$mfe"
+done
+
+###################################
+#Notation "Checking schema"
+#chkSchema
+
+###################################
+Notation "Checking RunDeck"
+WORK=rundeck-jobs/deploy/etcd-config-tool
+cd $TMP/$WORK || bailOut "Unable to cd to $TMP/$WORK"
+[ -e "update-$ENV.yml" ] || Warning "Missing RunDeck job for $ENV in https://rundeck.wsgc.com/rundeck/project/wsgc/jobs/deploy/etcd-config-tool"
+
+###################################
+Notation "Checking deployers"
+for job in $JENKINS_JOBS
+do
+  [ "$job" = "delivery-gateway" ] && env=qa14 || env=$ENV
+  Notation "Checking Jenkins job $job ($env)"
+  curl -sqk $JENKINS_K8S/$job/ 2>/dev/null | egrep -iq "job/$env" >/dev/null 2>&1 || Warning "Job for $ENV missing from $JENKINS_K8S_SHOW/$job"
+  xml_url=$JENKINS_K8S/$job/job/$env/config.xml
+  echo "curl --fail $TIMEOUT $USER_AGENT -s -k -H 'Cache-Control: no-cache' $xml_url" > $TMP/$job-$ENV.txt
+  curl --fail $TIMEOUT $USER_AGENT -s -k -H 'Cache-Control: no-cache' $xml_url >> $TMP/$job-$ENV.txt 2>&1
+  XML_PROPS=$(curl --fail $TIMEOUT $USER_AGENT -s -k -H 'Cache-Control: no-cache' $xml_url | egrep -i "$JENKINS_K8S_PROPS" | sed -e 's/<[^>]*>//g' -e 's/^[[:space:]]*//g')
+  NAMESPACE=$(curl --fail $TIMEOUT $USER_AGENT -s -k -H 'Cache-Control: no-cache' $xml_url | egrep -i "namespace=" | awk -F= '{ print $2 }' | sed -es/'&quot;'//g)
+  if [ -n "$XML_PROPS" ]
+  then 
+      [[ -n $NAMESPACE ]] && XML_PROPS="namespace=$NAMESPACE
+$XML_PROPS"
+      echo "$XML_PROPS"
+      [[ -n $TICKET ]] && jira-comment $TICKET "$(basename $0) $ENV $job: {noformat:title=$JENKINS_K8S_SHOW/$job/job/$env}$XML_PROPS{noformat}"
+  fi
+  status_url=$JENKINS_K8S/$job/job/$env/lastBuild/api/json?tree=result
+  status=$(curl --fail $TIMEOUT $USER_AGENT -s -k -H 'Cache-Control: no-cache' $status_url | grep -i "result" | awk -F: '{ print $NF }' | sed -es/\"//g -es/\}//g)
+  echo "Status: $status $JENKINS_K8S_SHOW/$job/job/$env"
+  echo "$status" | egrep -iq "SUCCESS" && continue
+
+  [[ -n $TICKET ]] && jira-comment $TICKET "$(basename $0) $ENV: {noformat:title=$job/job/$env Status}$status $JENKINS_K8S_SHOW/$job/job/$env{noformat}"
+done
+
+###################################
+#Notation "Checking namespaces"
+#for namespace in ecommerce-ecom-app-global ecommerce-ecom-app-shop ecommerce-etcd-config-builder ecommerce-etcd-config-tool
+for namespace in ecommerce-ecom-app-global ecommerce-ecom-app-shop ecommerce-etcd-config-tool
+do
+  [ "$namespace" = "delivery-gateway" ] && env=qa14 || env=$ENV
+  Notation "Checking for namespace $namespace-$ENV"
+  curl -ksq $NAMESPACES | grep -iq "$namespace-$env" || Error "Missing namespace for $namespace-$env"
+  kubectl get pods -n $namespace-$env | grep -i running
+  #echo "kube status: ${PIPESTATUS[0]}"
+done
+
+# if we have any errors, don't bother going any further
+#[ $COUNT_ERROR -gt 0 ] && bailOut "Found $COUNT_ERROR config errors - stopping"
+
+cd $pdir
+###################################
+Notation "Checking URLs"
+MSG=
+for mfe in $MFE_LIST
+do
+  for brand in $BRAND_LIST
+  do
+    ENDPOINT=$(grep "$brand:$mfe" $DATA | awk -F= '{ print $2 }')
+    [[ -z $ENDPOINT ]] && continue
+    #URL="https://www.$ENV.$(getdomain $brand)/$ENDPOINT"
+    URL="$(geturls $brand $ENV | grep -i akamai | awk '{ print $NF }')/$ENDPOINT"
+
+    # hit it once just "wake it up" - for some reason we get failures on the first try but not on the 2nd
+    curl $TIMEOUT $USER_AGENT -qsk --user "$DP_LOGIN" $URL >/dev/null 2>&1 
+
+    status=$(curl $TIMEOUT $USER_AGENT -qsk --user "$DP_LOGIN" -o /dev/null --silent --head --write-out '%{http_code}\n' $URL)
+    code=$(curl $TIMEOUT $USER_AGENT -qsk --user "$DP_LOGIN" $URL | jq -r .status 2>/dev/null)
+    result=$(curl $TIMEOUT $USER_AGENT -qsk --user "$DP_LOGIN" $URL | egrep -i "internal server error")
+    echo "$brand: $status $URL $result"
+    MSG="$MSG
+$brand: $status $URL $result"
+  done
+done
+set +x
+[[ -n $TICKET ]] && jira-comment $TICKET "$(basename $0) $ENV: {noformat:title=URLS}$MSG{noformat}"
+
+#for namespace in ecommerce-ecom-app-global ecommerce-ecom-app-shop ecommerce-etcd-config-builder ecommerce-etcd-config-tool
+for namespace in ecommerce-ecom-app-global ecommerce-ecom-app-shop
+do
+  [ "$namespace" = "delivery-gateway" ] && env=qa14 || env=$ENV
+  Notation "Checking logs in namespace $namespace-$ENV"
+  #curl -ksq $NAMESPACES | grep -iq "$namespace-$env" || Error "Missing namespace for $namespace-$env"
+  pod=$(kubectl get pods -n $namespace-$env | grep -i running | awk '{ print $1 }')
+  [ -z "$pod" ] && { echo "No pod found for $namespace-$env"; continue; }
+  MSG=$(kubectl logs $pod -n $namespace-$env | egrep -i -A+3 "^ERROR\|QuotaExceededError:|^REQ.* 500 .*|^WARN.*CONFIG" | egrep -vi "^INFO" | egrep -iv "$LOG_HIDE" | uniq | tail -5)
+  [ -z "$MSG" ] && continue
+  echo "$MSG"
+  [[ -n $TICKET ]] && jira-comment $TICKET "$(basename $0) $ENV: {noformat:title=$namespace Problems }$MSG{noformat}"
+done
+
+if [ -n "$HELM" ]
+then
+for namespace in etcd-config-tool ecom-app-global ecom-app-shop
+  do
+    #echo "helm history $namespace -n ecommerce-$namespace-$ENV"
+    HEAD=$(helm history $namespace -n ecommerce-$namespace-$ENV 2>/dev/null | head -1)
+    TAIL=$(helm history $namespace -n ecommerce-$namespace-$ENV 2>/dev/null | tail -1)
+    STATUS=$(helm history $namespace -n ecommerce-$namespace-$ENV 2>/dev/null | tail -1 | awk '{ print $7 }')
+    echo "$namespace: $STATUS"
+    MSG="$namespace: $STATUS"
+    if [[ $STATUS != deployed ]] 
+    then
+      MSG_H=$(helm history $namespace -n ecommerce-$namespace-$ENV)
+      echo "$MSG_H"
+      MSG="$MSG $MSG_H"
+      [[ -n $TICKET ]] && jira-comment $TICKET "$(basename $0) $ENV: {noformat:title=$namespace Problems }$MSG{noformat}"
+    fi
+done
+fi
+
+###################################
+#  https://qa14.origin-svc.westelm.com/qa28.westelm.com/.delivery/summary/index.html
+Notation "Checking ADG (WIP)"
+for brand in $BRAND_LIST
+do
+  /bin/echo -n "  $brand "
+  MSG=
+  ADG_URL="https://qa14.origin-svc.$(getdomain $brand)/$ENV.$(getdomain $brand)/.delivery/summary/index.html"
+  MSG="$MSG
+$ADG_URL
+"
+  ret=$(curl -sqk $ADG_URL | grep -i applicationId)
+  [[ -z $ret ]] && { Warning "ADG for $brand failed $ADG_URL"; MSG="ADG for $brand failed $MSG"; } || echo "Ok"
+  [[ -n $TICKET ]] && jira-comment $TICKET "$(basename $0) $ENV: {noformat:title=$namespace Problems }$MSG{noformat}"
+done
+
+exit $COUNT_ERROR
+

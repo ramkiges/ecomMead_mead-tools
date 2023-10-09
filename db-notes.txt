@@ -1,0 +1,38 @@
+#HostName : webqark2p
+#Port : 3800
+#SID/ServiceName : vwebqa2
+#Username: vwebqa2_owner
+#Password: vwebqa2_1_
+
+#webqa1_d1_app_admin
+#username=D1_APP_ADMIN
+#password=D14pp4dmin
+#
+#webqa2_ws_app_owner
+#username=WS_APP_OWNER
+#password=q1ky*519
+#
+#webqa2_ws_app_user
+#username=WS_USER
+#password=simple8dev
+#dbSID=webqa2
+#dbOwner="dtcmou_app_owner"
+#dbUser="dtcmou_app_owner"
+#dbPass="DTCMOUAPPOWNER"
+#dbPass="q1ky*519"
+#webqa2 username=BGB_BUILD_USER password=Pi314Day
+#db_webqa2_bgb_build_user username=BGB_BUILD_USER password=Pi314Day
+
+#DBHost=wborck-viax001
+#DBInst=webprf
+#DBUid=ws_app_owner
+#DBPwd=Banana#2019
+
+#HOST: wboprf-scan
+#port: 3800
+#Service name: webprf
+#JDBC connection string: jdbc:oracle:thin:@(DESCRIPTION=(CONNECT_TIMEOUT=10)(RETRY_COUNT=20)(RETRY_DELAY=3)(TRANSPORT_CONNECT_TIMEOUT=3)(ADDRESS=(PROTOCOL=TCP)(HO
+#ST=wboprf-scan.wsgc.com)(PORT=3800))(CONNECT_DATA=(SERVICE_NAME=webprf)))
+# Sweet#pea#8562
+# ENC:7wRfbse3V0qpCMxongkukUVmVNL7Bfif0aZs5a0ye+M=
+

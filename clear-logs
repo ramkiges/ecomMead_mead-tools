@@ -1,0 +1,160 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools
+LOGDIR=/var/log/weblogs
+export SYSCTL=/etc/sysctl.conf
+
+FILE_LIST="application.log catalina.out promo.log syncStatus.log promouse.log manager.*.log* host-manager.*.log* localhost.*.log* catalina.*.log jobs.log security.log buildsystem.log auth-search.log  auth-cq-error.log auth-access.log auth-request.log history.log *ssl*request*log-* *ssl*error*log-* access_log error_log *-access.log *-error.log loyalty-*.log contentprocessor.out* stdout.log error.log stderr.log *.hprof gc.log.*"
+DATE=$(date +'%Y-%m-%d_%H%M')
+DAYS=1
+
+BailOut() {
+	exec 2>&1
+  [ -n "$1" ] && echo "$(hostname) $(basename $0):$*" 
+    exit 1
+}
+
+sudo rm -rf /tmp/libtmp* /tmp/fonts.* &
+sudo find /apps /tmp /var/log/weblogs -name "*.hprof*" -delete 2>/dev/null &
+sudo find /apps /tmp /var/log/weblogs -name "gc.log.*" -delete 2>/dev/null &
+sudo rm /var/log/weblogs/*log* 2>/dev/null &
+sudo rm -f /var/log/*[1-9][0-9][0-9][0-9]* &
+sudo rm -f /var/log/hs_err_* &
+sudo rm -f /var/log/*.hprof &
+
+# clean up contentprocessor crap
+sudo find /tmp -type f -name "imgscrip*.sh" -mmin +10 -delete 2>/dev/null &
+sudo find /tmp -type f -name "imgproc*.tmp" -mmin +10 -delete 2>/dev/null &
+sudo nice -n +20 find /tmp -type f -name "*.pnm" -mmin +10 -delete 2>/dev/null &
+sudo find /var/log/weblogs -type f -name "contentprocessor.out*" -mtime +1 -delete 2>/dev/null &
+sudo find /tmp -type f -name "*dispatch-script*" -mtime +1 -delete 2>/dev/null &
+sudo find /tmp -type d -name ".com.google.Chrome*" -mtime +1 -exec rm -rf {} \; 2>/dev/null &
+
+hostname | egrep -iq "rnd|jnk|tls|img-qa|imgrck-vicn001|imgrck-virk001" && BailOut "Can't run on $(hostname)"
+
+sudo yum -y clean all -d0
+
+sudo yum -y clean expire-cache -d0
+
+sudo bash -c "grep -q tomcat /etc/cron.allow || echo tomcat >> /etc/cron.allow"
+
+# cleanup and automatic extension of certain filesystems
+for fs in var
+do
+  df -k /$fs | grep -q "/$fs" || continue
+  df -khP /$fs
+
+  # extract the lv name
+  lv=$(df -kPh /$fs|grep "/dev/" |awk '{ print $1 }')
+
+  # get the size of the partition
+  s=$(df -kP /$fs | grep "/dev" | awk '{ print $2 }' | sed -es/%//g)
+  s=$(expr $s / 1048576)
+  # if it's less than 5Gb, increase it - this needs to be cleaned up
+  [[ $s -lt 10 ]] && sudo lvextend -r -L 10G $lv >/dev/null 2>&1
+  [[ $s -lt 8 ]] && sudo lvextend -r -L 8G $lv >/dev/null 2>&1
+  [[ $s -lt 6 ]] && sudo lvextend -r -L 6G $lv >/dev/null 2>&1
+  [[ $s -lt 5 ]] && sudo lvextend -r -L 5G $lv >/dev/null 2>&1
+
+  # get the amount used on the partition
+  u=$(df -khP /$fs | grep "/dev" | awk '{ print $5 }' | sed -es/%//g)
+  # if it's over 80% used, extend it
+  [[ $u -gt 80 ]] && sudo lvextend -r -L +1G $lv
+
+  # clean up the yum cache and rpm db
+  sudo rm -rf /var/cache/yum && sudo yum makecache -d0 >/dev/null 2>&1
+  sudo rm -f /var/lib/rpm/__db* && sudo /usr/lib/rpm/rpmdb_verify -q /var/lib/rpm/Packages
+  sudo vgdisplay | grep -i free
+
+  df -khP /$fs
+done
+
+cd $LOGDIR || BailOut "Can't cd to $LOGDIR"
+
+# clear logs that have been incorrectly placed in the root of the log directory
+sudo rm -f *log *log*gz 
+
+APPLIST="$*"
+[ -z "$APPLIST" ] && APPLIST=$(find . -maxdepth 1 -type d 2>/dev/null | egrep -iv "lost\+found|^\.$|verify-config-pkg" )
+
+#[ -f /etc/logrotate.d/catalogdata ] && sudo logrotate -f /etc/logrotate.d/catalogdata &
+
+# bump semaphore counts
+grep -iq "kernel.msgmni" $SYSCTL || sudo bash -c "echo 'kernel.msgmni = 1024' >> $SYSCTL"
+grep -iq "kernel.sem" $SYSCTL || sudo bash -c "echo 'kernel.sem = 250 256000 32 1024' >> $SYSCTL"
+sudo sysctl -p
+ipcs -ls
+
+# clear semaphores
+for i in $(ipcs -s | awk '/apache/ {print $2}'); do (sudo ipcrm -s $i); done
+
+sudo chmod 755 $LOGDIR
+
+if [ -d /var/log/weblogs/wsgc-tomcat-frontend ]
+then
+    sudo find -L /var/log/weblogs/wsgc-tomcat-frontend -name "security.log-*"    -type f -delete >/dev/null 2>&1 &
+    sudo find -L /var/log/weblogs/wsgc-tomcat-frontend -name "security.log.gz-*" -type f -delete >/dev/null 2>&1 &
+    sudo find -L /var/log/weblogs/wsgc-tomcat-frontend -name "security.log.?-"   -type f -delete >/dev/null 2>&1 &
+fi
+
+[[ -d /apps/ecimages/internal/archives ]] && sudo find /apps/ecimages/internal/archives -type f -name "*.zip" -mtime +60 -delete &
+
+[[ -d /var/log/weblogs/appdynamics/machineagent ]] && sudo find /var/log/weblogs/appdynamics/machineagent -type f -name "*log*" -mtime +5 -delete &
+
+sudo rm -f $(find /var/log/weblogs/httpd* /var/log/httpd* -type f -mtime +1 -print 2>/dev/null)
+
+if [[ -n $1 ]]
+then
+  sudo yum-complete-transaction -y >/dev/null 2>&1
+  sudo rm -f /var/lib/rpm/__db*  /var/cache/yum
+  sudo yum makecache -d0 >/dev/null 2>&1
+  sudo /usr/lib/rpm/rpmdb_verify /var/lib/rpm/Packages
+fi
+
+sudo yum-complete-transaction -y >/dev/null 2>&1
+sudo yum -y install haveged bc expect >/dev/null 2>&1
+sudo chkconfig haveged on >/dev/null 2>&1
+sudo service haveged start >/dev/null 2>&1
+
+for dir in $APPLIST
+do
+    cd $LOGDIR || BailOut "Can't cd to $LOGDIR"
+    dir=$(basename $dir)
+    [ -d "$dir" ] || continue
+    sudo chmod 755 $dir
+    ls -ld $dir
+    cd $dir 2>/dev/null || continue
+
+    echo "$(hostname) $dir"
+    SERVICE=$(chkconfig --list 2>/dev/null | awk '{ print $1 }' | grep -i "^$dir$" | awk '{ print $1 }')
+    [[ $dir = "httpd" ]] && SERVICE=httpd
+    [[ -n $SERVICE ]] && sudo /sbin/service $SERVICE stop
+
+    # get rid of old logs
+    sudo rm -f *2016* *2017* *2018* *2019* *2020* *2021* *2022* *2023*
+
+    for file in $FILE_LIST
+    do
+        #echo "> $file"
+        sudo find . -type f -name $file -mtime +$DAYS -delete 
+        sudo rm -f $file.?
+        sudo rm -f *.gz
+        sudo rm -f *2[0-9][0-9][0-9]*
+
+        [ -f "$file" ] || continue
+        #ls -lh "$file"
+        owner=$(ls -l "$file" | awk '{ print $3 }')
+        group=$(ls -l "$file" | awk '{ print $4 }')
+        sudo mv "$file" "$file.$DATE"
+        sudo touch "$file"
+        sudo chown $owner:$group "$file"
+        sudo chmod 664 "$file"
+    done
+
+    [ -n "$SERVICE" ] && { sleep 5; sudo /sbin/service $SERVICE start; }
+done
+
+sudo service httpd stop
+kill -9 $(ps -ef | grep -i httpd | awk '{ print $2 }' | egrep -iv grep) 2>/dev/null
+sudo service httpd start
+
+exit 0

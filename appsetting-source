@@ -1,0 +1,60 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin::/apps:~/bin:/wsgc/bin:$PATH
+
+TIMEOUT="--connect-timeout 20 --max-time 120"
+USER_AGENT="--user-agent $(basename $0)"
+LOGIN="ptqaenv:ta8PoLe"
+
+BailOut() {
+    [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+    echo "Usage: $(basename $0) <brand> <enviro> <setting>" >&2
+    [[ -n $TMP ]] && rm -rf $TMP
+    exit 1
+}
+
+BRAND=$1
+ENVIRO=$2
+SETTING=$3
+
+[[ -z $SETTING ]] && BailOut 
+
+SETTING_GROUP=$(awk -F\. '{ print $1 }' <<< $SETTING)
+SETTING_NAME=$(awk -F\. '{ print $2 }' <<< $SETTING)
+
+HOST=$(get-host $BRAND $ENVIRO 2>/dev/null | awk -F\. '{ print $1 }')
+[[ -z $HOST ]] && BailOut "Can't find host for $BRAND $ENVIRO"
+HOST="$HOST.wsgc.com"
+
+TMP=$(mktemp -d -t tmp.$(basename $0)XXX )
+
+JSON_LGC=$TMP/lgc.json
+curl $TIMEOUT $USER_AGENT -q -s -k https://$HOST/admin/settings/settings.json > $JSON_LGC
+
+JSON_CFG=$TMP/cfg.json
+curl $TIMEOUT $USER_AGENT -q -s -k https://$HOST/admin/configuration/basic-view.json > $JSON_CFG
+
+JSON_OVR=$TMP/ovr.json
+curl $TIMEOUT $USER_AGENT -q -s -k https://$HOST/admin/configuration/override-view.json > $JSON_OVR
+
+JSON_FF=$TMP/ff.json
+curl $TIMEOUT $USER_AGENT -q -s -k https://$HOST/admin/configuration/featureflags.json > $JSON_FF
+
+# use jq to parse out the setting
+JSON_RES=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group,name,value} | join(",")' $JSON_LGC 2>/dev/null | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3- | sed -z 's/\n/ /g')
+[[ -z $JSON_RES ]] && JSON_RES="<null>"
+echo "$JSON_RES"
+
+# try to figure out the source of the setting by parsing the JSON
+JSON_SRC_BSC=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group, name, source} | join (",")' $JSON_CFG 2>/dev/null | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3- | sed -z 's/\n/ /g')
+[[ -n $JSON_SRC_BSC ]] && echo "basic-view: $JSON_SRC_BSC"
+
+JSON_SRC_OVR=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group, name, source} | join (",")' $JSON_OVR 2>/dev/null | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3- | sed -z 's/\n/ /g')
+[[ -n $JSON_SRC_OVR ]] && echo "override-view: $JSON_SRC_OVR"
+
+JSON_SRC_FF=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group, name, source} | join (",")' $JSON_FF 2>/dev/null | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3-)
+[[ -n $JSON_SRC_FF ]] && echo "feature-flags: $JSON_SRC_OVR"
+
+# clean up json files
+rm -rf $TMP
+
+exit 0

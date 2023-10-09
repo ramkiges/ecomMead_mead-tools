@@ -1,0 +1,189 @@
+#!/bin/bash
+# 
+PATH=/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:/apps/jdk8/bin:/apps/java/bin:/apps/jdk7/bin:/opt/oracle/product/11.2.0/client_1/bin
+export PATH
+. /apps/buildsystem/bin/env.sh
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+TMP=/var/log/weblogs/tmp
+LOGIN="pkqaenv:Ca8tWh33l"
+# expiration date
+DATE="2025-12-31"
+#2016-01-26:14:11:17
+#TODAY=$(date +'%d-%b-%y' | tr "a-z" "A-Z")
+TODAY=$(date +'%Y-%m-%d:%H:%M:%S' | tr "a-z" "A-Z")
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BRAND=$1
+ENV=$2
+SKU_LIST=$(echo "$3" | sed -e s/,/' '/g)
+
+# test parameters
+#BRAND=pt
+#ENV=qa26
+#SKU_LIST="8527558 8528986 4397873"
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <brand> <env> <sku_list>"
+	exit 1
+}
+
+brand2site() {
+	case $1 in
+		admin ) echo "600" ;;
+		pb ) echo "63" ;;
+		pk ) echo "65" ;;
+		pt ) echo "67" ;;
+		mg ) echo "66" ;;
+		we ) echo "69" ;;
+		ws ) echo "61" ;;
+        * ) return 1 ;;
+	esac
+}
+
+#[ -z "$SKU_LIST" ] && BailOut "Need SKU list"
+[ -z "$BRAND" ] && BailOut "Need brand"
+[ -z "$ENV" ] && BailOut "Need environment"
+
+SITE=$(brand2site $BRAND)
+[ -z "$SITE" ] && BailOut "Invalid brand"
+CODE=$(echo "$BRAND" | tr "[a-z]" "[A-Z]")
+HOST=$(geturls $BRAND $ENV|grep -i "host:" | awk -F: '{ print $2 }' | awk '{ print $1 }')
+
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+[ -z "$JENKINS" ] && BailOut "Can't find 'jenkins-jnlp'"
+
+if [ -n "$TICKET" ] 
+then
+    TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+	TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+    for jira in $TICKET
+    do
+	    echo "Jira: https://jira.wsgc.com/browse/$jira"
+    done
+fi
+
+# db env translations
+DB_ENV=$ENV
+[ "$ENV" = "int" ] && DB_ENV="integration"
+[ "$ENV" = "int2" ] && DB_ENV="integration2"
+[ "$ENV" = "rgs1" ] && DB_ENV="regression"
+
+JMX_PORT=39667
+for dir in /wsgc/bin /apps ~/bin
+do
+	[ -f $dir/jmxclient.jar ] && { JMX_JAR=$dir/jmxclient.jar; break; }
+done
+
+for script in getdb geturls sqlplus getschema
+do
+    which $script >/dev/null 2>&1 || BailOut "Can't find $script"
+done
+
+SCHEMA=$(getschema $BRAND $ENV)
+[ -z "$SCHEMA" ] && BailOut "Can't get db schema for $BRAND $ENV"
+
+DB=$(getdb $SCHEMA)
+[ -z "$DB" ] && BailOut "Can't get creds for $SCHEMA $BRAND $ENV"
+
+# parse out DB creds
+dbHost=$(echo "$DB" | awk -F\| '{ print $1 }')
+dbOwner=$(echo "$DB" | awk -F\| '{ print $2 }')
+dbUser=$(echo "$DB" | awk -F\| '{ print $3 }')
+dbPass=$(echo "$DB" | awk -F\| '{ print $4 }')
+dbSID=$(echo "$DB" | awk -F\| '{ print $5 }')
+dbPort=$(echo "$DB" | awk -F\| '{ print $6 }')
+dbTable="WW_INVENTORY_STATE"
+
+
+for sku in $(echo "$SKU_LIST" | sed -e s/,/' '/g)
+do 
+    echo "================================================================================="
+    echo "*** SKU $sku ***"
+    SQL="select SKU, AVAILABILITY, EXPIRATION_TIME from $SCHEMA.$dbTable where SKU='$sku' and CONCEPT_CODE='$CODE';"
+    echo "$SQL" | sqlplus -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+    SQL="update $SCHEMA.$dbTable set AVAILABILITY='OnHand', EXPIRATION_TIME='$DATE' where CONCEPT_CODE='$CODE' and SKU='$sku';
+    commit;"
+    echo "$SQL" | sqlplus -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+    SQL="select SKU, AVAILABILITY, EXPIRATION_TIME from $SCHEMA.$dbTable where SKU='$sku' and CONCEPT_CODE='$CODE';"
+    echo "$SQL" | sqlplus -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+done
+
+# create a CSV file of the NLA SKUs
+umask 000
+CSV="nla-$SCHEMA-$BRAND-$ENV.csv"
+TXT="nla-$SCHEMA-$BRAND-$ENV.txt"
+echo "NLA SKU's for $BRAND $ENV ($SCHEMA) - NLA SKU CSV http://$(hostname):38667/$(basename $TMP)/$CSV"
+[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_INFO}$(basename $0) NLA SKU CSV file for $BRAND $ENV ($SCHEMA) http://$(hostname):38667/$(basename $TMP)/$CSV"
+
+SQL="
+set recsep off;
+SET NEWPAGE 0
+SET SPACE 0
+SET LINESIZE 80
+SET PAGESIZE 0
+SET ECHO OFF
+SET FEEDBACK OFF
+SET VERIFY OFF
+SET HEADING OFF
+SET MARKUP HTML OFF SPOOL OFF 
+select CONCEPT_CODE, SKU, AVAILABILITY, EXPIRATION_TIME 
+    from $SCHEMA.$dbTable 
+    where 
+        CONCEPT_CODE = '$CODE'
+    and 
+        ((AVAILABILITY = 'NLA') 
+    or
+        (CONCEPT_CODE = '$CODE' and AVAILABILITY = 'OnHand' and EXPIRATION_TIME <= '$TODAY'))
+    order by EXPIRATION_TIME;"
+
+#echo "$SQL"
+echo "Concept, SKU, Status, Expiration" > $TMP/$CSV
+rm -f $TMP/$TXT
+echo "$SQL" | sqlplus -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" | egrep -vi "selected" | 
+while read concept sku status exp
+do
+    [ -z "$sku" ] && continue
+    echo "$concept, $sku, $status, $exp" >> $TMP/$CSV
+    /bin/echo -n "$sku " >> $TMP/$TXT
+    #echo "$concept, $sku, $status, $exp"
+done
+[ -z "$SKU_LIST" ] && exit 0
+
+SUMMARY=$(geturls $BRAND $ENV | grep -i summary.html | awk '{ print $1 }')
+if [ -z "$SUMMARY" ] 
+then
+    echo "Can't retrieve summary page - restarting DP to clear SKU cache"
+    eval $JENKINS build -s frontend-restart -p Brand=$BRAND -p Environment=$ENV -p Ticket=$TICKET
+    exit 0        
+fi
+
+GENERATION=$(curl --user "$LOGIN" -s -k -H 'Cache-Control: no-cache' $SUMMARY 2>/dev/null |grep -iw "cat" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{print $1 }')
+if [ -z "$GENERATION" ] 
+then
+    echo "Can't retrieve generation number - restarting DP to clear SKU cache"
+    eval $JENKINS build -s frontend-restart -p Brand=$BRAND -p Environment=$ENV -p Ticket=$TICKET
+    exit 0        
+fi
+
+if [ -n "$JMX_JAR" ]
+then
+    for job in availabilityCache baseSkuCache${GENERATION}.0 checkAvailabilityCache foundationDataCache skuCache${GENERATION}.0
+    do
+        java -jar $JMX_JAR - $HOST:39667 com.wsgc.ecommerce.$BRAND:type=Cache,name=$job removeAll
+    done
+else
+    echo "Can't update caches because we're missing the jmxclient.jar file - restarting DP instead"
+    eval $JENKINS build -s frontend-restart -p Brand=$BRAND -p Environment=$ENV -p Ticket=$TICKET
+fi
+
+[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): These SKUs for $BRAND $ENV ($SCHEMA) set to 'OnHand': $SKU_LIST"
+
+exit 0

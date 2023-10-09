@@ -1,0 +1,833 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+export PATH
+#BUILD_USER_ID="${option.BUILD_USER_ID}"
+export NS="http://maven.apache.org/POM/4.0.0"
+
+DEBUG=1
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+DEVOPS=https://repos.wsgc.com/svn/devops
+PROPERTIES=packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site
+FRONTEND=application/frontend-2.1/prd/config/app/trunk
+WSGC=/apps/tmp/wsgc-$(basename $0)/$$
+
+# datacenters for each coast
+SITES_WEST="rk sac"
+SITES_EAST="ab"
+
+# list of markets
+MARKET_LIST="usa can"
+
+export LC_CTYPE=en_US.UTF-8
+export LC_ALL=C
+LOG="/apps/$(basename $0).log"
+DATE=$(date +'%Y-%m-%d %H:%M')
+SEPARATOR="#bfbfbf"
+
+WARN_VALUE="#b3f0ff"
+WARN_TYPE="#ff6699"
+WARN_MISSING="#ffff99"
+
+# confluence settings
+DOC_SPACE="PS"
+CCLIDIR="/apps/scripts/atlassian-cli-3.2.0"
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+	[ -n "$1" ] && echo "***
+ERROR: $*
+***" 
+	# cleanup
+	#rm -rf $WSGC >/dev/null 2>&1
+
+    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_FAIL}$(basename $0): App setting $SETTING update *failed* (_${*}_) $BUILD_URL" 
+
+	exit 1
+}
+
+HTML() {
+    echo "$*" >> $OUTFILE
+}
+
+getProp() {
+  svn cat $1 2>/dev/null | xmlstarlet sel -N pom=$NS -t -v /pom:project/pom:properties/pom:$2 2>/dev/null | tr "A-Z" "a-z"
+}
+
+# basic checks to make sure someone is authorized to make the change
+checkACL() {
+    echo ">>> $FUNCNAME <<<"
+    #[ -n "$DEBUG" ] && echo "ACL: $ACL ($BUILD_USER_ID)"
+    
+    [ -z "$ACL" ] && BailOut "$FUNCNAME: ACL is empty - user much be in ACL to update prd/preprd environments"
+    [ -z "$BUILD_USER_ID" ] && BailOut "$FUNCNAME: BUILD_USER_ID is empty"
+    echo "$ACL" | egrep -iq "$BUILD_USER_ID@" || BailOut "$FUNCNAME: $BUILD_USER_ID is not in ACL ($ACL)"
+}
+
+# check out the frontend and appsettings repos
+checkOut() {
+  echo ">>> $FUNCNAME <<<"
+	umask 000
+	rm -rf $WSGC >/dev/null 2>&1
+	mkdir -p $WSGC 
+	cd $WSGC || BailOut "Could not cd to $WSGC"
+
+	/bin/echo -ne "Checking out appsettings repo - $WSGC ... "
+	mkdir -p $WSGC/$(dirname $PROPERTIES) 
+	cd $WSGC/$(dirname $PROPERTIES) 
+	svn -q co $DEVOPS/$PROPERTIES $(basename $PROPERTIES) || BailOut "Could not svn co appsettings repo"
+	svn -q up || BailOut "Could not svn up appsettings repo"
+	echo "Done"
+
+	/bin/echo -ne "Checking out frontend repo - $WSGC ... "
+	mkdir -p $WSGC/$(dirname $FRONTEND)
+	cd $WSGC/$(dirname $FRONTEND) 
+	svn -q co $DEVOPS/$FRONTEND $(basename $FRONTEND)
+	svn -q up
+	echo "Done"
+
+	echo $WSGC > ~/.wsi_settings
+}
+
+Warning() { 
+    echo "+++
+WARNING: $* 
++++" >&2
+    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_WARN}$(basename $0): $*"
+}
+
+setVars() {
+    [[ $DEBUG -gt 1 ]] && echo ">>> $FUNCNAME $BRAND $MARKET_LABEL $MARKET <<<"
+
+    # clear these values
+    POM_PRD=
+    POM_PREPRD=
+    POM_PRD_WEST=
+    POM_PREPRD_WEST=
+    POM_PRD_EAST=
+    POM_PREPRD_EAST=
+
+    # impute some values
+    SITEID=$(brand2site $BRAND $MARKET)
+
+    if [ "$COAST" = "west" ]
+    then
+        for site in $SITES_WEST
+        do
+          p_url="$DEVOPS/$FRONTEND/$BRAND/${MARKET}prd${site}/pom.xml"
+          svn cat $p_url > /dev/null 2>&1 && POM_PRD=$p_url
+
+          p_url="$DEVOPS/$FRONTEND/$BRAND/${MARKET}preprd${site}/pom.xml"
+          svn cat $p_url > /dev/null 2>&1 && POM_PREPRD=$p_url
+
+          p_url="$DEVOPS/$FRONTEND/$BRAND/${MARKET}prd${site}/pom.xml"
+          svn cat $p_url > /dev/null 2>&1 && POM_PRD_WEST=$p_url
+
+          p_url="$DEVOPS/$FRONTEND/$BRAND/${MARKET}preprd${site}/pom.xml"
+          svn cat $p_url > /dev/null 2>&1 && POM_PREPRD_WEST=$p_url
+        done
+    fi
+
+    if [ "$COAST" = "east" ]
+    then  
+        for site in $SITES_EAST
+        do
+          p_url="$DEVOPS/$FRONTEND/$BRAND/${MARKET}prd${site}/pom.xml"
+          svn cat $p_url > /dev/null 2>&1 && POM_PRD=$p_url
+
+          p_url="$DEVOPS/$FRONTEND/$BRAND/${MARKET}preprd${site}/pom.xml"
+          svn cat $p_url > /dev/null 2>&1 && POM_PREPRD=$p_url
+
+          p_url="$DEVOPS/$FRONTEND/$BRAND/${MARKET}prd${site}/pom.xml"
+          svn cat $p_url > /dev/null 2>&1 && POM_PRD_EAST=$p_url
+
+          p_url="$DEVOPS/$FRONTEND/$BRAND/${MARKET}preprd${site}/pom.xml"
+          svn cat $p_url > /dev/null 2>&1 && POM_PREPRD_EAST=$p_url
+        done
+    fi
+    
+    [[ -z $POM_PRD ]] && return;
+    [[ -z $POM_PREPRD ]] && return;
+
+#[[ -n $DEBUG ]] && echo "POM_PRD: $POM_PRD"
+#[[ -n $DEBUG ]] && echo "POM_PREPRD: $POM_PREPRD"
+
+    SCHEMA_PRD=$(getProp $POM_PRD frontend.tableOwner)
+    [ -z "$SCHEMA_PRD" ] && BailOut "$FUNCNAME Cannot figure out prd schema for $BRAND $COAST $MARKET"
+
+    SCHEMA_PREPRD=$(getProp $POM_PREPRD frontend.tableOwner)
+    [ -z "$SCHEMA_PREPRD" ] && BailOut "$FUNCNAME Cannot figure out preprd schema for $BRAND $COAST $MARKET"
+
+    SERVER_PRD=$(getProp $POM_PRD frontend.datasource.ecomDB.url | awk -F\@ '{ print $2 }' | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+    [ -z "$SERVER_PRD" ] && BailOut "Cannot figure out prd DB server for $BRAND $COAST $MARKET"
+
+    SERVER_PRD_EAST=$(getProp $POM_PRD_EAST frontend.datasource.ecomDB.url | awk -F\@ '{ print $2 }' | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+    SERVER_PRD_WEST=$(getProp $POM_PRD_WEST frontend.datasource.ecomDB.url | awk -F\@ '{ print $2 }' | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+
+[[ $DEBUG -gt 3 ]] && echo "SERVER_PRD_WEST: $SERVER_PRD_WEST"
+[[ $DEBUG -gt 3 ]] && echo "SERVER_PRD_EAST: $SERVER_PRD_EAST"
+
+    SERVER_PREPRD=$(getProp $POM_PREPRD frontend.datasource.ecomDB.url | awk -F\@ '{ print $2 }' | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+    [ -z "$SERVER_PREPRD" ] && BailOut "Cannot figure out preprd DB server  for $BRAND $COAST $MARKET"
+    SERVER_PREPRD_EAST=$(getProp $POM_PREPRD_EAST frontend.datasource.ecomDB.url | awk -F\@ '{ print $2 }' | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+    SERVER_PREPRD_WEST=$(getProp $POM_PREPRD_WEST frontend.datasource.ecomDB.url | awk -F\@ '{ print $2 }' | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+
+    OVERRIDE_URL="$DEVOPS/$PROPERTIES/$SERVER_PREPRD/$SCHEMA_PREPRD/$BRAND/override/override.properties"
+    svn cat $OVERRIDE_URL >/dev/null 2>&1 || BailOut "$FUNCNAME URL for override.properties is not valid ($OVERRIDE_URL)"
+#[[ -n $DEBUG ]] && echo "Override:$OVERRIDE_URL"
+
+    DEFAULT_URL="$DEVOPS/$PROPERTIES/$SERVER_PRD/$SCHEMA_PRD/$BRAND/default/default.properties"
+    svn cat $DEFAULT_URL >/dev/null 2>&1 || BailOut "URL for default.properties is not valid ($DEFAULT_URL)"
+#[[ -n "$DEBUG ]] && echo "Default:$DEFAULT_URL"
+
+    OVERRIDE="$WSGC/$PROPERTIES/$SERVER_PREPRD/$SCHEMA_PREPRD/$BRAND/override/override.properties"
+    [ -e "$OVERRIDE" ] || BailOut "override.properties file not found ($OVERRIDE)"
+
+    OVERRIDE_EAST="$WSGC/$PROPERTIES/$SERVER_PREPRD_EAST/$SCHEMA_PREPRD/$BRAND/override/override.properties"
+    OVERRIDE_WEST="$WSGC/$PROPERTIES/$SERVER_PREPRD_WEST/$SCHEMA_PREPRD/$BRAND/override/override.properties"
+
+[[ $DEBUG -gt 3 ]] && echo "OVERRIDE_WEST: $OVERRIDE_WEST"
+[[ $DEBUG -gt 3 ]] && echo "OVERRIDE_EAST: $OVERRIDE_EAST"
+
+    [[ -e $OVERRIDE_WEST ]] || OVERRIDE_WEST=
+    [[ -e $OVERRIDE_EAST ]] || OVERRIDE_EAST=
+
+    DEFAULT="$WSGC/$PROPERTIES/$SERVER_PRD/$SCHEMA_PRD/$BRAND/default/default.properties"
+    [ -e "$DEFAULT" ] || BailOut "default.properties file not found ($DEFAULT)"
+
+    # SQL files
+    SQL_DEFAULT="$(dirname $DEFAULT)/$SERVER_PRD-$BRAND${MARKET}-default.sql"
+    SQL_OVERRIDE="$(dirname $OVERRIDE)/$SERVER_PREPRD-$BRAND${MARKET}-override.sql"
+    SQL_CLEAR="$WSGC/$PROPERTIES/clear-release-scope${MARKET}.sql"
+    VERIFY_RELEASE="$(dirname $OVERRIDE)/$SERVER_PREPRD-$BRAND${MARKET}-verify-release.txt"
+}
+
+# this function removes override entries with a setting scope of 'release' or 'aktest'
+clearReleaseScope() {
+    echo
+    echo ">>> $FUNCNAME <<<"
+
+    for COAST in east west
+    do
+        for BRAND in $(getbrandlist -p)
+        do
+            # set variables for this brand/scope
+            setVars
+            [[ -z $POM_PRD ]] && continue
+            [[ -z $POM_PREPRD ]] && continue
+
+            # create a temp file for the updated overrides file
+            MOD=$(dirname $OVERRIDE)/$BRAND-$$COAST-clear
+            # remove any existing file and create a zero-byte new one - this protects us from empty files
+            rm -f $MOD;touch $MOD
+
+            # construct a string to use to delete old record
+            RECORD_RELEASE=".*\.*\.release\..*="
+            RECORD_AKTEST=".*\.*\.aktest\..*="
+
+            # delete 'release' and 'aktest' scope entries from override file
+            echo "Removing 'release' and 'aktest' scope settings for $BRAND $COAST"
+            cat $OVERRIDE | egrep -vi "$RECORD_RELEASE|$RECORD_AKTEST" >> $MOD 
+            mv $MOD $OVERRIDE
+            [ $? -ne 0 ] && BailOut "There was a problem with the update"
+
+            # commit the change
+            MESSAGE="$ACTION $BRAND $COAST $COMMENTS"
+            [ -n "$TICKET" ] && MESSAGE="[$TICKET] $MESSAGE"
+            [ -z "$TICKET" ] && MESSAGE="[$(basename $0)] $MESSAGE"
+            cd $WSGC/$PROPERTIES || BailOut "Couldn't cd to properties directory"
+
+            # add on the BUILD_USER_ID so we can see who made the change
+            MESSAGE="$MESSAGE ($BUILD_USER_ID)"
+
+            svn commit -q -m "$MESSAGE" $OVERRIDE
+            if [ $? -ne 0 ] 
+            then
+                echo "Commit problem $?" >> $LOG
+                BailOut "There was an issue with the commit..."
+            else
+                echo "Commit successful"
+            fi
+        done
+    done
+
+    # generate SQL to clear the release scope out of the DB
+    cat > $SQL_CLEAR << EOF
+/*
+$DATE $(basename $SQL_CLEAR) $BUILD_USER_ID
+$FUNCNAME
+*/
+
+delete from $SCHEMA_PREPRD.ww_setting_values 
+    where (site='$(brand2site gr $MARKET)' 
+        or site='$(brand2site mg $MARKET)' 
+        or site='$(brand2site pb $MARKET)' 
+        or site='$(brand2site pk $MARKET)' 
+        or site='$(brand2site pt $MARKET)' 
+        or site='$(brand2site rj $MARKET)' 
+        or site='$(brand2site we $MARKET)' 
+        or site='$(brand2site ws $MARKET)')
+    and SETTING_SCOPE='release';
+
+EOF
+    commitFile $SQL_CLEAR "SQL to clear release scope (all brands, both coasts): "
+
+}
+
+# commit SQL to SVN
+commitFile() {
+    echo
+    echo ">>> $FUNCNAME <<<"
+    FILE=$1
+    LABEL=$2
+
+    [ -f "$FILE" ] || BailOut "FILE not valid $(FILE)"
+    svn add $FILE >/dev/null 2>&1
+    svn propset svn:mime-type text/plain $FILE >/dev/null 2>&1
+    svn propset svn:eol-style native $FILE >/dev/null 2>&1
+    svn propset svn:keywords "Id Author LastChangedDate LastChangedBy" $FILE >/dev/null 2>&1
+    
+    MESSAGE="$TICKET $COMMENTS $BUILD_USER_ID"
+    [ -n "$TICKET" ] && MESSAGE="[$TICKET] $MESSAGE"
+    [ -z "$TICKET" ] && MESSAGE="[$(basename $0)] $MESSAGE"
+    svn commit -q -m "$MESSAGE $BUILD_NUMBER" $FILE
+    if [ $? -ne 0 ] 
+    then
+        echo "commit problem $?" 
+        BailOut "There was an issue with the commit..."
+    else
+        echo "Commit successful"
+    fi
+
+    URL=$(echo "$FILE" | sed -es"%$WSGC%$DEVOPS%g")
+    echo "$LABEL: 
+$URL"
+}
+
+
+# this function generates the SQL to update prd from default.properties
+genSQLfromDefault () {
+    echo
+    echo ">>> $FUNCNAME <<<"
+
+    echo "Update Production DB $BRAND $ENV $SERVER_PRD"
+    echo "/*
+$DATE $(basename $SQL_DEFAULT) $BUILD_USER_ID
+$ACTION - Update production table from default.properties
+$BRAND $COAST $SERVER_PRD $TICKET $COMMENTS 
+$FUNCNAME
+*/
+
+set define off; " > $SQL_DEFAULT
+
+    cat $DEFAULT |
+    while read line
+    do
+        SETTING_GROUP=$(echo "$line" | awk -F\. '{ print $1 }')
+        SETTING_NAME=$(echo "$line" | awk -F\. '{ print $2 }' | awk -F= '{ print $1 }')
+        SETTING_VALUE=$(echo "$line" | cut -d= -f 2-)
+        SETTING_SCOPE="default"
+
+        echo "
+update $SCHEMA_PRD.ww_setting_values
+    set setting_value='$SETTING_VALUE'
+        where (site='$SITEID' and setting_scope='$SETTING_SCOPE' and setting_group='$SETTING_GROUP' and setting_name='$SETTING_NAME');"  >> $SQL_DEFAULT
+    done
+
+    echo "
+-- end $(basename $SQL_DEFAULT)
+" >> $SQL_DEFAULT
+
+    commitFile $SQL_DEFAULT "SQL to update 'default' SETTING_SCOPE"
+}
+
+# this function generates SQL to update prd or preprd from the override file
+genSQLfromOverride () {
+    echo
+    echo ">>> $FUNCNAME $1 $VERIFY <<<"
+
+    case $1 in
+        release )
+            SRC_SCOPE=release
+            DST_LABEL=production
+            DST_SCOPE=default
+            DST_SQL=$SQL_DEFAULT
+            DST_SERVER=$SERVER_PRD
+            DST_SCHEMA=$SCHEMA_PRD
+        ;;
+
+        prd )
+            SRC_SCOPE=
+            DST_LABEL=production
+            DST_SCOPE=default
+            DST_SQL=$SQL_DEFAULT
+            DST_SERVER=$SERVER_PRD
+            DST_SCHEMA=$SCHEMA_PRD
+BailOut "Haven't figured this one out yet"
+        ;;
+
+        aktest )
+            SRC_SCOPE="aktest release"
+            DST_LABEL=pre-production
+            DST_SCOPE=aktest
+            DST_SQL=$SQL_OVERRIDE
+            DST_SERVER=$SERVER_PREPRD
+            DST_SCHEMA=$SCHEMA_PREPRD
+        ;;
+
+        * ) BailOut "Can't figure out whether we're doing prd or preprd" 
+    esac
+
+    [[ -z $DST_SQL ]] && BailOut "Why is DST_SQL empty?"
+    
+    echo "Update $DST_SCOPE DB $BRAND $COAST $DST_SERVER"
+    echo "/* 
+$DATE $(basename $DST_SQL) $BUILD_USER_ID 
+$ACTION - Update $DST_LABEL using override.properties 
+$MARKET_LABEL $BRAND $COAST $DST_SERVER $TICKET $COMMENTS 
+source scope:       $SRC_SCOPE
+destination scope:  $DST_SCOPE
+$FUNCNAME $1
+*/" > $DST_SQL
+
+    # copy the SQL comments to the verify file
+    [ -n "$VERIFY" ] && cp $DST_SQL $VERIFY_RELEASE
+
+    echo "set define off;
+
+begin " >> $DST_SQL
+
+    echo "$SRC_SCOPE" | grep -iq "release" && echo "-"
+
+    # separate aktest and release into different sections in the file
+    for scope in $SRC_SCOPE
+    do
+        grep -i "\.$scope\.*" $OVERRIDE | sort |
+        while read line
+        do
+            SETTING_GROUP=$(echo "$line" | awk -F\. '{ print $1 }')
+            SETTING_NAME=$(echo "$line" | awk -F\. '{ print $2 }')
+            SETTING_SCOPE=$(echo "$line" | awk -F\. '{ print $3 }')
+            SETTING_TYPE=$(echo "$line" | awk -F\. '{ print $4 }' | awk -F= '{ print $1 }')
+            SETTING_VALUE=$(echo "$line" | cut -d= -f 2-)
+
+            [ "$DST_LABEL" = "production" ] && SETTING_SCOPE="default"
+
+            # dig up the last commit, just for funsies
+            if [ -n "$VERIFY" ]
+            then
+                COMMIT=$(svn blame $OVERRIDE | grep "$line" | awk '{ print $1 }')
+                [ -n "$COMMIT" ] && COMMIT=$(svn log $OVERRIDE -r $COMMIT | grep "$SETTING_GROUP\.$SETTING_NAME")
+                echo "
+$COMMIT
+$SETTING_GROUP.$SETTING_NAME  /$SETTING_TYPE   '$SETTING_VALUE' " >> $VERIFY_RELEASE
+                echo "$COMMIT"
+            fi
+
+            # 'upsert' into DB
+            echo "
+    begin
+        insert into $DST_SCHEMA.ww_setting_values (SITE,SETTING_SCOPE,SETTING_GROUP,SETTING_NAME,SETTING_TYPE,SETTING_VALUE)
+            values($SITEID,'$SETTING_SCOPE','$SETTING_GROUP','$SETTING_NAME','$SETTING_TYPE','$SETTING_VALUE');
+        exception when dup_val_on_index then update $SCHEMA_PREPRD.ww_setting_values set setting_value='$SETTING_VALUE', setting_type='$SETTING_TYPE'
+            where (setting_group='$SETTING_GROUP' and setting_name='$SETTING_NAME' and site='$SITEID' and setting_scope='$SETTING_SCOPE');  
+    end;" >> $DST_SQL
+        done
+    done
+
+    echo >> $DST_SQL
+    echo "end;" >> $DST_SQL
+
+    echo "
+-- end $(basename $DST_SQL)
+" >> $DST_SQL
+
+    [ -n "$VERIFY" ] && commitFile $VERIFY_RELEASE "Verfication of $SRC_SCOPE"
+    commitFile $DST_SQL "SQL To update $MARKET_LABEL $SRC_SCOPE SETTING_SCOPE"
+    genConfluence 
+}
+
+# function to create new_default.properties from release scope
+genNewDefaultProperties () {
+    echo
+    echo ">>> $FUNCNAME <<<"
+
+    SETTING_SCOPE=release
+    DEFAULT_NEW="$(dirname $DEFAULT)/new_default.properties"
+    rm -f $DEFAULT_NEW
+
+    echo "Create new_default.properties for $BRAND $COAST"
+    echo "# $(basename $DEFAULT_NEW) $BRAND $COAST $SERVER_PRD $DATE $TICKET $COMMENTS $BUILD_USER_ID
+" > $DEFAULT_NEW
+
+    # create a new_default.properties by selecting the 'release' scope from the override.properties
+    grep ".*\.*\.release\..*=" $OVERRIDE |
+    while read line
+    do
+        SETTING_GROUP=$(echo "$line" | awk -F\. '{ print $1 }')
+        SETTING_NAME=$(echo "$line" | awk -F\. '{ print $2 }')
+        SETTING_TYPE=$(echo "$line" | awk -F\. '{ print $4 }' | awk -F= '{ print $1 }')
+        SETTING_VALUE=$(echo "$line" | cut -d= -f 2-)
+
+        # entries are commented out for now for safety
+        echo "#$SETTING_GROUP.$SETTING_NAME.$SITE.$SETTING_TYPE.=$SETTING_VALUE" >> $DEFAULT_NEW
+    done
+
+    echo "
+# end $(basename $DEFAULT_NEW)
+" >> $DEFAULT_NEW
+
+    commitFile $DEFAULT_NEW "SQL to update 'default' SETTING_SCOPE"
+}
+
+# create a confluence page with the settings
+# -a Update_Confluence
+genConfluence() {
+    echo ">>> $FUNCNAME $MARKET_LABEL $MARKET <<<"
+
+    # this is just so that the verification portion of the script won't fail - we actually loop between both coasts
+    COAST=west
+    SETTING_SCOPE=release 
+    SCOPE=$(echo $SETTING_SCOPE | awk '{print toupper(substr($0,0,1))tolower(substr($0,2))}')
+    PAGENAME="$SCOPE Appsettings Verification - $MARKET_LABEL"
+[[ -n $DEBUG ]] && echo "Confluence: $PAGENAME"
+
+    OUTFILE="/tmp/appsettings-${SCOPE}${MARKET}-$$.html"
+    rm -f $OUTFILE
+    INDEX="https://confluence.wsgc.com/display/PS/$SCOPE+Appsettings+Verification+-+$MARKET_LABEL"
+
+    HTML "<!-- $(date) -->"
+    HTML
+    HTML "<h4>References:</h4>"
+    HTML "<ul>"
+    HTML "<li><a href='https://confluence.wsgc.com/display/PS/App+Settings+Automation'>App Settings Automation</a></li>"
+    HTML "<li><a href='https://confluence.wsgc.com/display/EE/Setting+Value+Definitions+in+Property+Files'>Appsetting Definitions</a></li>"
+    HTML "<li><a href='https://ecombuild.wsgc.com/jenkins/job/adhoc-appsetting-prd/'>Appsetting Editing Tool (adhoc-appsetting-prd)</a></li>"
+    HTML "<li><a href='https://ecombuild.wsgc.com/jenkins/job/appsetting-upload-prd/'>Appsetting Upload Tool (upload settings to DB)</a></li>"
+    for m in $MARKET_LIST
+    do
+      l=$(market2label $m)
+      [[ $l = $MARKET_LABEL ]] && continue
+      HTML "<li><a href='https://confluence.wsgc.com/display/PS/$SCOPE+Appsettings+Verification+-+$l'>$SCOPE Appsettings Verification - $l</a></li>"
+    done
+    HTML "</ul>"
+
+    HTML "<h4>$SCOPE scope settings by brand:</h4>"
+
+    HTML "<ul>"
+    for BRAND in $(getbrandlist -p)
+    do
+        # set variables for this brand/scope
+        setVars
+        [[ -z $POM_PRD ]] && continue
+        [[ -z $POM_PREPRD ]] && continue
+
+        label=$(echo "$BRAND" | tr '[:lower:]' '[:upper:]')
+        url="https://confluence.wsgc.com/display/PS/Release+Appsettings+Verification+-+$label+$MARKET_LABEL"
+        HTML "<li><a href='$url'>Release Appsettings Verification - $label $MARKET_LABEL</a></li>"
+    done
+    HTML "</ul>"
+    HTML "<h5><i>This page is dynamically generated - any manual edits will be lost</i></h5>"
+
+    echo "Updating confluence - $PAGENAME..."
+    sh $CCLIDIR/confluence.sh --space "$DOC_SPACE" --title "$PAGENAME" --action storepage --file $OUTFILE --noConvert #--verbose
+    [ $? -eq 0 ] && rm $OUTFILE
+
+    for BRAND in $(getbrandlist -p)
+    do
+        # set variables for this brand/scope
+        setVars
+        [[ -z $POM_PRD ]] && continue
+        [[ -z $POM_PREPRD ]] && continue
+
+        echo "*** $FUNCNAME $BRAND ***"
+        label=$(echo "$BRAND" | tr '[:lower:]' '[:upper:]')
+
+        PAGENAME="$SCOPE Appsettings Verification - $label $MARKET_LABEL"
+        OUTFILE="/tmp/appsettings-${SCOPE}-${label}${MARKET}-$$.html"
+        rm -f $OUTFILE
+
+        HTML "<h4>References:</h4>"
+        HTML "<ul>"
+        #HTML "<li><a href='https://confluence.wsgc.com/display/PS/Release+Appsettings+Verification'>Release Appsettings Verification Index</a> </li>"
+        HTML "<li><a href='$INDEX'>Release Appsettings Verification Index - $MARKET_LABEL</a> </li>"
+        HTML "<li><a href='https://ecombuild.wsgc.com/jenkins/job/adhoc-appsetting-prd/'>Appsetting Editing Tool (adhoc-appsetting-prd)</a></li>"
+        HTML "<li><a href='https://ecombuild.wsgc.com/jenkins/job/appsetting-upload-prd/'>Appsetting Upload Tool (upload settings to DB)</a></li>"
+        HTML "</ul>"
+
+        HTML "<h2>$SCOPE scope settings for $(getdomain $BRAND)</h2>"
+        HTML "<table border='1'>"
+        HTML "  <tr>"
+        #HTML "      <th colspan='3'><font size='-1'>Validation Flags</font></th>"
+        HTML "      <td bgcolor='$WARN_TYPE'><font size='-1'>Setting type mismatch</font></td>"
+        HTML "      <td bgcolor='$WARN_MISSING'><font size='-1'>Missing value</font></td>"
+        HTML "      <td bgcolor='$WARN_VALUE'><font size='-1'>Setting value mismatch</font></td>"
+        HTML "  </tr>"
+        HTML "</table>"
+
+        HTML
+        HTML "<table border='1'>"
+        HTML "  <tr>"
+        HTML "      <th style='text-align:center'>Setting</th>"
+        HTML "      <th style='text-align:center' colspan='2'>Value</th>"
+        HTML "      <th style='text-align:center'>Type</th>"
+        HTML "      <th style='text-align:center'>Date</th>"
+        HTML "      <th style='text-align:center'>Comments</th>"
+        HTML "  </tr>"
+
+        # loop through all settings - both coasts
+        SETTING_LIST=$(grep -ih "\.$SETTING_SCOPE\.*" $OVERRIDE_WEST $OVERRIDE_EAST | awk -F\. '{ print $1 "." $2 }' | sort -u)
+        for line in $SETTING_LIST
+        do
+            COMMIT_DATE_WEST=
+            COMMIT_DATE_EAST=
+            COMMIT_MSG_WEST=
+            COMMIT_MSG_EAST=
+            COMMIT_USER_WEST=
+            COMMIT_USER_EAST=
+            BGCOLOR_TYPE=
+            BGCOLOR_VALUE=
+            BGCOLOR_MISSING=
+
+            SETTING_GROUP=$(echo "$line" | awk -F\. '{ print $1 }')
+            SETTING_NAME=$(echo "$line" | awk -F\. '{ print $2 }')
+            TOKEN="$SETTING_GROUP\.$SETTING_NAME\.$SETTING_SCOPE"
+
+            VALUE_WEST=$(grep -ih "$TOKEN" $OVERRIDE_WEST | cut -d= -f 2- )
+            VALUE_EAST=$(grep -ih "$TOKEN" $OVERRIDE_EAST | cut -d= -f 2- )
+            TYPE_WEST=$(grep -ih "$TOKEN" $OVERRIDE_WEST | awk -F\. '{ print $4 }' | awk -F= '{ print $1 }')
+
+            VALUE_EAST=$(grep -ih "$TOKEN" $OVERRIDE_EAST | cut -d= -f 2- )
+            VALUE_EAST=$(grep -ih "$TOKEN" $OVERRIDE_EAST | cut -d= -f 2- )
+            TYPE_EAST=$(grep -ih "$TOKEN" $OVERRIDE_EAST | awk -F\. '{ print $4 }' | awk -F= '{ print $1 }')
+
+            # catch if the east/west types don't match
+            [[ -n "$TYPE_EAST" ]] && [[ -n "$TYPE_WEST" ]] && [[ "$TYPE_EAST" != "$TYPE_WEST" ]] && BGCOLOR_TYPE=$WARN_TYPE
+
+            # catch if the east/west values don't match
+            [[ -n "$VALUE_EAST" ]] && [[ -n "$VALUE_WEST" ]] && [[ "$VALUE_EAST" != "$VALUE_WEST" ]] && BGCOLOR_VALUE=$WARN_VALUE
+
+            COMMIT_WEST=$(svn blame $OVERRIDE_WEST 2>/dev/null | grep -ih "$TOKEN" | awk '{ print $1 }')
+            if [ -n "$COMMIT_WEST" ] 
+            then
+                COMMIT_DATE_WEST=$(svn log $OVERRIDE_WEST -r $COMMIT_WEST | grep -i $COMMIT_WEST | awk '{ print $5, $6 }')
+                COMMIT_MSG_WEST=$(svn log $OVERRIDE_WEST -r $COMMIT_WEST | grep -i -A+2 $COMMIT_WEST | tail -1)
+                COMMIT_USER_WEST=$(svn blame $OVERRIDE_WEST | grep -w "$COMMIT_WEST" | awk '{ print $2 }')
+                [ "$COMMIT_USER_WEST" = "ciuser" ] && COMMIT_USER_WEST= || COMMIT_USER_WEST="[$COMMIT_USER_WEST]"
+            fi
+
+            COMMIT_EAST=$(svn blame $OVERRIDE_EAST 2>/dev/null | grep -ih "$TOKEN" | awk '{ print $1 }')
+            if [ -n "$COMMIT_EAST" ] 
+            then
+                COMMIT_DATE_EAST=$(svn log $OVERRIDE_EAST -r $COMMIT_EAST | grep -i $COMMIT_EAST | awk '{ print $5, $6 }')
+                COMMIT_MSG_EAST=$(svn log $OVERRIDE_EAST -r $COMMIT_EAST | grep -i -A+2 $COMMIT_EAST | tail -1)
+                COMMIT_USER_EAST=$(svn blame $OVERRIDE_EAST | grep -w "$COMMIT_EAST" | awk '{ print $2 }')
+                [ "$COMMIT_USER_EAST" = "ciuser" ] && COMMIT_USER_EAST= || COMMIT_USER_EAST="[$COMMIT_USER_EAST]"
+            fi
+
+            # catch if one coast is missing a value
+            if [ -z "$BGCOLOR_VALUE" ]
+            then
+                [ -z "$VALUE_EAST" ] && BGCOLOR_VALUE=$WARN_MISSING || BGCOLOR_VALUE=
+            fi
+
+            HTML "  <tr>"
+            HTML "      <td rowspan='2'>$SETTING_GROUP.$SETTING_NAME</td>" 
+            HTML "      <th><i>East</i></th>" 
+            HTML "      <td bgcolor='$BGCOLOR_VALUE'>$VALUE_EAST</td>" 
+            HTML "      <td bgcolor='$BGCOLOR_TYPE'>$TYPE_EAST</td>" 
+            HTML "      <td>$COMMIT_DATE_EAST</td>" 
+            HTML "      <td>$COMMIT_MSG_EAST $COMMIT_USER_EAST</td>" 
+            HTML "  </tr>"
+
+            [ "$BGCOLOR_VALUE" = "$WARN_MISSING" ] && BGCOLOR_VALUE=
+
+            # catch if one coast is missing a value
+            if [ -z "$BGCOLOR_VALUE" ]
+            then
+                [ -z "$VALUE_WEST" ] && BGCOLOR_VALUE=$WARN_MISSING || BGCOLOR_VALUE=
+            fi
+
+            HTML "  <tr>"
+            HTML "      <th><i>West</i></th>" 
+            HTML "      <td bgcolor='$BGCOLOR_VALUE'>$VALUE_WEST</td>" 
+            HTML "      <td bgcolor='$BGCOLOR_TYPE'>$TYPE_WEST</td>" 
+            HTML "      <td>$COMMIT_DATE_WEST</td>" 
+            HTML "      <td>$COMMIT_MSG_WEST $COMMIT_USER_WEST</td>" 
+            HTML "  </tr>"
+        done
+echo
+        HTML "</table>"
+        HTML "<h5><i>This page is dynamically generated - any manual edits will be lost</i></h5>"
+
+        echo "Updating confluence - $PAGENAME..."
+        sh $CCLIDIR/confluence.sh --space "$DOC_SPACE" --title "$PAGENAME" --action storepage --file $OUTFILE --noConvert #--verbose
+        [ $? -eq 0 ] && rm $OUTFILE
+
+    done
+
+    rm -rf $WSGC
+    exit 0
+}
+
+# parse arguments
+while [ $# -gt 0 ]
+do
+    case $1 in
+            -a|--action )
+                    $(echo "$2" | grep -q -- "^-") || { ACTION="$2"; }
+                    shift;;
+            -b|--brand )
+                    $(echo "$2" | grep -q -- "^-") || { BRAND="$2"; }
+                    shift;;
+            -e|--environment|--env )
+                    $(echo "$2" | grep -q -- "^-") || { ENV="$2"; }
+                    shift ;;
+            -s|--coast )
+                    $(echo "$2" | grep -q -- "^-") || { COAST="$2"; }
+                    shift ;;
+            -c|--comments )
+                    $(echo "$2" | grep -q -- "^-") || { COMMENTS="$2"; }
+                    shift;;
+            -t|--ticket )
+                    $(echo "$2" | grep -q -- "^-") || { TICKET="$2"; }
+                    shift;;
+            -g|--market )
+                    $(echo "$2" | grep -q -- "^-") || { MARKET="$2"; }
+                    shift ;;
+            * ) shift ;;
+    esac
+done
+
+# market variables
+[[ -z $MARKET ]] && MARKET="USA"
+MARKET_LABEL=$(market2label $MARKET)
+MARKET=$(label2market $MARKET)
+[[ -z $MARKET_LABEL ]] && BailOut "Market label came up blank"
+[[ -z $MARKET ]] && BailOut "Market came up blank"
+# clear the MARKET variable if it's usa
+[[ $MARKET = "usa" || $MARKET = "domestic" ]] && MARKET=
+
+# sanity checks
+[[ $BRAND = '${Brand}' ]] && BRAND=
+[[ $BRAND = '${Coast}' ]] && COAST=
+[[ $ACTION = "Update_Confluence"  ]] && BRAND=
+[[ $ACTION = "Update_Confluence"  ]] && COAST=
+BRAND=$(echo "$BRAND" | tr "[:upper:]" "[:lower:]")
+COAST=$(echo "$COAST" | tr "[:upper:]" "[:lower:]")
+[[ -z $COAST && $ACTION != "Update_Confluence" ]] && BailOut "Need coast"
+[[ -z $BRAND && $ACTION != "Update_Confluence" ]] && BailOut "Need brand"
+#setVars
+
+# let's get down to business...
+echo "--- Parameters ---"
+[[ -n $BRAND ]] && echo "Brand:  $BRAND"
+[[ -n $BRAND ]] && echo "Market: $MARKET_LABEL $MARKET"
+SITEID=$(brand2site $BRAND $MARKET)
+[[ -n $SITEID ]] && echo "siteId: $SITEID"
+[[ -n $COAST ]] && echo "Coast:  $COAST"
+[[ -n $ACTION ]] && echo "Action: $ACTION"
+
+# check out appsetting and frontend repos
+checkOut
+
+# shortcut past the parameter checks if we're just updating the confluence page
+if [[ $ACTION = "Update_Confluence" ]]
+then
+    genConfluence 
+
+    rm -rf $WSGC
+    exit 0
+fi
+
+# shortcut past the parameter checks if we're just clearing the scope
+if [[ $ACTION = "Clear_Release_Scope" ]]
+then
+    # check to see if they're authorized to run this
+    checkACL
+
+    # clear the release (and aktest) scope
+    clearReleaseScope 
+
+    # re-update the confluence page
+    genConfluence 
+
+    rm -rf $WSGC
+    exit 0
+fi
+
+setVars
+
+[[ $DEBUG -gt 2 ]] && echo "Schema-prd: $SCHEMA_PRD"
+[[ $DEBUG -gt 2 ]] && echo "Server-prd: $SERVER_PRD"
+[[ $DEBUG -gt 2 ]] && echo "Schema-preprd: $SCHEMA_PREPRD"
+[[ $DEBUG -gt 2 ]] && echo "Server-preprd: $SERVER_PREPRD"
+
+case $ACTION in
+    Upload_Override_to_AKTEST ) 
+        # check to see if they're authorized to run this
+        checkACL
+
+        genSQLfromOverride aktest
+        rm -rf $WSGC
+
+        exit 0
+    ;;
+
+#    Upload_Override_to_Production ) 
+#        # check to see if they're authorized to run this
+#        checkACL
+#
+#        genSQLfromOverride prd
+#        rm -rf $WSGC
+#        exit 0
+#    ;;
+
+    Upload_Default_to_Production ) 
+        # check to see if they're authorized to run this
+        checkACL
+
+        genSQLfromDefault 
+        rm -rf $WSGC
+
+        exit 0
+    ;;
+
+    Verify_Release_Settings )
+        # check to see if they're authorized to run this
+        checkACL
+
+        VERIFY=verify
+        genSQLfromOverride release
+        genConfluence 
+        rm -rf $WSGC
+
+        exit 0
+    ;;
+
+    Upload_Release_to_Production )
+        # check to see if they're authorized to run this
+        checkACL
+
+#        genNewDefaultProperties 
+        genSQLfromOverride release
+        rm -rf $WSGC
+
+        exit 0
+    ;;
+
+    * ) 
+        BailOut "Unknown action '$ACTION'" 
+    ;;
+esac
+
+BailOut "Looks like we're missing functionality :("
+
+rm -rf $WSGC
+
+exit 0
+

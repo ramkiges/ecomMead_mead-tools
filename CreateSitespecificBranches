@@ -1,0 +1,49 @@
+#!/bin/bash
+#
+# createSiteSpecificBranches <release-shortcut-name>
+
+set -e
+set -o nounset
+
+if [[ $# != 1 ]]; then
+    echo "usage: $0 <release-shortcut-name>" >&2
+    exit 1
+fi
+
+RELEASE_SHORTCUT_NAME=$1
+
+SHORTCUTS_BASE="https://repos.wsgc.com/svn/shortcuts/evolution/branches"
+BRANDS="admin mg pb pk pt we ws"
+
+echo "RELEASE_SHORTCUT_NAME = [$RELEASE_SHORTCUT_NAME]"
+
+SVN="svn"
+
+workdir=$(mktemp -d)
+(
+    cd $workdir
+
+    srcUrl="$SHORTCUTS_BASE/$RELEASE_SHORTCUT_NAME"
+
+    for brand in $BRANDS; do
+        brandShortcutName="${brand}-${RELEASE_SHORTCUT_NAME%-shortcut}"
+
+        echo "Creating $brandShortcutName"
+
+        destUrl="$SHORTCUTS_BASE/$brandShortcutName"
+        msg="[BRANCH] Creating $brandShortcutName from $RELEASE_SHORTCUT_NAME"
+
+        $SVN copy -m "$msg" "$srcUrl" "$destUrl"
+
+        # Now remove brands besides ours from the new shortcut.
+        $SVN checkout --ignore-externals "$destUrl" tmp
+        $SVN rm tmp/sites/*
+        $SVN revert -R tmp/sites/common tmp/sites/"$brand"
+        $SVN commit -m "Remove non-$brand sites from $brandShortcutName" tmp
+        rm -rf tmp
+        echo
+    done
+)
+retval=$?
+rm -rf $workdir
+exit $?

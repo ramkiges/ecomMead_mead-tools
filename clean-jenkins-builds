@@ -1,0 +1,59 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools
+
+AGE=90
+
+[[ $(hostname) = jnkrck-vdcn001 ]] || exit 1
+
+renice -n +20 $$ >/dev/null 2>&1
+cd /apps/jenkins/jobs || exit 1
+
+cleanBranches() {
+  find /apps/jenkins/jobs -type d -name branches | 
+  while read branch
+  do
+    cd $branch || continue
+    [[ $branch = Bedrock ]] && continue
+
+    find . -type d -mindepth 1 -maxdepth 1 -ctime +$AGE |
+    while read dir
+    do
+      [[ $dir = ./master ]] && continue
+      [[ $dir = ./release ]] && continue
+      [[ $dir = ./develop ]] && continue
+      [[ $dir = ./deploy ]] && continue
+
+      echo "$(pwd)/$dir"
+      #ls -ld $dir
+      #du -sh $dir
+      sudo rm -rf $dir
+    done 
+  done 
+}
+
+cleanBuilds() {
+  find /apps/jenkins/jobs -type d -name builds |
+  while read dir
+  do
+    cd $dir 2>/dev/null || continue
+
+    [[ $dir =~ mfe ]] && continue
+    [[ $dir =~ create-release ]] && continue
+    [[ $dir =~ create-dp-release ]] && continue
+
+    find . -name "[1-9]*" -type d -mindepth 1 -maxdepth 1 -ctime +$AGE |
+    while read build
+    do
+      echo "$(pwd)/$(basename $build)"
+      #ls -l $build
+      #du -sh $build
+      sudo rm -rf $build
+    done
+  done
+}
+
+cleanBuilds
+
+cleanBranches
+
+exit 0

@@ -1,0 +1,79 @@
+#!/bin/bash
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:~/bin:/wsgc/bin
+IMGHOST="img-qa-rk1v.wsgc.com"
+#IMGHOST="img-qa1-rk1v.wsgc.com"
+#IMGHOST="img-qa1-rk2v.wsgc.com"
+#IMGHOST="imgproc-qa-sac1v.wsgc.com"
+
+BRAND=$1
+ENV=$2
+
+# commit message
+MSG="[DEVOPS] de-akamaize $BRAND $ENV using ${IMGHOST} for content"
+
+BailOut() {
+	[ -n "$1" ] && echo "$1" 
+	
+	echo "$(basename $0) <brand> <env>"
+
+	exit 1
+}
+
+[ -z "$ENV" ] && BailOut
+
+GETURLS=$(which geturls 2>/dev/null)
+[ -z "$GETURLS" ] && BailOut "Can't find geturls"
+
+cd /wsgc/svn/devops/application/frontend-2.1/qa/config/app/trunk
+svn up || svn cleanup || BailOut "Can't update svn"
+cd /tmp
+
+POM=$(getpom $BRAND $ENV)
+[ -z "$POM" ] && BailOut "we have a blank pom file name"
+
+HOST=$($GETURLS $BRAND $ENV|grep -i "host:" | awk -F: '{ print $2 }' | awk '{ print $1 }')
+[ -z "$HOST" ] && BailOut "we have a blank hostname "
+
+echo "$BRAND:$ENV $HOST $POM"
+
+# basic settings for any environment
+propset -f $POM -p frontend.environment			-v "$ENV"
+propset -f $POM -p frontend.installation		-v "\${frontend.environment}"
+propset -f $POM -p frontend.overrideScope 		-v "\${frontend.environment},default"
+propset -f $POM -p frontend.urlMappings 		-v "http://$HOST/==https://$HOST.wsgc.com/,http://$HOST.wsgc.com/==https://$HOST.wsgc.com/"
+propset -f $POM -p frontend.remoteContentArchiveUrlBases -v "http://${IMGHOST}:49190/tmpl/,http://${IMGHOST}.wsgc.com:49190/tmpl2/"
+
+propset -f $POM -p frontend.appBase			-v "https://$HOST.wsgc.com/"
+propset -f $POM -p frontend.secureAppBase		-v "https://$HOST.wsgc.com/"
+
+propset -f $POM -p frontend.docImageBase 		-v "https://${IMGHOST}/${BRAND}imgs/qark/images/uat1/"
+propset -f $POM -p frontend.secureDocImageBase 		-v "https://${IMGHOST}/${BRAND}imgs/qark/images/uat1/"
+
+propset -f $POM -p frontend.scriptSubPath 		-v "https://${IMGHOST}/${BRAND}imgs/qark/images/uat1/"
+
+propset -f $POM -p frontend.contentImageBase 		-v "https://${IMGHOST}/${BRAND}imgs/qark/images/dp/"
+propset -f $POM -p frontend.secureContentImageBase 	-v "https://${IMGHOST}/${BRAND}imgs/qark/images/dp/"
+
+# prod image server
+#propset -f $POM -p frontend.catImageBase 		-v "https://imgproc-prd-rk1v.wsgc.com/pubimagesuat/${BRAND}/images/"
+#propset -f $POM -p frontend.secureCatImageBase 		-v "https://imgproc-prd-rk1v.wsgc.com/pubimagesuat/${BRAND}/images/"
+# qa image server
+#
+if [ "$BRAND" = "we" ]
+then
+    propset -f $POM -p frontend.catImageBase            -v "https://${IMGHOST}/${BRAND}imgs/qark/images/wcm/"
+    propset -f $POM -p frontend.secureCatImageBase 		-v "https://${IMGHOST}/${BRAND}imgs/qark/images/wcm/"
+else
+    propset -f $POM -p frontend.catImageBase 		-v "https://imgproc-prd-rk1v.wsgc.com/pubimagesuat/${BRAND}/images/"
+    propset -f $POM -p frontend.secureCatImageBase 		-v "https://imgproc-prd-rk1v.wsgc.com/pubimagesuat/${BRAND}/images/"
+    #propset -f $POM -p frontend.catImageBase 		    -v "https://${IMGHOST}/${BRAND}imgs/qark/images/dp/"
+    #propset -f $POM -p frontend.secureCatImageBase 		-v "https://${IMGHOST}/${BRAND}imgs/qark/images/dp/"
+fi
+
+propset -f $POM -p frontend.remoteProxyImageBase 	-v "https://${IMGHOST}/${BRAND}imgs/qark/images/uat1/"
+propset -f $POM -p frontend.secureRemoteProxyImageBase 	-v "https://${IMGHOST}/${BRAND}imgs/qark/images/uat1/"
+
+#svn diff $POM
+
+#svn commit $POM -m "$MSG" 
+

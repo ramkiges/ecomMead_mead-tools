@@ -1,0 +1,294 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/java/bin:/apps:/apps/scripts:/apps/scm-tools:$PATH:~/bin
+export PATH
+
+#tests/test_custom-frontend-deployer
+
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+JENKINS_TEMPLATES=git@github.wsgc.com:eCommerce-DevOps/jenkins-templates.git
+JENKINS_JOBS=git@github.wsgc.com:eCommerce-DevOps/jenkins-jobs.git
+WSGC_BUILD_TIME="H H(1-4) * * *"
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+MARKET_PROP="/project/properties/hudson.model.ParametersDefinitionProperty/parameterDefinitions/hudson.model.StringParameterDefinition"
+FORCE_PROP="/project/properties/hudson.model.ParametersDefinitionProperty/parameterDefinitions/hudson.model.StringParameterDefinition"
+SLACK_PROP="/project/publishers/jenkins.plugins.slack.SlackNotifier/room"
+TIME_PROP="/project/triggers/hudson.triggers.TimerTrigger/spec"
+CHILD_PROP="/project/publishers/hudson.tasks.BuildTrigger/childProjects"
+JOB_STATUS=0
+umask 000
+
+TMP=/tmp/$(basename $0)-$$
+
+BailOut() {
+  [ -n "$1" ] && echo "$(basename $0): $*" >&2
+
+	echo "
+Usage: $(basename $0) -b <brand> -e <env> -w <war_branch> -c <content_branch> [-t ticket]
+
+-b brand    - brand to deploy
+-e env      - environment to deploy
+-w war      - war branch to deploy
+-c content  - (optional) content branch to deploy (if omitted, use war branch)
+-t ticket   - (optional) Jira ticket, eg MEAD-1234
+" >&2
+
+  rm -rf $TMP
+       
+	exit 1
+}
+
+# parse arguments
+while [ $# -gt 0 ]
+do
+#  echo "1:$1 $2"
+	case $1 in
+		-e|--env|--environment )  
+			$(echo "$2" | grep -q -- "^-") || { ENVIRO="$2"; } 
+			shift;;
+
+		-b|--brands )  
+			$(echo "$2" | grep -q -- "^-") || { BRANDS="$2"; } 
+			shift;;
+
+    -w|--war )
+			$(echo "$2" | grep -q -- "^-") || { BRANCH_WAR="$2"; } 
+			shift;;
+
+    -c|--content )
+			$(echo "$2" | grep -q -- "^-") || { BRANCH_CONTENT="$2"; } 
+			shift;;
+
+		-t|--ticket )  
+			$(echo "$2" | grep -q -- "^-") || { TICKET="$2"; } 
+			shift;;
+
+		* ) shift;;
+	esac
+done
+
+which xmlstarlet >/dev/null 2>&1 || BailOut "Why isn't xmlstarlet installed?"
+[[ -z $ENVIRO ]] && BailOut "Need Environment"
+[[ -z $JENKINS ]] && BailOut "Can't find 'jenkins-jnlp'"
+[[ -z $BRANCH_WAR && -z $BRANCH_CONTENT ]] && BailOut "Missing branches"
+[[ -z $LINK ]] && LINK="true"
+[[ -z $RUNBY ]] && RUNBY=${BUILD_USER_ID}
+[[ -z $BRANDS ]] && BRANDS=$(getbrandlist -d, $ENVIRO)
+#[[ -z $BRANDS ]] && BailOut "Need brand(s)"
+
+if [ -n "$TICKET" ]
+then
+	TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+    for jira in $TICKET
+    do
+        echo "Jira: https://jira.wsgc.com/browse/$jira"
+    done
+else
+    TICKET="DEVOPS"
+fi
+
+# checkout templates and job repos
+rm -rf $TMP; mkdir -p $TMP
+#git clone --depth 1 -q $JENKINS_TEMPLATES $TMP/templates
+git clone --depth 1 -q $JENKINS_JOBS $TMP/jobs
+
+VIEW=$(ls $TMP/jobs | grep -i "deploy" | grep -iw "$ENVIRO" | head -1)
+[ -z "$VIEW" ] && BailOut "Can't find a view for $ENVIRO"
+TEAM=$(echo "$VIEW" | cut -d- -f 3-)
+cd $TMP/jobs/$VIEW
+
+[[ -z $MANIFEST ]] && export MANIFEST=false
+
+echo "Enviro:   $ENVIRO"
+echo "Brands:   $BRANDS"
+echo "View:     $VIEW"
+echo "Team:     $TEAM"
+echo "Manifest: $MANIFEST"
+
+for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+do
+  echo "----------"
+  MARKET=$(getmarket $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+  [[ $MARKET =~ us ]] && MARKET=
+  cd $TMP/jobs/$VIEW
+  POM=$FRONTEND/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+  DEPLOY_PROPS="https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties/${ENVIRO}/${BRAND}${MARKET}.properties"
+
+  OLD_JOBS=$(eval $JENKINS list-jobs |grep -i "deploy-${ENVIRO}-${BRAND}" | egrep -i "war|content")
+  for job in $OLD_JOBS
+  do
+    echo "*** $(basename $0) Remove old job ($job) from Jenkins ***"
+    eval $JENKINS delete-job $job
+    git pull -q >/dev/null 2>&1
+    if [ -f "${job}.xml" ]
+    then 
+      echo "*** $(basename $0) Remove job from git (${job}.xml) ***"
+      git rm ${job}.xml
+      rm -f ${job}.xml  # in case it's somehow still on the filesystem and not in git
+      git commit -q -m "[$TICKET] $(basename $0) remove old deployer job for $BRAND $ENVIRO $BUILD_USER_ID" 
+      git push --force -q >/dev/null 2>&1 
+    fi
+  done
+
+  # if we don't have a pom, don't create a new deployer 
+  svn cat $POM >/dev/null 2>&1 || { echo "/// Can't find a pom for $BRAND $ENVIRO ($POM) ///"; continue; }
+
+  echo "*** $(basename $0) Update frontend deployer for $BRAND ***"
+  rerun wsgc-jenkins:update-frontend-deployers --brand $BRAND --content_shortcut_name $BRANCH_CONTENT --env $ENVIRO --affinity_team $TEAM --new_shortcut_name $BRANCH_WAR
+  [[ $? -ne 0 ]] && echo "!!! Why did update-frontend-deployers fail? !!!"
+
+  cd $TMP/jobs/$VIEW
+  git pull -q >/dev/null 2>&1
+  CONTENT=$(ls -t deploy-${ENVIRO}-${BRAND}-CONTENT_* 2>/dev/null | head -1)
+  WAR=$(ls -t deploy-${ENVIRO}-${BRAND}-WAR_* 2>/dev/null | head -1)
+  CHILD_JOB=$(echo "$WAR" | sed -es/\.xml//g)
+
+  [[ -z $CONTENT ]] && BailOut "Where is the CONTENT job for $BRAND $ENVIRO? $(pwd)"
+  [[ -z $WAR ]] && BailOut "Where is the WAR job for $BRAND $ENVIRO? $(pwd)"
+
+  if [[ $LINK = "true" || -z $LINK ]]
+  then
+    echo "*** $(basename $0) Link CONTENT job to WAR job ***"
+      xmlstarlet ed --inplace -u "$CHILD_PROP" -v "${CHILD_JOB}" $CONTENT
+
+      echo "*** $(basename $0) Update trigger-all job ***"
+      TRIGGER_ALL=$(ls -t trigger-all* 2>/dev/null | head -1)
+      children=$(ls *CONTENT* | sed -es/\.xml//g | tr "\n" "," | sed -es/",$"//g)
+#set -x
+      xmlstarlet ed --inplace -u "$CHILD_PROP" -v "${children}" $TRIGGER_ALL
+#{ set +x; } 2>/dev/null
+      git add $CONTENT $TRIGGER_ALL
+      git commit -q -m "[$TICKET] link CONTENT and WAR jobs [$BUILD_USER_ID]" $CONTENT $TRIGGER_ALL
+      git push --force >/dev/null 2>&1 
+  else
+    echo "*** $(basename $0) Un-Link CONTENT job from WAR job ***"
+
+      xmlstarlet ed --inplace -u "$CHILD_PROP" -v "" $CONTENT
+      git add $CONTENT 
+      git commit -q -m "[$TICKET] un-link CONTENT and WAR jobs [$BUILD_USER_ID]" $CONTENT
+      git push --force >/dev/null 2>&1 
+  fi
+
+  DEPLOY_PROPS="https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties/${ENVIRO}/${BRAND}${MARKET}.properties"
+  [[ -n $MARKET ]] && echo "*** $(basename $0) Update Market to '$MARKET' ***"
+
+  xmlstarlet ed --inplace -u "$MARKET_PROP[name='MARKET']/defaultValue" -v "${MARKET}" $CONTENT
+
+  git add $CONTENT
+  git commit -q -m "[$TICKET] set MARKET parameter to $(getmarket $BRAND $ENVIRO) $BUILD_USER_ID" $CONTENT
+  git push --force >/dev/null 2>&1 
+
+  svn cat $DEPLOY_PROPS >/dev/null 2>&1 || echo "*** $(basename $0) Did not find $DEPLOY_PROPS - GMTP configured incorrectly ***"
+  project=$(svn cat $DEPLOY_PROPS 2>/dev/null |grep project= | grep -iv '#' | awk -F= '{ print $2 }')
+  [[ $project = "${BRAND}${MARKET}" ]] || echo "Note: 'project' ($project) is probably not correct in $(basename $DEPLOY_PROPS)"
+
+  # if a slack channel isn't passed in, see if it's defined in the deployment properties file
+  [[ -z $ROOM ]] && ROOM=$(svn cat $DEPLOY_PROPS 2>/dev/null |egrep "slack=|room=" | awk -F= '{ print $2 }')
+
+  # 
+  if [[ -n $FORCE ]]
+  then
+    echo "*** $(basename $0) Set FORCEBUILD to $FORCE ***"
+
+    xmlstarlet ed --inplace -u "$FORCE_PROP[name='FORCEBUILD']/defaultValue" -v "${FORCE}" $CONTENT
+
+    git add $CONTENT 
+    git commit -q -m "[$TICKET] set FORCEBUILD to $FORCE ($BUILD_USER_ID)" $CONTENT 
+    git push --force >/dev/null 2>&1 
+  fi
+
+  # if a slack channel is defined, update the job
+  if [[ -n $ROOM ]]
+  then
+    echo "*** $(basename $0) Update Slack channel to $ROOM ***"
+
+    xmlstarlet ed --inplace -u "$SLACK_PROP" -v "${ROOM}" $CONTENT
+    xmlstarlet ed --inplace -u "$SLACK_PROP" -v "${ROOM}" $WAR
+
+    git add $CONTENT $WAR
+    git commit -q -m "[$TICKET] set Slack channel to $ROOM ($BUILD_USER_ID)" $CONTENT $WAR
+    git push --force >/dev/null 2>&1 
+  fi
+
+  if [[ -n $HOUR || -n "$MIN" ]]
+  then
+    echo "*** $(basename $0) Update deployment time ***"
+    [[ $HOUR -gt 23 ]] && HOUR=23
+    [[ $MIN -gt 59 ]] && MIN=59
+    [[ -z $MIN ]] && MIN="H"
+    [[ -z $HOUR ]] && HOUR="H"
+    TIME="$MIN $HOUR * * *"
+
+    xmlstarlet ed --inplace -u "$TIME_PROP" -v "${TIME}" $CONTENT
+    xmlstarlet ed --inplace -u "$TIME_PROP" -v "${TIME}" $WAR
+
+    git add $CONTENT $WAR
+    git commit -q -m "[$TICKET] set deployment time to $TIME ($BUILD_USER_ID)" $CONTENT $WAR
+    git push --force >/dev/null 2>&1 
+  fi
+
+  # upload new jobs
+  echo "*** $(basename $0) Upload new WAR job ***"
+  #eval $JENKINS create-job $TMP/jobs/$VIEW/$WAR
+  set -x
+  eval $JENKINS create-job --deleteFirst $TMP/jobs/$VIEW/$WAR
+  { ret=$?; set +x; } 2>/dev/null
+  [[ $ret -ne 0 ]] && eval $JENKINS create-job --deleteFirst $TMP/jobs/$VIEW/$WAR
+  JOB_STATUS=$(expr $JOB_STATUS + $?)
+
+  echo "*** $(basename $0) Upload new CONTENT job ***"
+  #eval $JENKINS create-job $TMP/jobs/$VIEW/$CONTENT
+  set -x
+  eval $JENKINS create-job --deleteFirst $TMP/jobs/$VIEW/$CONTENT
+  { ret=$?; set +x; } 2>/dev/null
+  [[ $ret -ne 0 ]] && eval $JENKINS create-job $TMP/jobs/$VIEW/$CONTENT
+  JOB_STATUS=$(expr $JOB_STATUS + $?)
+
+  echo "*** $(basename $0) Generate new config package for $BRAND $ENVIRO ***"
+  eval $JENKINS build wsgc-devops-frontend21-qa-$BRAND-app-config < /dev/null >/dev/null 2>&1 &
+  eval $JENKINS build -s wsgc-devops-frontend21-qa-single-env -p BRAND=$BRAND -p ENVIRONMENT=$ENVIRO #< /dev/null >/dev/null 2>&1 &
+
+  if [[ $DEPLOY = "true" ]]
+  then
+    [[ $JOB_STATUS != 0 ]] && eval $JENKINS build -s JenkinsJobMgr #>/dev/null 2>&1
+    echo "*** $(basename $0) Running CheckEnv ***"
+    eval $JENKINS build CheckEnv -p Brand=$BRAND -p Environment=$ENVIRO -p Options=Clear-Logs -p Options=Deploy-War Options=Deploy-Content -p Options=Rebuild-Config -p Ticket=$TICKET
+#  else
+#    [[ $JOB_STATUS != 0 ]] && eval $JENKINS build JenkinsJobMgr >/dev/null 2>&1 &
+  fi
+
+  # update Jira
+  for jira in $TICKET
+  do
+    jira-comment $jira "Custom deployer for *Brand*: $BRAND *Environment*: $ENVIRO 
+*CONTENT Branch*:   $BRANCH_CONTENT 
+*WAR Branch*:       $BRANCH_WAR  
+*Market*:           $MARKET
+*Schedule*:         $TIME
+*Slack Channel:*    $ROOM
+*Jenkins view:*     $JENKINS_URL/view/$VIEW
+_(deployment pending)_ 
+[$RUNBY]"
+  done
+
+#*CONTENT Deployer:*  $JENKINS_URL/job/$NEW_DEPLOY_CONTENT
+#*WAR Deployer:*      $JENKINS_URL/job/$NEW_DEPLOY_WAR
+
+done
+
+# comment out to reduce churn for today
+#echo "*** Trigger JenkinsJobMgr ***" && eval $JENKINS build JenkinsJobMgr #>/dev/null 2>&1 &
+
+if [[ $AUTO_CLOSE =~ true && $TICKET != "DEVOPS" ]]
+then
+    for jira in $TICKET
+    do
+        jira-close -t $jira -c "Auto-close on succesfull update [$RUNBY]"
+    done
+fi
+
+eval jenkins-jnlp build generate-deployment-matrix-data -p ENV_LIST=${ENVIRO} >/dev/null 2>&1 &
+
+rm -rf $TMP
+
+exit 0

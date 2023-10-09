@@ -1,0 +1,20 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/opt/homebrew/bin:~/bin
+
+brand=$1
+
+[ -z "$brand" ] && exit 1
+brand=$(echo "$brand" | tr "A-Z" "a-z")
+
+case $brand in
+	pb ) echo "potterybarn" ;;
+	pk ) echo "potterybarnkids" ;;
+	#pt ) echo "pbteen" ;;
+	pt ) echo "potterybarnteen" ;;
+	mg ) echo "markandgraham" ;;
+	we ) echo "westelm" ;;
+	ws ) echo "williams-sonoma" ;;
+
+	* ) exit 1 ;;
+esac
+exit 0

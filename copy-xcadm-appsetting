@@ -1,0 +1,138 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:$PATH
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+	[[ -n $1 ]] && echo "$(basename $0): $*"
+    #echo "$(basename $0) --brands <brands> --envs <envs> [update|delete] <setting> --type <type> <value>"
+	exit 1
+}
+
+case $(uname) in
+    Darwin ) 
+        SQLPLUS="DYLD_LIBRARY_PATH=~/instantclient sqlplus"
+        alias SQLPLUS="DYLD_LIBRARY_PATH=~/instantclient sqlplus"
+    ;;
+
+    Linux )
+        if [ -e /usr/lib/oracle/instantclient_19_6 ] 
+        then
+            export PATH=$PATH:/usr/lib/oracle/instantclient_19_6
+            SQLPLUS=/usr/lib/oracle/instantclient_19_6/sqlplus
+            ORACLE_INSTANTCLIENT_LIB_DIR=/usr/lib/oracle/instantclient_19_6/
+            export LD_LIBRARY_PATH="${ORACLE_INSTANTCLIENT_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+        fi
+    ;;
+
+    * ) echo "Don't know how to handle $(uname)"        
+    ;;
+esac
+
+[ -z "$SQLPLUS" ] && BailOut "Can't find sqlplus"
+
+# parse args
+while [ $# -gt 0 ]
+do
+    case $1 in
+        -e|--env* )
+                $(echo "$2" | grep -q -- "^-") || { ENV="$2"; }
+                shift ;;
+
+        -a|--action )
+                $(echo "$2" | grep -q -- "^-") || { ACTION="$2"; }
+                shift;;
+
+        -d|--delete )
+                $(echo "$2" | grep -q -- "^-") || { ACTION="delete"; }
+                shift;;
+
+        -u|--update )
+                $(echo "$2" | grep -q -- "^-") || { ACTION="update"; }
+                shift;;
+
+        -s|--setting )
+                $(echo "$2" | grep -q -- "^-") || { SETTING="$2"; }
+                shift;;
+
+        -t|--jira|-j|--ticket )
+                $(echo "$2" | grep -q -- "^-") || { TICKET="$2"; }
+                shift;;
+
+        -v|--value )
+                $(echo "$2" | grep -q -- "^-") || { VALUE="$2"; }
+                shift;;
+
+        --debug )
+                DEBUG="true"
+                shift;;
+
+        --typ* )
+                $(echo "$2" | grep -q -- "^-") || { TYPE="$2"; }
+                shift
+                VALUE=$2
+                shift ;;
+
+        * )     # query,get,update,compare,delete
+                if echo "$2" | egrep -iq "add|update|delete|get"
+                then
+                    ACTION=$(echo "$2" | tr "A-Z" "a-z")
+                    shift
+                    SETTING=$2
+                fi
+        shift ;;
+    esac
+done
+
+[ -z "$ENV" ] && BailOut "Need environments"
+[ -z "$SETTING" ] && BailOut "Need setting"
+[ "$ACTION" = "update" -a -z "$TYPE" ] && BailOut "Need type for $ACTION"
+
+SCHEMA=$(getschema xcadm $ENV | awk -F: '{ print $1 }')
+[ -z "$SCHEMA" ] && BailOut "Can't get schema for $ENV"
+
+# getdb is a script which returns the db connections params for a given schema
+DB=$(getdb $SCHEMA)
+[ -z "$SCHEMA" ] && BailOut "Can't get DB props for $ENV ($SCHEMA)"
+
+echo "Schema for $ENV: $SCHEMA"
+
+[ -z "$DB" ] && BailOut "Can't get creds for $SCHEMA $BRAND $ENV"
+dbHost=$(echo "$DB" | awk -F\| '{ print $1 }')
+dbOwner=$(echo "$DB" | awk -F\| '{ print $2 }')
+dbUser=$(echo "$DB" | awk -F\| '{ print $3 }')
+dbPass=$(echo "$DB" | awk -F\| '{ print $4 }')
+dbSID=$(echo "$DB" | awk -F\| '{ print $5 }')
+dbPort=$(echo "$DB" | awk -F\| '{ print $6 }')
+dbTable=$(echo "$DB" | awk -F\| '{ print $7 }')
+
+# we don't care about the value if we're deleting it
+[ "$ACTION" = "delete" ] && VALUE=
+
+GROUP=$(echo "$SETTING" | awk -F\. '{ print $1 }')
+NAME=$(echo "$SETTING" | awk -F\. '{ print $2 }')
+
+[ -z "$GROUP" -o -z "$NAME" ] && BailOut "Need proper setting"
+
+D="delete from WW_SETTING_VALUES where (SITE=600 and SETTING_SCOPE='default' and SETTING_GROUP='$GROUP' and SETTING_NAME='$NAME');
+commit;"
+echo "$D"
+echo "$D" | $SQLPLUS -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" #>/dev/null 2>&1
+
+[ "$ACTION" = "delete" ] && exit 0
+
+I="insert into WW_SETTING_VALUES (SITE,SETTING_SCOPE,SETTING_GROUP,SETTING_NAME,SETTING_TYPE,SETTING_VALUE) values (600,'default','$GROUP','$NAME','$TYPE','$VALUE');
+commit;"
+echo "$I"
+echo "$I" | $SQLPLUS -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" #>/dev/null 2>&1
+
+#S="set heading off;
+#select SITE, SETTING_GROUP, SETTING_NAME, SETTING_VALUE from $SCHEMA.WW_SETTING_VALUES where (SITE=600 and SETTING_GROUP='$GROUP');"
+#echo "$S " | $SQLPLUS -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" #>/dev/null 2>&1
+
+exit 0
+

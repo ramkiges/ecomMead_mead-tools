@@ -1,0 +1,12 @@
+#!/bin/bash
+
+HOST=$1
+[ -z "$HOST" ] && exit 1
+
+HOST=$(echo "$HOST" | sed -e s/https://g -e s/tcp://g -e s/http://g -e s!/!' '!g | awk '{ print $1 }')
+
+PORT=$(echo $HOST | awk -F: '{ print $2 }')
+[ -z "$PORT" ] && HOST="$HOST:443"
+
+openssl s_client -connect $HOST </dev/null 2>&1 | openssl x509 -noout -text 2>/dev/null | grep -A2 "Validity" | egrep -i "after" | sed -es/"Not After :"/"Expires"/g
+

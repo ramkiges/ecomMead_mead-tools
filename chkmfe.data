@@ -1,0 +1,16 @@
+# MFEW test URLs for chkmfe
+
+mg:shop=shop/personalized-accessories/view-accessories-new-arrivals
+pb:shop=shop/outdoor/outdoor-metal-furniture
+pk:shop=shop/furniture/cribs
+pt:shop=shop/furniture/collection-bedroom
+we:shop=shop/outdoor/outdoor-furniture-collections
+ws:shop=shop/electrics/blenders
+
+mg:search=search/
+pb:search=search/
+pk:search=search/
+pt:search=search/
+we:search=search/results.html?words=table
+ws:search=search/
+

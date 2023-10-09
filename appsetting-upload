@@ -1,0 +1,324 @@
+#!/bin/bash
+# this uploads the values from SVN to the DB for a single brand/env combination
+
+PATH=/apps/mead-tools:/apps:/apps/java/bin:/usr/local/bin:/usr/local/sbin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin
+export PATH
+
+# oracle variables
+#PATH=$PATH:/usr/lib/oracle/12.2/client64/bin
+#SQLPLUS=/usr/bin/sqlplus64
+#ORACLE_INSTANTCLIENT_LIB_DIR=$(echo /usr/lib/oracle/*/client64/lib)
+
+PATH=$PATH:/usr/lib/oracle/instantclient_19_6
+SQLPLUS=/usr/lib/oracle/instantclient_19_6/sqlplus
+ORACLE_INSTANTCLIENT_LIB_DIR=/usr/lib/oracle/instantclient_19_6/
+export LD_LIBRARY_PATH="${ORACLE_INSTANTCLIENT_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+export PATH
+
+#echo "sqlplus: $SQLPLUS"
+#echo "PATH: $PATH"
+#echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+
+#BUILD_USER_ID="${option.BUILD_USER_ID}"
+
+VALIDATE=true
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+DEVOPS=https://repos.wsgc.com/svn/devops
+PROPERTIES=packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site
+FRONTEND=application/frontend-2.1/qa/config/app/trunk
+WSGC=/tmp/wsgc-$(basename $0)
+export LC_CTYPE=en_US.UTF-8
+export LC_ALL=C
+LOG="/apps/$(basename $0).log"
+DATE=$(date +'%Y-%m-%d %H:%M')
+SEPARATOR="#bfbfbf"
+
+WARN_VALUE="#b3f0ff"
+WARN_TYPE="#ff6699"
+WARN_MISSING="#ffff99"
+
+# confluence settings
+DOC_SPACE="PS"
+CCLIDIR="/apps/scripts/atlassian-cli-3.2.0"
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+	[ -n "$1" ] && echo "
+$(basename $0): 
+***
+ERROR: $*
+***" 
+	# cleanup
+	#rm -rf $WSGC >/dev/null 2>&1
+
+    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_FAIL}$(basename $0): App setting update *failed* (_${*}_) $BUILD_URL" 
+
+    echo "
+$(basename $0) - upload settings for a brand/env from SVN to database
+Usage: 
+
+    $(basename $0) -b <brand> -e <env> -s [setting] -a [add|update|delete] -t [ticket]" 
+
+	exit 1
+}
+
+HTML() {
+    echo "$*" >> $OUTFILE
+}
+
+Warning() { 
+    echo "+++
+WARNING: $* 
++++" >&2
+    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_WARN}$(basename $0): $*"
+}
+
+# check out the frontend and appsettings repos
+checkOut() {
+    echo ">>> $(basename $0):$FUNCNAME <<<"
+	umask 000
+	rm -rf $WSGC >/dev/null 2>&1
+	mkdir -p $WSGC 
+	cd $WSGC || BailOut "Could not cd to $WSGC"
+
+	/bin/echo -ne "Checking out appsettings repo - $WSGC ... "
+	mkdir -p $WSGC/$(dirname $PROPERTIES) 
+	cd $WSGC/$(dirname $PROPERTIES) 
+	svn -q co $DEVOPS/$PROPERTIES $(basename $PROPERTIES) || BailOut "Could not svn co appsettings repo"
+	svn -q up || BailOut "Could not svn up appsettings repo"
+	echo "Done"
+
+	/bin/echo -ne "Checking out frontend repo ... "
+	mkdir -p $WSGC/$(dirname $FRONTEND)
+	cd $WSGC/$(dirname $FRONTEND) 
+	svn -q co $DEVOPS/$FRONTEND $(basename $FRONTEND)
+	svn -q up
+	echo "Done"
+
+	echo $WSGC > ~/.wsi_settings
+}
+
+setVars() {
+    #echo ">>> $FUNCNAME <<<"
+    # impute some values
+
+    # temp hack for multiple schemas with the same name
+    SCHEMA=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+    [[ -z $SCHEMA ]] && BailOut "Can't get schema for $BRAND $ENVIRO"
+
+    DB_PROPS=$(getdb $SCHEMA)
+    [ -z "$DB_PROPS" ] && BailOut "Can't get db props for schema $SCHEMA ($BRAND $ENVIRO)"
+
+    dbHost=$(echo "$DB_PROPS" | awk -F\| '{ print $1 }')
+    dbOwner=$(echo "$DB_PROPS" | awk -F\| '{ print $2 }' | tr "A-Z" "a-z")
+    dbUser=$(echo "$DB_PROPS" | awk -F\| '{ print $3 }')
+    dbPass=$(echo "$DB_PROPS" | awk -F\| '{ print $4 }')
+    dbSID=$(echo "$DB_PROPS" | awk -F\| '{ print $5 }' | tr "A-Z" "a-z")
+    dbPort=$(echo "$DB_PROPS" | awk -F\| '{ print $6 }')
+    dbTable=$(echo "$DB_PROPS" | awk -F\| '{ print $7 }')
+    dbConnect=$(echo "$DB_PROPS" | awk -F\| '{ print $10 }')
+
+    CONNECT="${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=($dbConnect=${dbSID})))"
+echo "$BRAND $ENVIRO $CONNECT" >> $HOME/db-connect.log
+
+    pe=$ENVIRO
+    [[ $pe = "qa" ]] && pe=qa1
+    [[ $pe = "uat" ]] && pe=uat1
+    POM="$DEVOPS/$FRONTEND/$BRAND/$pe/pom.xml"
+    svn cat $POM >/dev/null 2>&1 || echo "POM: $POM isn't valid"
+    SERVICE=$(svn cat $POM 2>/dev/null|egrep -i "<frontend.datasource.ecomDB.url>" \
+        | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z" | awk -F [/:] '{ print $NF }')
+    echo "$SERVICE" | grep -iq "webprf" && SERVICE="webprf"
+
+    OVERRIDE_URL="$DEVOPS/$PROPERTIES/$SERVICE/$SCHEMA/$BRAND/override/override.properties"
+    SITE=$(brand2site $BRAND $ENVIRO)
+    [[ -z $SITE ]] && BailOut "SITE is null?"
+
+#echo "Override:     $OVERRIDE_URL"
+#echo "dbHost:       $dbHost"
+#echo "dbOwner:      $dbOwner"
+#echo "dbUser:       $dbUser"
+#echo "siteId:       $SITE"
+#echo "installation: $INSTALLATION"
+#echo "settingScope: $SETTING_SCOPE"
+#echo "dbOwner:      $dbOwner"
+#echo "dbUser:       $dbUser"
+}
+
+runSQL() {
+    count=$(cat $SQL | sed -es/"set define.*;"//gi -es/"commit;"//gi | wc -c | awk '{ print $1 }')
+    echo ">>> $(basename $0):$FUNCNAME <<<"
+    [ $count -gt 3000 ] && echo "!!! SQL statement too big - $count > 3000 !!!"
+#echo "SQL: $(cat $SQL)"
+
+    # experimental hack for the strange "insuffcient privileges" error
+    [[ $SCHEMA =~ dtc_app_owner ]] && sed -es/dtc_app_owner.ww_setting_values/ww_setting_values/g -i $SQL
+
+    #cat $SQL >> $HOME/adhoc-sql.log
+
+    /bin/echo -n "$ACTION $SETTING_GROUP.$SETTING_NAME - "
+    RESULT=$(cat $SQL | $SQLPLUS -S "$CONNECT" | tr '\n' ' ') 
+
+    #[ -n "$RESULT" ] && echo "$RESULT" 
+    echo "$RESULT" 
+}
+
+validateDB() {
+    [ "$QUIET" = "true" ] && return
+    /bin/echo -n "--- $(basename $0):$FUNCNAME: "
+    echo "set heading off;
+set define off;
+select SETTING_VALUE from ww_setting_values 
+where (setting_group='$SETTING_GROUP' and setting_name='$SETTING_NAME' and site='$SITE' and setting_scope='$INSTALLATION');" \
+    | $SQLPLUS -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=($dbConnect=${dbSID})))" | tr '\n' ' '
+}
+
+updateSettingDB() {
+    echo ">>> $(basename $0):$FUNCNAME - $BRAND $INSTALLATION <<<"
+    SQL="/tmp/$(basename $0)-$ACTION-$BRAND-$ENVIRO.sql"
+
+    #echo "SVN: $OVERRIDE_URL"
+
+    # delete the setting
+    SETTING_GROUP=$(echo "$SETTING" | awk -F\. '{ print $1 }')
+    SETTING_NAME=$(echo "$SETTING" | awk -F\. '{ print $2 }')
+    echo "
+set define off;
+delete from ${dbOwner}.ww_setting_values 
+    where (setting_group='$SETTING_GROUP' and setting_name='$SETTING_NAME' and site='$SITE' and setting_scope='$INSTALLATION');
+commit;" > $SQL
+    runSQL >/dev/null 2>&1
+    rm $SQL
+
+    [[ $ACTION = "delete" ]] && return
+
+    if [ "$ACTION" = "add" -o "$ACTION" = "update" ]
+    then
+        if [ -n "$SETTING" ]
+        then
+            TOKEN="$SETTING\.$INSTALLATION\."
+        else
+            TOKEN="\.$INSTALLATION\."
+        fi
+
+#        X=$(svn cat $OVERRIDE_URL | grep -i "$TOKEN" | sed 's/^[ \t]*//;s/[ \t]*$//' | sort -u)
+#echo ">overides: $X"
+        svn cat $OVERRIDE_URL | grep -i "$TOKEN" | sed 's/^[ \t]*//;s/[ \t]*$//' | sort -u |
+        while read line
+        do
+            echo "$line" | grep -q "^#" && continue
+
+            SETTING_GROUP=$(echo "$line" | awk -F\. '{ print $1 }')
+            SETTING_NAME=$(echo "$line" | awk -F\. '{ print $2 }')
+            SETTING_TYPE=$(echo "$line" | awk -F\. '{ print $4 }' | awk -F= '{ print $1 }')
+            SETTING_VALUE=$(echo "$line" | cut -d= -f 2-)
+
+            # 'upsert' into DB
+            echo "
+set define off;
+insert into ${dbOwner}.ww_setting_values (SITE,SETTING_SCOPE,SETTING_GROUP,SETTING_NAME,SETTING_TYPE,SETTING_VALUE)
+    values($SITE,'$INSTALLATION','$SETTING_GROUP','$SETTING_NAME','$SETTING_TYPE','$SETTING_VALUE');
+commit;" > $SQL
+#cat $SQL
+            runSQL
+
+            echo "
+set define off;
+update ${dbOwner}.ww_setting_values set setting_value='$SETTING_VALUE', setting_type='$SETTING_TYPE'
+        where (setting_group='$SETTING_GROUP' and setting_name='$SETTING_NAME' and site='$SITE' and setting_scope='$INSTALLATION');  
+commit; " > $SQL
+
+            runSQL
+
+            # clean up
+            rm $SQL
+
+            [[ $VALIDATE = "true" ]] && validateDB
+        done
+    fi
+
+#begin
+#    insert into ww_setting_values (SITE,SETTING_SCOPE,SETTING_GROUP,SETTING_NAME,SETTING_TYPE,SETTING_VALUE)
+#        values($SITE,'$INSTALLATION','$SETTING_GROUP','$SETTING_NAME','$SETTING_TYPE','$SETTING_VALUE');
+#    exception when dup_val_on_index then update ww_setting_values set setting_value='$SETTING_VALUE', setting_type='$SETTING_TYPE'
+#        where (setting_group='$SETTING_GROUP' and setting_name='$SETTING_NAME' and site='$SITE' and setting_scope='$INSTALLATION');  
+#end;
+
+#set define off;
+#insert into ww_setting_values (SITE,SETTING_SCOPE,SETTING_GROUP,SETTING_NAME,SETTING_TYPE,SETTING_VALUE)
+#    values($SITE,'$INSTALLATION','$SETTING_GROUP','$SETTING_NAME','$SETTING_TYPE','$SETTING_VALUE')
+#    select SETTING_GROUP, SETTING_NAME from dual
+#    where not exists 
+#        (select * from ww_setting_values 
+#        where setting_group='$SETTING_GROUP' and setting_name='$SETTING_NAME' and site='$SITE' and setting_scope='$INSTALLATION');
+
+    # perform the final commit
+    echo "commit;" | $SQLPLUS -S "${dbUser}/${dbPass}@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=($dbConnect=${dbSID})))" 
+}
+
+# make sure we have our basic scripts
+for script in getschema getdb geturls sqlplus brand2site site2brand jenkins-jnlp 
+do
+    which $script >/dev/null 2>&1 || BailOut "Can't find $script"
+done
+
+# parse arguments
+while [ $# -gt 0 ]
+do
+        case $1 in
+                -b|--brand|--brands )
+                        $(echo "$2" | grep -q -- "^-") || { BRAND="$2"; }
+                        shift;;
+                -e|--environment|--envs )
+                        $(echo "$2" | grep -q -- "^-") || { ENV="$2"; }
+                        shift ;;
+                -s|--setting )
+                        $(echo "$2" | grep -q -- "^-") || { SETTING="$2"; }
+                        shift;;
+                -a|--action )
+                        $(echo "$2" | grep -q -- "^-") || { ACTION="$2"; }
+                        shift;;
+                -t|--ticket )
+                        $(echo "$2" | grep -q -- "^-") || { TICKET="$2"; }
+                        shift;;
+                -q|--quiet )
+                        $(echo "$2" | grep -q -- "^-") || { QUIET="true"; }
+                        shift;;
+                -v|--validate )
+                        $(echo "$2" | grep -q -- "^-") || { VALIDATE="true"; }
+                        shift;;
+                -d|--debug )
+                        DEBUG="true"
+                        shift;;
+                * ) shift ;;
+        esac
+done
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $BRAND)
+ENV=$(tr '[:upper:]' '[:lower:]' <<< $ENV)
+ENVIRO=$ENV
+SETTING=$(echo "$SETTING" | tr '[:lower:]' '[:upper:]')
+ACTION=$(echo "$ACTION" | tr '[:upper:]' '[:lower:]')
+
+[ -z "$ENVIRO" ] && BailOut
+[ -z "$ACTION" ] && ACTION="update"
+[ "$ACTION" = "delete" -a -z "$SETTING" ] && BailOut "Must specify a setting with the 'delete' action"
+echo "$ACTION" | egrep -iq "add|update|delete" || BailOut "Invalid action '$ACTION'"
+[ "$VALIDATE" = "true" ] && QUIET=false
+
+# xlate certain env names to setting_scope
+INSTALLATION=$(get-installation $BRAND $ENVIRO)
+SETTING_SCOPE=$(get-overridescope $BRAND $ENVIRO)
+
+setVars
+
+updateSettingDB
+
+get-appsetting-job $BRAND $ENVIRO run > /dev/null 2>&1 &
+
+exit 0

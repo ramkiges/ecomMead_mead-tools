@@ -1,0 +1,14 @@
+#!/bin/bash
+
+for x in 3 4 5 6 7 8 9 10 11 14 15 16 
+do 
+  echo
+  host="ecom-jenkins-agent-$x"
+  echo "host: $host"
+
+  scp -q ~/bin/clean-jenkins $host:/tmp
+  ssh -q -tt $host "sh /tmp/clean-jenkins"
+  ssh -q $host "hostname;df --sync -kh /apps" 
+
+done
+

@@ -1,0 +1,1377 @@
+#!/bin/bash
+# TODO: fetch ADG log output
+# TODO: check platform-svc-session status eg https://edap-platform-svc-session-uat.services.west.nonprod.wsgc.com/summary 
+# https://edap-platform-svc-session-uat.services.west.nonprod.wsgc.com/heartbeat
+# TODO: k logs --since=5m - narrow down l8s log range
+# TODO: try to catch this error Provided generation ID doesn't match expected '8YYWWSSSS' format
+# TODO: check catalog json eg https://www.qa39.potterybarnkids.com/api/catalog/v1/category/categorytree/shop/data.json
+# git@github.wsgc.com:tfitzpatrick/mead-tools.git
+PATH=/apps/mead-tools:/apps/release-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/java/bin:/apps/scripts:/apps/scm-tools:$PATH:~/bin
+export PATH
+
+MFE_ACTION=eval
+#MFE_ACTION=echo
+APP_DAYS=5
+
+# expression to slice out the leading date stuff from httpd logs - experimental
+#CLEAN_DATE='s/\[ \] [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} \[[^][]*\] //'
+#CLEAN_DATE='s/\[ \] [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} \[[^][]*\] [^ ]* *\[[^][]*\] //'
+#CLEAN_DATE='s/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} //'
+#CLEAN_DATE='s/\[ \] //; s/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} //; s/\[[^][]*\] //; s/[^ ]* *//'
+#CLEAN_DATE='s/\[ \] //; s/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} //; s/\[[^][]*\] //; s/[^ ]* *//; s/\[[^][]*\] //'
+CLEAN_DATE='s/\[ \] //; s/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} //; s/\[[^][]*\] //'
+
+DEBUG=1
+DEBUG_PORT=37667
+
+MANIFEST_REPO=git@github.wsgc.com:eCommerce-DevOps/env-manifest.git
+RUNDECK_REPO=git@github.wsgc.com:eCommerce-DevOps/toolchain-resource-model.git
+CONFLUENCE=https://confluence.wsgc.com/display/ES/CheckEnv
+USER_AGENT="--user-agent CheckEnv"
+TEST_LIST=$(dirname $0)/$(basename $0).tests
+export SSHOPTS="-o StrictHostKeyChecking=no"
+export PUBLISHER=publisher-qa1-rk1v
+SNAPSHOT=http://snapshotrepo.wsgc.com/artifactory/snapshotrepo/com/wsgc/ecommerce/sites
+SNAPSHOT_LOGIN=
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+APPSETTINGS="https://repos.wsgc.com/svn/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site"
+SVC_EXCLUDE="email|google|fedex|ups|usps|adobe|akamai|visa|richrel|olapic|outward|^blm|turnto.com|azure.com|dart|scene7|bizsales|contpers|tools.datafeed_url|ebay|mediaplex|juniper|gigya|comenity|paypalobjects|ECOMSERV.TRADE_MEMBER|ECOMSERV.SHOPPING_CART"
+JMX_PORT=39667
+LOG_PORT=38666
+DEBUG_PORT=37667
+JKS=https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk/src/main/resources/tomcat/conf/frontend_keystore.jks
+
+HEADERS="\
+-H 'Cache-Control: no-cache' \
+-H 'pragma: no-cache' \
+-H 'accept-language: en-US,en;q=0.8' -H 'upgrade-insecure-requests: 1' \
+-H 'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8' \
+-H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.101 Safari/537.36' "
+
+LOGIN="ptqaenv:ta8PoLe"
+LOGVIEW="logview:System@111"
+TIMEOUT="--connect-timeout 20 --max-time 120"
+
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+WAR_STATUS=
+MEAD_TOOLS="git@github.wsgc.com:eCommerce-Mead/mead-tools.git"
+MFE_MATRIX="git@github.wsgc.com:eCommerce-Mead/mfe-matrix.git"
+GIT_USER=$(grep "email.*=" ~/.gitconfig | awk '{ print $NF }')
+[[ $BUILD_USER_ID =~ svc || $BUILD_USER_ID =~ ciuser || $RUNBY =~ svc || $RUNBY =~ ciuser ]] || RUNBY=${BUILD_USER_ID}
+[[ -z $RUNBY ]] && RUNBY=${BUILD_USER_ID}
+[[ -z $SLEEP ]] && SLEEP=60
+export RUNBY
+
+SERVICE_FAILURE_INTERNAL=
+
+# kubectl props
+export KUBE_USER="svcak8sci"
+[[ -e $HOME/.kube ]] && KUBE_CONFIG_PATH="$HOME/.kube"
+[[ -e /var/lib/jenkins/.kube ]] && KUBE_CONFIG_PATH="/var/lib/jenkins/.kube"
+export KUBE_CLUSTER="ts-sharedplatform-rck-nonprod"
+export KUBE_CONTEXT="${KUBE_CLUSTER}_${KUBE_USER}@wsgc.com"
+export KUBE_CONFIG="${KUBE_CONFIG_PATH}/${KUBE_USER}/${KUBE_CLUSTER}"
+
+# default log lines
+APP_LOG_LINES=500
+HTTP_LOG_LINES=10
+BGB_LOG_LINES=20
+TOMCAT_LOG_LINES=25
+BROWSER_LIST="chrome firefox ie"
+BROWSER="chrome"
+RET=0
+
+# these are the keywords we look for in the logs to determine if an error we care about has occurred
+
+FTL_HINT_LIST="FreeMarker template error|FTL stack trace"
+
+PRICING_HINT_LIST="parsing error|CheckedServiceException| ERROR |request data error|ExceptionUtility|PricingStrategyException|<error>|<errormessage>"
+
+APPSETTING_HINT_LIST="Null value for setting|Unknown type.*for setting|SettingsRuntimeException|could not get.*setting for|Invalid.*for setting|DbSettingsSource.*for setting|Could not convert setting|NoSuchSettingException|SettingsTypeException|cannot be converted to type|Type mismatch|Failed to convert property|Cannot convert value"
+APPSETTING_EXCLUDE_LIST="classpath:/settings-override.properties|find property override|Null value for setting|Will use default"
+
+umask 000
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+ICON_PLUS=" (+) "
+ICON_MINUS=" (-) "
+ICON_QUEST=" (?) "
+
+BailOut() {
+  [[ -n $1 ]] && unbuffer echo "$(hostname --short)/$(basename $0): $*" 
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV failed: $*
+[$(hostname) $BUILD_URL ]"
+
+  [[ -n $TMP && -e $TMP ]] && rm -rf $TMP
+	exit 1
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  #[[ -n $TMP ]] && rm -rf $TMP
+  [[ -n $GOLD && -e $GOLD ]] && rm -rf $GOLD
+}
+trap cleanUp EXIT
+
+timeStamp() { unbuffer echo ">>> $(date +'%Y-%m-%d %H:%M') $* <<<"; }
+
+Notation() { unbuffer echo "### $* "; }
+printInfo() { unbuffer echo "+++ $* "; }
+printStatus() { unbuffer echo "--- $* "; }
+
+getTestList() {
+  TEST_LIST=$TMP/$(basename $0).tests
+  if [ -n "$TEST_FOCUS" ]
+    then
+        sh list-ui-tests | egrep -i "^$TEST_FOCUS.*#|$TEST_FOCUS.*#" | head -20 > $TEST_LIST
+    else
+        cp $(basename $0).tests $TEST_LIST
+    fi
+	cd /tmp
+}
+
+fetchLog() {
+  TRY="1/3 2/3 3/3"
+  PAUSE=$SLEEP
+	LOG_NAME="$1"
+	SRC_FILE="$2"
+	DST_FILE="$3"
+
+  [[ -z $DST_FILE ]] && DST_FILE="$TMP/$(basename $SRC_FILE)"
+  mkdir -p $(dirname $DST_FILE)
+	for try in $TRY
+	do
+    Notation "Fetching $LOG_NAME from $SRC_FILE try $try "
+    curl $TIMEOUT $USER_AGENT --user "$LOGVIEW" -sqk $SRC_FILE -o $DST_FILE 
+    ret=$?
+		[ $ret -eq 0 ] && break
+		sleep $PAUSE || true
+		PAUSE=$(expr $PAUSE + $SLEEP)
+	done
+  [[ $ret != 0 ]] && echo "fetchLog returned $ret $(ls -l $DST_FILE)"
+}
+
+waitFor() {
+    WAIT_URL=$1
+    COMMENT=$2
+    /bin/echo -ne "Waiting for $WAIT_URL $COMMENT ..."
+    for try in {1..5}
+    do
+        /bin/echo -ne " $try"
+        status=$(curl -k --user "$LOGIN" --max-time 60 -o /dev/null --silent --head --write-out '%{http_code}\n' $WAIT_URL)
+        [ $status -eq 200 ] && break
+        sleep $SLEEP || true
+    done
+    echo " = $status"
+}
+
+[ $# -ne 2 ] && BailOut
+BRAND=$1
+ENV=$2
+ENVIRO=$ENV
+OPTIONS=$(tr '[:upper:]' '[:lower:]' <<< $OPTIONS)
+
+[[ $BRAND =~ corp ]] && BailOut "Corp not supported"
+[[ $BRAND =~ admin ]] && BailOut "Admin not supported"
+
+[[ $OPTIONS =~ reboot-dp ]] && OPTIONS="$OPTIONS rebuild-config clear-logs deploy-war deploy-content"
+[[ $OPTIONS =~ reboot-mfe ]] && OPTIONS="$OPTIONS rebuild-mfe deploy-mfe"
+#[[ $OPTIONS =~ check-golden-paths ]] && OPTIONS=$(sed -es/deploy-mfe//g -es rebuild-mfe <<< $OPTIONS)
+[[ $OPTIONS =~ force-content ]] && FORCEBUILD=true || FORCEBUILD=false 
+#[[ $OPTIONS =~ auto-close && -z $TICKET ]] && TICKET=$(jira-create -p MEAD -s "CheckEnv $BRAND $ENVIRO" -d "Auto-generated ticket for $BRAND $ENVIRO $OPTIONS [$RUNBY]")
+
+TICKET=$(sed -es%https://jira.wsgc.com/browse/%%g <<< $TICKET)
+
+# cleanup old working spaces
+find /tmp/checkenv.d -maxdepth 1 -type d -mmin +250 -exec rm -rf {} \; >/dev/null 2>&1
+
+# create a working temp space
+TMP=/tmp/checkenv.d/$BRAND-$ENVIRO
+mkdir -p $TMP
+chmod 777 $TMP
+
+PKG_DIR=$TMP/mead-tools
+rm -rf $PKG_DIR
+git clone -q --depth 1 $MEAD_TOOLS $PKG_DIR || BailOut "Unable to clone $MEAD_TOOLS as $GIT_USER"
+
+# we clone the RunDeck repo so we can find the host tags
+RUNDECK=$TMP/rundeck
+rm -rf $RUNDECK
+git clone -q --depth 1 $RUNDECK_REPO $RUNDECK
+
+#MANIFEST=$TMP/manifest
+#rm -rf $MANIFEST
+#git clone -q --depth 1 $MANIFEST_REPO $MANIFEST
+
+# translations because our naming isn't consistent
+DB_ENV=$(get-installation $BRAND $ENVIRO)
+
+MFEenv=$ENVIRO
+[[ $MFEenv = "rgs1" ]] && MFEenv="regression"
+[[ $MFEenv = "rgs2" ]] && MFEenv="regression2"
+
+#DOS2UNIX=$(which dos2unix 2>/dev/null)
+#[ -z "$DOS2UNIX" ] && BailOut "Can't find dos2unix"
+
+#GETURLS=$(which geturls 2>/dev/null)
+#[ -z "$GETURLS" ] && BailOut "Can't find geturls"
+
+GETDB=$(which getdb 2>/dev/null)
+[ -z "$GETDB" ] && BailOut "Can't find getdb"
+
+NC=$(which nc 2>/dev/null)
+[ -z "$NC" ] && BailOut "Can't find 'nc'"
+
+CHKSVC=$(which chksvc 2>/dev/null)
+[ -z "$CHKSVC" ] && BailOut "Can't find 'chksvc'"
+
+GETSCHEMA=$(which getschema 2>/dev/null)
+[ -z "$GETSCHEMA" ] && echo "Can't find 'getschema'"
+
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+[ -z "$JENKINS" ] && BailOut "Can't find 'jenkins-jnlp'"
+
+which runJenkinsJob >/dev/null 2>&1 || echo "Can't find runJenkinsJob"
+
+# default log level
+[ -z "$LOG_LEVEL" ] && LOG_LEVEL="DEBUG"
+
+for dir in /wsgc/bin /apps ~/bin
+do
+	[ -f $dir/jmxclient.jar ] && { JMX_JAR=$dir/jmxclient.jar; break; }
+done
+
+# check to see if there's another CheckEnv running for this environment
+echo "+++ Checking for duplicate CheckEnv"
+for job in $(jenkins-jnlp list-running |grep -i checkenv | egrep -iv "/$BUILD_ID/" | sort -u)
+do
+  build=$(awk -F/ '{ print $(NF-1) }' <<< $job) 
+  URL="https://ecombuild.wsgc.com/jenkins/job/CheckEnv/$build/api/json?tree=actions[parameters[name,value]]" 
+  b=$(curl -fsqkg $TIMEOUT "$URL" | jq -M ".actions[].parameters[]? | select(.name == \"Brand\") | .value" 2>/dev/null | egrep -iv "null" | sed -es/\"//g)
+  e=$(curl -fsqkg $TIMEOUT "$URL" | jq -M ".actions[].parameters[]? | select(.name == \"Environment\") | .value" 2>/dev/null | egrep -iv "null" | sed -es/\"//g)
+
+  #echo "--- $e $b https://ecombuild.wsgc.com/jenkins/job/CheckEnv/$build/api/json?"
+  if [[ $e = $ENVIRO && $b = $BRAND ]]
+  then 
+    echo " 
+
+*** 
+There is aleady a CheckEnv running for $BRAND $ENVIRO
+$job
+***
+"
+    [[ $PARALLEL =~ override ]] || exit 128
+  fi
+done
+
+# construct a build url so we can re-run the job in the exact same way
+BUILD_URL="$JENKINS_URL/job/CheckEnv/buildWithParameters?Brand=${BRAND}&Environment=${ENV}&Ticket=${TICKET}&Options=${OPTIONS}"
+BUILD_URL=$(echo "$BUILD_URL" | sed -e s/' '/'%20'/g)
+
+if [[ -n $TICKET ]] 
+then
+  TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+  [[ $TICKET = DEVOPS ]] && TICKET=
+  export TICKET
+  for jira in $TICKET
+  do
+    Notation "Jira:         https://jira.wsgc.com/browse/$jira"
+    jira-comment "$TICKET" "${ICON_INFO}CheckEnv: $BRAND $ENV - $JENKINS_URL/job/CheckEnv/$BUILD_ID/console [${RUNBY}]"
+  done
+fi
+
+HOST=$(get-host $BRAND $ENV 2>/dev/null | awk -F\. '{ print $1 }')
+[[ -z $HOST ]] && BailOut "Can't find a host for $BRAND $ENVIRO"
+DNS=$(host $HOST 2>/dev/null | grep -i address | awk -F\. '{ print $1 }')
+[[ -z $DNS ]] && BailOut "Can't find a dns entry  for $BRAND $ENVIRO"
+TAGS=$(egrep -ihr "$DNS|$HOST" $TMP/rundeck | awk -F 'tags=' '{ print $2 }' | awk -F\" '{ print $2 }' | tr '[:upper:]' '[:lower:]' | sed -es/','/' '/g -es/apmagents//g -es/guardrail_node//g)
+
+NON_AKAMAI="https://$HOST.wsgc.com"
+AKAMAI=$(get-akamai $BRAND $ENVIRO)
+
+T_POM="https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk/pom.xml"
+POM=$FRONTEND/qa/config/app/trunk/$BRAND/$ENV/pom.xml
+P_POM="$(dirname $(dirname $POM))/pom.xml"
+DOMAIN=$(svn cat $POM 2>/dev/null|egrep -i "<frontend.domain>" | grep -iv '!--' | awk -F '[<>]' '{ print $3 }' | tr '[:upper:]' '[:lower:]')
+[ -z "$DOMAIN" ] && DOMAIN=$(svn cat $P_POM 2>/dev/null|egrep -i "<frontend.domain>" | grep -iv '!--' | awk -F '[<>]' '{ print $3 }' | tr '[:upper:]' '[:lower:]')
+
+INSTALLATION=$(get-installation $BRAND $ENVIRO)
+
+CMX_DIR=$(svn cat $POM 2>/dev/null|egrep -i "<frontend.cmx>" | grep -iv '!--' | awk -F '[<>]' '{ print $3 }' | tr '[:upper:]' '[:lower:]')
+
+WCM_DIR=$(svn cat $POM 2>/dev/null|egrep -i "<frontend.wcm>" | grep -iv '!--' | awk -F '[<>]' '{ print $3 }' | tr '[:upper:]' '[:lower:]')
+
+SCHEMA=$($GETSCHEMA $BRAND $ENV | awk -F: '{ print $1 }')
+SID=$($GETSCHEMA $BRAND $ENV | awk -F: '{ print $2 }')
+[[ -z $SCHEMA ]] && BailOut "Why did schema come up blank for $BRAND $ENV?"
+DB=$(getdb $SCHEMA 2>/dev/null | awk -F\| '{ print $5 }')
+OVERRIDE=$APPSETTINGS/$DB/$SCHEMA/$BRAND/override/override.properties
+DEFAULTS=$APPSETTINGS/$DB/$SCHEMA/$BRAND/default/default.properties
+GLOBALS=$APPSETTINGS/$DB/$SCHEMA/global/global.properties
+
+# figure out which xcadm instances exist for this market and schejmma
+ADMINTOOL=$(get-xcadm-info -b $BRAND -e $ENVIRO)
+[[ -z $ADMINTOOL ]] && ADMINTOOL="<none>"
+
+# special shennanigans to get the gmtp deployment properties files
+m=$(getmarket $BRAND $ENV | tr '[:upper:]' '[:lower:]')
+[[ $m =~ us ]] && m=
+DEPLOYMENTS="https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties/${ENV}/${BRAND}${m}.properties"
+BUILD_DATA="https://repos.wsgc.com/svn/deployments/content/trunk/build_data/content-deploy/${ENV}/${BRAND}${m}.properties"
+
+LOGS="https://$HOST.wsgc.com:$LOG_PORT/wsgc-tomcat-frontend/?C=M;O=D"
+SUMMARY="https://$HOST.wsgc.com/admin/summary.html"
+SETTINGS="https://$HOST.wsgc.com/admin/settings"
+SITEADMIN="https://$HOST.wsgc.com/admin/tests/site-admin-tools.html"
+
+# snowflake!
+# pull the overrides from one of the other brands other than "admin"
+if [ "$BRAND" = "xcadm" -o "$BRAND" = "admin" ]
+then
+    xcadm=$(svn cat $POM | grep -i "<xcadm.installation>" | awk -F '[<>]' '{ print $3 }' | tr '[:upper:]' '[:lower:]')
+    OVERRIDE=$APPSETTINGS/$DB/$SCHEMA/mg/override/override.properties
+    DEFAULTS=$APPSETTINGS/$DB/$SCHEMA/mg/default/default.properties
+    GLOBALS=$APPSETTINGS/$DB/$SCHEMA/global/global.properties
+    LOGS="https://$HOST.wsgc.com:$LOG_PORT/wsgc-tomcat-xcadm/?C=M;O=D"
+    SETTINGS=
+    SUMMARY=
+fi
+
+# figure out BGB and BuildSystem hosts
+BGB_URL=$(svn cat $DEPLOYMENTS 2>/dev/null | grep -i "bgburi=" | egrep -v "#" | awk -F= '{ print $2 }')
+[ -z "$BGB_URL" ] && BGB_URL=$(svn cat "$(dirname $(dirname $DEPLOYMENTS))/deploy.properties" | grep -i "bgburi=" | egrep -v "#" | awk -F= '{ print $2 }')
+BGB_HOST=$(echo "$BGB_URL" | sed -es%https://%%g | awk -F: '{ print $1 }')
+
+# need to switch to this logic
+#BGB_HOST=$(get-bgb-host $BRAND $ENV | sed -es%https://%%g | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+#[[ -z $BGB_HOST ]] && BailOut "Can't figure out BGB host for $BRAND $ENV"
+
+BUILDSYS_URL=$(svn cat $DEPLOYMENTS 2>/dev/null | grep -i "bsuri=" | egrep -v "#" | awk -F= '{ print $2 }')
+[ -z "$BUILDSYS_URL" ] && BUILDSYS_URL=$(svn cat "$(dirname $(dirname $DEPLOYMENTS))/deploy.properties" | grep -i "bsuri=" | egrep -v "#" | awk -F= '{ print $2 }')
+BUILDSYS_HOST=$(echo "$BUILDSYS_URL" | sed -es%https://%%g | awk -F: '{ print $1 }')
+
+# get POM and appsetting flat files
+svn ls $POM >/dev/null 2>&1 || BailOut "Couldn't get POM for $BRAND $ENV"
+svn ls $OVERRIDE >/dev/null 2>&1 || BailOut "Can't get override for $BRAND $ENV ($OVERRIDE)"
+svn ls $DEFAULTS >/dev/null 2>&1 || BailOut "Can't get defaults for $BRAND $ENV ($DEFAULTS)"
+svn ls $GLOBALS >/dev/null 2>&1 || BailOut "Can't get globals for $BRAND $ENV ($GLOBALS)"
+
+SITEID=$(brand2site $BRAND $ENV)
+# on rare occasions, svn doesn't cooperate and this fails
+[[ -z $SITEID ]] && { sleep 30; SITEID=$(brand2site $BRAND $ENV); }
+[[ -z $SITEID ]] && BailOut "Why couldn't we get a siteId for $BRAND $ENV?"
+DOMAIN=$(getdomain $BRAND $ENV)
+
+MARKET=$(getmarket $BRAND $ENV | tr '[:upper:]' '[:lower:]')
+MARKET_LABEL=$MARKET
+[[ $MARKET = "us" ]] && MARKET=
+
+BACKEND=$(get-backend $BRAND $ENVIRO)
+
+SETTING_JOB=$(get-appsetting-job $BRAND $ENVIRO)
+
+test-svn-access || BailOut "SVN failed"
+
+Notation "Confluence:   $CONFLUENCE"
+Notation "BuildUserID:  $BUILD_USER_ID ($RUNBY)"
+Notation "Environment:  $BRAND $ENV"
+Notation "siteId:       $SITEID"
+Notation "Market:       $MARKET_LABEL"
+Notation "Domain:       $DOMAIN"
+if [[ $(gethost -a $BRAND $ENVIRO 2>/dev/null | wc -l) -gt 1 ]]
+then
+  Notation "Host:         $HOST.wsgc.com ($DNS) [$TAGS] {$(get-host -a $BRAND $ENVIRO | tr '\n' ' ')}"
+else
+  Notation "Host:         $HOST.wsgc.com ($DNS) [$TAGS]"
+fi
+Notation "Frontend:     $NON_AKAMAI"
+Notation "DP debug:     $($CHKSVC $HOST:$DEBUG_PORT)"
+[[ -n $AKAMAI ]] && Notation "Akamai:       $AKAMAI"
+Notation "Logs:         $LOGS"
+Notation "Summary:      $SUMMARY"
+Notation "Settings:     $SETTINGS"
+Notation "Settings job: https://ecombuild.wsgc.com/jenkins/view/appsettings/$SETTING_JOB"
+Notation "Site Tools:   $SITEADMIN"
+Notation "AdminTool:    $ADMINTOOL"
+Notation "ETCD:         $(get-etcd-env $ENV 2>&1 | tr '\n' ' ')"
+Notation "Oauth:        $(get-oauth-host $BRAND $ENV 2>&1 | tr '\n' ' ')"
+Notation "Backend:      $BACKEND"
+Notation "ECM:          $(get-ecm-env $BRAND $ENV | tr '\n' ' ')"
+Notation "BuildSystem:  $BUILDSYS_URL"
+Notation "BGB:          $BGB_URL"
+if [[ ! $OPTIONS =~ schema ]]
+then
+  Notation "DP Schema:    $(getschema $BRAND $ENVIRO)"
+  Notation "ECM Schema:   $(get-ecm-env $BRAND $ENVIRO schema | tr '\n' ' ')"
+  Notation "BGB Schema:   $(get-bgb-schema $BRAND $ENVIRO)"
+  Notation "CMX Schema:   $(get-cmx-schema $BRAND $ENVIRO)"
+  Notation "CMX Service:  $(get-bgb-service $BRAND $ENVIRO)"
+  Notation "CMX dir:      $CMX_DIR"
+fi
+Notation "Deployments:  $DEPLOYMENTS"
+#Notation "Build URL:   $BUILD_URL"
+Notation "MFE:          $JENKINS_URL/job/config-$ENV-mfe"
+
+ADG_ENV=$(get-adg-env $ENVIRO)
+#MFE_AKAMAI=$(get-akamai $BRAND $ENVIRO | awk -F/ '{ print $3 }' | sed -es/www\.//g)
+ADG_URL=$(get-adg-summary $BRAND $ENVIRO)
+DELIVERY="$AKAMAI/.delivery/summary/index.html"
+Notation "ADG env:      $ADG_ENV"
+Notation "Delivery g/w: $DELIVERY"
+Notation "ADG:          $ADG_URL"
+
+CAT_ENV=$(get-catalog-env $BRAND $ENVIRO)
+CAT_URL=$(get-catalog-url $BRAND $ENVIRO)
+Notation "Catalog:      $CAT_URL/summary ($CAT_ENV)"
+
+# test url/keyword/sku
+[[ -n $TEST_URL1 ]] && printInfo "TestURL 1:    $TEST_URL1"
+[[ -n $TEST_URL2 ]] && printInfo "TestURL 2:    $TEST_URL2"
+[[ -n $TEST_URL3 ]] && printInfo "TestURL 3:    $TEST_URL3"
+[[ -n $TEST_URL4 ]] && printInfo "TestURL 4:    $TEST_URL4"
+[[ -n $TEST_URL5 ]] && printInfo "TestURL 5:    $TEST_URL5"
+[[ -n $KEYWORD ]] && printInfo "Keyword:      $KEYWORD"
+[[ -n $SKU ]] && printInfo "SKUs:         $SKU"
+
+# load hints file
+. $TMP/mead-tools/checkenv.hints
+#ls -l $TMP/mead-tools/checkenv.hints
+
+# ADG tests
+curl -fsqk $ADG_URL >/dev/null 2>&1
+ret=$?
+if [[ $ret -ne 0 ]]
+then
+  printStatus "ADG URL returns $ret"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV ADG URL not working $ADG_URL [$ret]"
+  CHK_ADG=true
+else
+  printStatus "ADG URL ok"
+  CHK_ADG=
+fi
+
+if [[ $OPTIONS =~ host-info ]]
+then
+  printStatus "Fetch host info"
+  for h in $(get-host -a $BRAND $ENVIRO 2>/dev/null)
+  do
+    jenkins-jnlp build -f host-info -p Hostname=$h | sed -r "$CLEAN_DATE" | sed -es/"[NORMAL] "//g | egrep -iv "$RUNDECK_EXCLUDE"
+  done
+fi
+
+cd /tmp
+
+if [[ $OPTIONS =~ schema ]]
+then 
+  printStatus "Check schemas"
+  chkschema $BRAND $ENVIRO $TICKET 2>/dev/null
+fi
+
+if [[ $OPTIONS =~ appsetting ]]
+then 
+  Notation "Run appsettings job"
+  #get-appsetting-job $BRAND $ENV 
+  get-appsetting-job $BRAND $ENV run #>/dev/null 2>&1
+fi
+
+# rebuild war
+if [[ $OPTIONS =~ rebuild-war ]]
+then
+  branch=$($JENKINS list-jobs | grep -i "deploy-$ENV-$BRAND-CONTENT" | sed -es/"deploy-$ENV-$BRAND-CONTENT_"//gi -es/"^release-"//)
+  build-branch $branch $TICKET
+fi
+
+# build frontend config package
+if echo "$OPTIONS" | grep -iq "config"
+then
+  FRONTEND_CFG="wsgc-devops-frontend21-qa-single-env -p BRAND=${BRAND} -p ENVIRONMENT=${ENV} -p TICKET=${TICKET}"
+
+  #timeStamp "Building frontend config for common"
+  #eval $JENKINS build -s wsgc-devops-frontend21-common
+
+  #timeStamp "Building frontend config for qa"
+  #eval $JENKINS build wsgc-devops-frontend21-qa-app-config
+
+  #timeStamp "Building frontend config for $BRAND"
+  #eval $JENKINS build -s wsgc-devops-frontend21-qa-$BRAND-app-config
+
+  timeStamp "Building frontend config for $BRAND $ENV"
+  eval $JENKINS build -s $FRONTEND_CFG 
+  #[[ $? -ne 0 && -n $TICKET ]] && { jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV Frontend config job failed[${RUNBY}]" >/dev/null 2>&1 & RET=1;}
+
+  #eval $JENKINS build -s yum-createrepo-snapshot >/dev/null 2>&1 &
+fi        
+
+# snowflake perf deployers
+echo "$ENV" | grep -iwq "perf" && DEPLOYER="perf-env-deploy"
+
+# grab recent appsetting changes
+RECENT=
+DATE_LIST=
+OLD=$(date --date "-$APP_DAYS days" '+%Y%m%d')
+RECENT_DATES=$(curl -fsqk https://rundeck.wsgc.com/adhoc-appsetting.log | grep -wi "$ENVIRO" | grep -iw "$BRAND" | grep "^#" | awk '{ print $3 }' | sort -u | tail -5)
+for d in $RECENT_DATES
+do
+  t=$(sed -es/-//g <<< $d)
+  [[ $t -lt $OLD ]] && continue
+  DATE_LIST="$d $DATE_LIST"
+done
+
+if [[ -n $DATE_LIST ]]
+then
+  for d in $DATE_LIST
+  do
+    dc=$(curl -fsqk https://rundeck.wsgc.com/adhoc-appsetting.log | grep -i "$d" | grep -wi "$ENVIRO" | grep -iw "$BRAND" | grep "^#" | sed -es/\"//g -es/\'//g) 
+    [[ -n $dc ]] && RECENT="$dc 
+$RECENT"
+  done
+  Notation "Recent appsetting changes ($APP_DAYS days)"
+  echo "$RECENT"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}CheckEnv: $BRAND $ENV {noformat:title=Recent Appsetting Changes ($APP_DAYS days)}$RECENT{noformat}"
+else
+  Notation "No recent appsetting changes ($APP_DAYS days)"
+fi
+
+# grab recent generation changes
+SUBSYS_LIST=$(curl $TIMEOUT $USER_AGENT -H 'Cache-Control: no-cache' -fsqk http://locker-dev-rk2v.wsgc.com:38667/generation-history.log | awk -F, '{ print $4 }' | sort -ur)
+for s in $SUBSYS_LIST
+do
+  g=$(curl $TIMEOUT $USER_AGENT -H 'Cache-Control: no-cache' -fsqk http://locker-dev-rk2v.wsgc.com:38667/generation-history.log | egrep -i ",$BRAND,$ENVIRO,$s|,$BRAND,$INSTALLATION,$s" | sort -u | tail -1)
+  [[ -z $g ]] && continue
+
+  x=$(get-dp-generations $BRAND $ENVIRO $s 2>/dev/null)
+  if [[ -n $x ]]
+  then
+    [[ $g =~ $x ]] || continue
+  fi
+  [[ -z $GEN_CHG ]] && GEN_CHG=$g || GEN_CHG="$g
+$GEN_CHG"
+done
+#GEN_CHG=$(curl $TIMEOUT $USER_AGENT -H 'Cache-Control: no-cache' -fsqk http://locker-dev-rk2v.wsgc.com:38667/generation-history.log | egrep -i ",$BRAND,$ENVIRO,|,$BRAND,$INSTALLATION," | tail)
+
+if [[ -n $GEN_CHG ]]
+then
+  Notation "Recent content generation changes"
+  echo "$GEN_CHG"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}CheckEnv: $BRAND $ENV 
+Recent content generation changes
+$GEN_CHG"
+else
+  Notation "No recent content generation changes"
+fi
+
+# new option to clone MFE generations
+if echo "$OPTIONS" | grep -iq "ecm"
+then
+  timeStamp "Copy ECM generations"
+  SRC_ECM=${m}rgs1 
+  [[ $ENV =~ rgs ]] && SRC_ECM=${m}qa10 
+  [[ $ENV =~ int ]] && SRC_ECM=${m}rgs1 
+  [[ $ENV =~ uat ]] && SRC_ECM=${m}uat3 
+  [[ $ENV =~ bpv ]] && SRC_ECM=${m}uat3 
+  #[[ $ENV = "rgs2" ]] && SRC_ECM=${m}rgs1
+
+  jenkins-jnlp build -f copy-generations \
+    -p Brand=$BRAND \
+    -p Source_Environment=$SRC_ECM \
+    -p Destination_Environment=$ENV \
+    -p CAT=false \
+    -p CMX=false \
+    -p Deploy_Content=false \
+    -p Deploy_War=false \
+    -p AutoClose=false \
+    -p RunBy=$RUNBY \
+    -p Ticket=$TICKET
+
+fi
+
+# deploy content
+# TODO: grab generation info from build data 
+# eg https://repos.wsgc.com/svn/deployments/content/trunk/build_data/content-deploy/uat3/pk.properties
+if echo "$OPTIONS" | grep -iq "content"
+then
+  CONTENT_JOBS=$(eval $JENKINS list-jobs | grep -iw "${BRAND}" |grep -iw "${ENV}" | grep -i "content" | tr '\r' ' ' )
+  #jira-label "$TICKET" "Deploy-Content"
+
+  [[ -z $CONTENT_JOBS ]] && echo "<<< We didn't find any content job in jenkins >>>"
+
+  # inform us if there's more than one content job
+  dc=$(echo $CONTENT_JOBS | wc -w)
+  if [[ $dc -gt 1 ]]
+  then 
+    #jira-create -p MEAD -s "More than one CONTENT deployer for $BRAND $ENV" -d "Please remove uneeded CONTENT deployers for $BRAND $ENV 
+    echo "*** More than one CONTENT deployer for $BRAND $ENV"
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: More than one CONTENT deployer for $BRAND $ENV
+$JENKINS_URL/search/?q=deploy-$ENV-"
+  fi
+
+	for job in $CONTENT_JOBS
+	do
+    # execute content job
+    timeStamp "Deploy CONTENT: $JENKINS_URL/job/$job"
+    eval $JENKINS build -f $job -p FORCEBUILD=$FORCEBUILD -p RunBy=$RUNBY -p TICKET="$TICKET" >/dev/null 2>&1
+
+    # fetch content output and status
+    CONTENT_CONSOLE=$TMP/$BRAND-$ENV-content.out
+    curl -sqk $JENKINS_URL/job/$job/lastBuild/consoleText > $CONTENT_CONSOLE 
+    result_url="$JENKINS_URL/job/$job/lastBuild/api/json?tree=result"
+    CONTENT_STATUS=$(curl --fail $TIMEOUT $USER_AGENT -sk -H 'Cache-Control: no-cache' $result_url | jq -rMS .result)
+    CONSOLE_STATUS=$(grep "Finished:" $CONTENT_CONSOLE | tail -1 | awk '{ print $NF }')
+
+    Notation "CONTENT_STATUS: $CONTENT_STATUS [$CONSOLE_STATUS]"
+    [[ $CONTENT_STATUS =~ NULL ]] && CONTENT_STATUS=$CONSOLE_STATUS
+    [[ $CONTENT_STATUS =~ FAIL ]] && RET=3
+    [[ $CONTENT_STATUS =~ ABORT ]] && jira-comment "$TICKET" "${ICON_INFO}CheckEnv: $BRAND $ENV CONTENT deploy aborted  $BUILD_LOG [${RUNBY}]" >/dev/null 2>&1
+    [[ $CONTENT_STATUS =~ FAIL ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV CONTENT deploy failed  $BUILD_LOG [${RUNBY}]" >/dev/null 2>&1
+    [[ $CONTENT_STATUS =~ SUCC ]] && jira-comment "$TICKET" "${ICON_SUCC}CheckEnv: $BRAND $ENV CONTENT deploy succeeded [${RUNBY}]" >/dev/null 2>&1
+
+    GENERATION_ID=$(grep -i 'new generation id' $CONTENT_CONSOLE | head -1 | awk '{ print $NF }'| sed -e s/\*//g)
+    BUILD_ID=$(grep -i 'new build number' $CONTENT_CONSOLE | head -1 | awk '{ print $NF }'| sed -e s/\*//g)
+    [[ -n $GENERATION_ID ]] && Notation "New CMX GenerationID: $GENERATION_ID ($BUILDID)" || Notation "CMX GENERATION_ID is blank"
+
+    BUILD_LOG="https://${BUILDSYS_HOST}/buildsystem2/builds/${BRAND}${MARKET}dp_UI/cmx-build-${BUILD_ID}/BUILD.LOG"
+    Notation "CMX BUILD_LOG: $BUILD_LOG"
+
+    #echo "$CONTENT_CONSOLE" | grep -iq "because it is disabled" && CONTENT_STATUS=1
+    #echo "$CONTENT_CONSOLE" | egrep -iq "aborted" && CONTENT_STATUS=255
+    #echo "$CONTENT_CONSOLE" | egrep -iq "failed" && CONTENT_STATUS=2
+    #echo "$CONTENT_CONSOLE" | egrep -iq "status code:.*500" && CONTENT_STATUS=500
+
+    # extract errors from jenkins output
+    BUILD_ERRORS_CONSOLE=$(egrep -i "$HINTS_CONTENT_CONSOLE" $CONTENT_CONSOLE | egrep -iv "$CONTENT_EXCLUDE" | uniq)
+    if [[ -n $BUILD_ERRORS_CONSOLE ]]
+    then 
+      echo "/// Content console log messages ///"
+      echo "$BUILD_ERRORS_CONSOLE"
+      [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV Content console log messages {noformat}$BUILD_ERRORS_CONSOLE{noformat}[${RUNBY}]"
+    fi
+
+    # TODO: try to extract specific errors from BUILD.LOG
+    if [[ -n $BUILD_LOG ]]
+    then
+      BUILD_ERRORS_LOG=$(curl -fsqk $BUILD_LOG | egrep -i "$HINTS_CONTENT_LOG" | egrep -iv "$CONTENT_EXCLUDE" | uniq | head -10)
+      if [[ -n $BUILD_ERRORS_LOG ]] 
+      then
+        echo "/// Content build log messages $BUILD_LOG ///"
+        echo "$BUILD_ERRORS_LOG"
+        [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV Content build log messages - please engage Engineering {noformat:title=$BUILD_LOG }$BUILD_ERRORS_LOG{noformat}[${RUNBY}]"
+      fi
+    else
+      echo "/// For some reason BUILD_LOG is blank ///"
+    fi
+
+    # try to extract the build number from the output
+    CMX=$(grep 'http.*cmx-build' $CONTENT_CONSOLE | egrep -io "/cmx-build.*/" | head -1 | sed -es%/%%g)
+    if [[ -n $CMX ]]
+    then
+        echo "CMX: $CMX"
+        echo "$BUILDSYS_HOST" | egrep -qi "buildsystem.wsgc.com|buildsystem-prd-rk1v" && CMX_URL="http://$BUILDSYS_HOST/builds/${BRAND}dp_UI/$CMX"
+        echo "$BUILDSYS_HOST" | egrep -qi "bgb-.*uat.*" && CMX_URL="http://$BUILDSYS_HOST/buildsystem2/builds/${BRAND}dp_UI/$CMX"
+        echo "$BUILDSYS_HOST" | egrep -qi "bgb-.*rgs.*" && CMX_URL="http://$BUILDSYS_HOST/buildsystem2/builds/${BRAND}dp_UI/$CMX"
+        [[ -n $CMX_URL ]] && echo "BuildSystem Output: $CMX_URL" || echo "Why is CMX_URL blank?"
+        CMX_LOG="$CMX_URL/BUILD.LOG"
+        CMX_ERR="$CMX_URL/ERROR.LOG"
+    else
+        echo "CMX is empty :("
+    fi
+
+    # try extract buildsystem messages
+    BGB_STAGE=$(grep -i 'stage request' $CONTENT_CONSOLE | awk '{ print $NF }')
+    [ -z "$BGB_STAGE" ] && BGB_STAGE="$BGB_URL/sites/$(echo $BRAND | tr '[:lower:]' '[:upper:]')/$(brand2site $BRAND $ENV)/index.htm"
+    echo "BGB Stage: $BGB_STAGE"
+    echo "BGB Activate: $BGB_URL/active/$(echo $BRAND | tr '[:lower:]' '[:upper:]')/$(brand2site $BRAND $ENV)/dp${ENV}/$ENV/index.htm"
+
+    grep -i "contentbuild-ERROR.log" $CONTENT_CONSOLE | awk -F 'URL:' '{ print $1 }' | awk '{ print $1 }'
+    #BUILDSYS_ERROR_LOG=$(echo "$CONTENT_CONSOLE" | grep -i "contentbuild-ERROR.log" | awk -F 'URL:' '{ print $1 }' | awk '{ print $1 }')
+    #BUILDSYS_ERROR_LOG=$(echo "$CONTENT_CONSOLE" | egrep -i 'http.*/ERROR.LOG' | awk '{ print $NF }' | head -1)
+    echo ">>> BuildSystem log: $BUILDSYS_ERROR_LOG <<<"
+    if [ -n "$BUILDSYS_ERROR_LOG" ] 
+    then
+      BUILDSYS_ERROR_MSG1=$(curl -kqs $BUILDSYS_ERROR_LOG 2>/dev/null | egrep -i -A+5 "BUILD FAILED" | tail -6 )
+      BUILDSYS_ERROR_MSG2=$(curl -kqs $BUILDSYS_ERROR_LOG 2>/dev/null | egrep -i -A+5 "\[exec\].*error" | tail -6)
+      BUILDSYS_ERROR_MSG3=$(curl -kqs $BUILDSYS_ERROR_LOG 2>/dev/null | egrep -i -A+5 "\[java\].*error" | tail -6)
+#     BUILDSYS_ERROR_MSG4=$(curl -kqs $BUILDSYS_ERROR_LOG 2>/dev/null | egrep -i -A+1 "$HINTS_BGB" | tail -2)
+      BUILDSYS_ERROR_MSG5=$(curl -kqs $BUILDSYS_ERROR_LOG 2>/dev/null | egrep -i -A+1 "$HINTS_CONTENT")
+      echo "BuildSys error log: $BUILDSYS_ERROR_LOG 
+$BUILDSYS_ERROR_MSG1 $BUILDSYS_ERROR_MSG2 $BUILDSYS_ERROR_MSG3 $BUILDSYS_ERROR_MSG4 BUILDSYS_ERROR_MSG5"
+      [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV BuildSystem Error log {noformat:title=$BUILDSYS_ERROR_LOG }
+$BUILDSYS_ERROR_MSG1
+$BUILDSYS_ERROR_MSG2 
+$BUILDSYS_ERROR_MSG3
+$BUILDSYS_ERROR_MSG4
+$BUILDSYS_ERROR_MSG5
+{noformat}
+[${RUNBY}]" >/dev/null 2>&1 &
+        fi
+	done
+
+    # capture BGB logs (experimental)
+    DEPTH=5
+    for LOG in wsgc-tomcat-buildsystem/buildsystem.log  wsgc-tomcat-buildsystem/application.log wsgc-tomcat-bgb/application.log 
+    do
+      APPNAME=$(dirname $LOG | sed -e s/wsgc-tomcat-//g | awk '{print toupper(substr($0,0,1))tolower(substr($0,2))}')
+    	TMP_LOG="$TMP/$BGB_HOST-$LOG-$$"
+    	LOG_URL="http://$BGB_HOST:38667/$LOG"
+      curl $TIMEOUT $USER_AGENT -fsqk $LOG_URL >/dev/null 2>&1 || continue
+
+    	echo "================================================================================="
+      echo "$APPNAME $(basename $LOG | sed -es/\.log//g -es/\.out//g) log: $LOG_URL"
+      BGB_CONTENT_MSG=$(curl -fsqk "$LOG_URL" | 
+        egrep -i -A+${DEPTH} "$GENERATION_ID|$BUILD_ID|$ENV " | 
+        egrep -i "error|$GENERATION_ID|$BUILD_ID|$ENV " | 
+        egrep -vi "$CONTENT_EXCLUDE" | 
+        tail -$(expr ${DEPTH} + 1) )
+      if [[ -n $BGB_CONTENT_MSG ]]
+      then
+        echo "$APPNAME Log messages for $GENERATION_ID/$BUILD_ID $LOG_URL: 
+$BGB_CONTENT_MSG"
+        [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV Content $(basename $LOG | sed -es/\.log//g) log {noformat:title=$LOG_URL }$BGB_CONTENT_MSG{noformat}[${RUNBY}]" >/dev/null 2>&1 &
+      fi
+    done
+
+    [[ $CONTENT_STATUS =~ FAIL ]] && chkcontent $BRAND $ENV $TICKET
+fi
+
+# temporary hack - make sure the generation is staged
+bgb=$(get-bgb-host $BRAND $ENV | awk -F\. '{ print $1 }' | sed -es/-rk1v//g -es/-sac1v//g -es/bgb-//g)
+#timeStamp "Stage CMX generation"
+jenkins-jnlp build -s stage-cmx-generation -p Brand=$BRAND -p Environment=$ENV -p BGB=$bgb >/dev/null 2>&1 &
+
+if [[ $OPTIONS =~ clear || $OPTIONS =~ log ]] 
+then
+  timeStamp "Clearing frontend logs"
+  eval $JENKINS build -s frontend-clear-logs -p Brand=$BRAND -p Environment=$ENV 
+fi
+
+if [[ $OPTIONS =~ war ]]
+then
+	DEPLOYER=$(eval $JENKINS list-jobs 2>/dev/null | grep -iw "${BRAND}" |grep -iw "${ENV}" | grep -i "^deploy-" | grep -i -- "-war" | tr '\r' ' ' )
+  dc=$(echo $DEPLOYER | wc -w)
+  if [[ $dc -gt 1 ]]
+  then 
+    #jira-create -p MEAD -s "More than one WAR deployer for $BRAND $ENV" -d "Please remove uneeded WAR deployers for $BRAND $ENV  
+    echo "*** More than one WAR deployer for $BRAND $ENV" 
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: More than one WAR deployer for $BRAND $ENV
+$JENKINS_URL/search/?q=deploy-$ENV-"
+  fi
+
+  #jira-label "$TICKET" "Deploy-War"
+
+	for job in $DEPLOYER
+	do
+    echo "$ENV" | grep -iq "perf" && DEPLOY_OPTS="-p Brand=$BRAND"
+
+		timeStamp "Deploy WAR $JENKINS_URL/job/$job"
+		eval $JENKINS build -f $job $DEPLOY_OPTS -p Ticket="$TICKET" >/dev/null 2>&1
+    ret=$?
+
+    # fetch war job output and status
+#echo "Console output:$JENKINS_URL/job/$job/lastBuild/consoleText"
+    WAR_CONSOLE=$TMP/$BRAND-$ENVIRO-war.out
+    mkdir -p $(dirname $WAR_CONSOLE)
+    curl -sqk $TIMEOUT $JENKINS_URL/job/$job/lastBuild/consoleText > $WAR_CONSOLE 
+    result_url=$JENKINS_URL/job/$job/lastBuild/api/json?tree=result
+    WAR_STATUS=$(curl --fail $TIMEOUT $USER_AGENT -sqk -H 'Cache-Control: no-cache' $result_url | jq -rMS .result)
+    Notation "WAR_STATUS: $WAR_STATUS ($ret)"
+    #[[ $ret != 0 ]] && WAR_STATUS=FAILURE
+
+    W="s/\[[^][]*\] \[[^][]*\] //"
+    WAR_ERROR=$(egrep -i "$HINTS_WAR" $WAR_CONSOLE | sed -r "$W" )
+    if [[ -n $WAR_ERROR ]]
+    then
+      echo $WAR_ERROR
+      [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV WAR deploy failed {noformat}$WAR_ERROR{noformat}[${RUNBY}]" 
+    fi
+
+    if [[ $WAR_STATUS =~ SUCC ]]
+    then
+      [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_SUCC}CheckEnv: $BRAND $ENV WAR deploy succeeded https://$HOST.wsgc.com/admin/summary.html [${RUNBY}]" 
+    else
+      RET=2
+      [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV WAR deploy failed [${RUNBY}]" 
+    fi
+	done
+else
+  # TODO: make this smarter
+    timeStamp "Check $HOST httpd status"
+    #chksvc https://$HOST.wsgc.com
+    curl --user "$LOGVIEW" -sfqk https://$HOST.wsgc.com:38666/ >/dev/null 2>&1
+    { ret=$?; set +x; } 2>/dev/null
+    if [[ $? -ne 0 ]]
+    then       
+        timeStamp "Could not reach https://$HOST.wsgc.com - Restarting httpd"
+    #    eval $JENKINS build -s httpd-restart -p Brand=$BRAND -p Environment=$ENV 
+    fi
+fi
+
+# capture content-related info
+if [[ $OPTIONS =~ content ]]
+then
+    #echo "Generations in admin/summary.html: "
+    #curl -qsk https://$HOST.wsgc.com/admin/summary.html|egrep -w "TMPL|MISC|MSG" | awk -F '[<>]' '{ print $5,$9 }'
+
+    ADMIN_GEN=$(curl -qsk https://$HOST.wsgc.com/admin/summary.html|egrep -w "TMPL|MISC|MSG" | head -1 | awk -F '[<>]' '{ print $9 }' | awk -F\. '{ print $1 }')
+    echo "Content generation from build: $GENERATION_ID"
+    echo " Generation from summary.html: $ADMIN_GEN"
+
+    DP_CONTENT_MSG=$(curl -sqk --user $LOGVIEW "https://$HOST.wsgc.com:$LOG_PORT/wsgc-tomcat-frontend/application.log" | egrep -i -A+2 "${ADMIN_GEN}" | tail -$(expr ${DEPTH}))
+    if [ -n "$DP_CONTENT_MSG" ]
+    then
+        echo "DP log messages for $ADMIN_GEN: $DP_CONTENT_MSG"
+        #[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: Frontend log {noformat:title=http://$LOGVIEW@$HOST.wsgc.com:$LOG_PORT/wsgc-tomcat-frontend/application.log }$DP_CONTENT_MSG{noformat} [${RUNBY}]" >/dev/null 2>&1 &
+    fi
+fi
+
+# clone the mfe data repo
+rm -rf $TMP/mfe-matrix
+git clone -q --depth 1 -b develop $MFE_MATRIX $TMP/mfe-matrix || echo "Unable to clone $MFE_MATRIX as $GIT_USER"
+
+if [[ $OPTIONS =~ mfe ]]
+then
+  MFE_LIST=
+
+  # create a string for MANUAL_MARKETS
+  ETCD=$(get-etcd-env $ENV)
+  MANUAL_MARKETS=
+  for brand in $(getbrandlist | tr '[:lower:]' '[:upper:]')
+  do
+    for market in US CAN
+    do
+      MANUAL_MARKETS="$brand:$market $MANUAL_MARKETS"
+    done
+  done
+
+  # check the golden paths
+  GOLD=$(mktemp -p /tmp tmp.checkenv-golden.XXX)
+  Notation "chk-golden-paths $BRAND $ENVIRO $TICKET"
+  chk-golden-paths $BRAND $ENVIRO $TICKET | tee $GOLD
+  
+  for i in {1..9}
+  do
+    url="TEST_URL${i}"
+    [[ -z ${!url} ]] && continue
+    #set -x
+    curl -fsk -o /dev/null "$HEADERS" ${!url} -w "%{http_code} %{url_effective}\n" >> $GOLD
+    #{ set +x; } 2>/dev/null 
+  done
+
+  if [[ $OPTIONS =~ deploy-mfe ]]
+  then
+    PROBLEMS=$(egrep -i "^5|^4" $GOLD | awk -F/ '{ print $4 }' | egrep -iv "\?|=|\." | sort -u)
+    Notation "Golden Path Problems: 
+$PROBLEMS"
+
+    #MFE_LIST=$(get-manifest -e $ENVIRO -l | egrep -i "ecom-app|ecom-svc")
+    for p in $PROBLEMS
+    do
+      MFE_LIST="$(path2mfe $p) $MFE_LIST"
+    done
+    MFE_LIST=$(echo "$MFE_LIST" | xargs -n1 | sort -u | tr '\n' ' ')
+
+    Notation "Re-Deploy MFEs [$MFE_LIST]"
+    for mfe in $MFE_LIST 
+    do
+      # skip these altogether
+      [[ $mfe =~ catalog ]] && continue
+
+      # we'll build these later
+      [[ $mfe =~ ecom-app-config-all ]] && continue
+      [[ $mfe =~ ecom-app-global ]] && continue
+
+      timeStamp "$mfe"
+      M_ENV=$(get-manifest -e $ENVIRO -s $mfe -k env)
+      [[ -z $M_ENV ]] && M_ENV=$ENVIRO
+      #set -x
+      $MFE_ACTION jenkins-jnlp build -s manifestDriftResolve \
+        -p ENV_NAME=$M_ENV \
+        -p MANIFEST_TYPE=services-collection-manifest \
+        -p APP_NAME=$mfe \
+        -p DRY_RUN_FLAG=false
+      { ret=$?; set +x; } 2>/dev/null
+      [[ -n $TICKET && $ret != 0 ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV - $mfe deployer issue ($ret)"
+    done
+  fi
+
+  # update MFE
+  timeStamp "Start MFE config https://ecombuild.wsgc.com/jenkins/job/config-$ENV-mfe"
+  export TICKET=$TICKET 
+  RUNBY=checkenv run-mfe-config $ENVIRO $BRAND
+  unbuffer /bin/echo -n "Waiting for MFE config "
+  for i in {35..1}
+  do
+    unbuffer /bin/echo -n "${i} "
+    result=$(curl -sqk https://ecombuild.wsgc.com/jenkins/job/config-$ENV-mfe/lastBuild/api/json?tree=result | jq -r .result 2>/dev/null | tr "[:upper:]" "[:lower:]")
+    [[ $result =~ succ ]] && break
+    [[ $result =~ fail ]] && break
+    [[ $result =~ abort ]] && break
+    sleep 60
+  done
+  echo
+
+  MFE_ERROR=$(curl -fsqk https://ecombuild.wsgc.com/jenkins/job/config-$ENV-mfe/lastBuild/consoleText \
+      | egrep -i "$HINTS_MFE_CONFIG" \
+      | cut -d ' ' -f3- \
+      | sed -es/'Error:'/'Error:'/gi -es/\'//g -es/\"//g -es/\\\$/\\\\$/g -es/\\\n/\\n/g \
+    )
+  MFE_SUCCESS=$(curl -fsqk https://ecombuild.wsgc.com/jenkins/job/config-$ENV-mfe/lastBuild/consoleText \
+      | egrep -i "Success on deploy|etcd-syncappconfig.*succeeded")
+
+  if [[ -n $MFE_ERROR ]]
+  then
+    Notation "MFE errors: $MFE_ERROR"
+#set -x
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV - MFE config error {noformat:title=https://ecombuild.wsgc.com/jenkins/job/config-$ENV-mfe }\'$MFE_ERROR\'{noformat} [${RUNBY}]" 
+{ set +x; } 2>/dev/null
+  else
+    Notation "No MFE config job errors detected"
+  fi
+
+  if [[ -n $MFE_SUCCESS ]]
+  then
+    Notation "MFE config job succeeded" 
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_SUCC}CheckEnv: $BRAND $ENV - MFE config job succeeded [${RUNBY}]" 
+  fi
+
+  for mfe in ecom-app-config-all ecom-app-global
+  do
+#    timeStamp "$mfe $MFEenv"
+#    $MFE_ACTION jenkins-jnlp build -s manifestDriftResolve \
+#      -p ENV_NAME=$ENVIRO \
+#      -p MANIFEST_TYPE=env-manifest \
+#      -p APP_NAME=$mfe \
+#      -p DRY_RUN_FLAG=false
+
+    timeStamp "$mfe"
+    M_ENV=$(get-manifest -e $ENVIRO -s $mfe -k env)
+    [[ -z $M_ENV ]] && M_ENV=$ENVIRO
+    set -x
+    jenkins-jnlp build -s k8s-deployers/job/ecom/job/$mfe/job/$M_ENV
+    { ret=$?; set +x; } 2>/dev/null
+    [[ -n $TICKET && $ret != 0 ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV - $mfe deployer issue ($ret)"
+  done
+
+  #eval jenkins-jnlp build generate-mfe-matrix-data -p ENV_LIST=${ENV} >/dev/null 2>&1 &
+  MISSING=$(curl -fsqk $ADG_URL | egrep -B+7 -i "__MISSING__" | grep -i "Endpoint:" | awk -F: '{ print $2 }' | sort -u)
+  if [[ -n $MISSING ]]
+  then
+    Notation "ADG misconfiguration: found missing services in $ADG_URL
+$MISSING"
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: ADG misconfiguration - missing services in $ADG_URL 
+$MISSING"
+  fi
+fi
+
+# pick out any urls in the settings files
+if echo "$OPTIONS" | egrep -iq "services|links"
+then
+    # image links
+    timeStamp "Testing content links (up/down)"
+    for param in $(svn cat $T_POM $P_POM $POM | egrep -i "secure.*imagebase|secure.*appbase" | awk -F '[<>]' '{ print $2 }' | sort -u)
+    do
+	    url=$(svn cat $T_POM $P_POM $POM | grep "$param" | awk -F '[<>]' '{ print $3 }' | egrep -vi "\${" | sed -es/\${frontend.domain}\/$DOMAIN/g -es/\${frontend.brand}\/$BRAND/g )
+	    #echo "$param - $url	$(chksvc $url)"
+      #eval $JENKINS build -f checksvc -p Application=frontend -p Brand=$BRAND -p Environment=$ENV -p Target=$svc_url
+    done
+
+    ## lookup and test apache ports
+    timeStamp "Testing Apache (up/down)"
+    echo "https	$(chksvc $HOST.wsgc.com:443)"
+    echo "debug	$(chksvc $HOST.wsgc.com:$DEBUG_PORT)"
+    echo "logs	$(chksvc $HOST.wsgc.com:$LOG_PORT)"
+    echo "jmx	$(chksvc $HOST.wsgc.com:$JMX_PORT)"
+    echo "VIP 	$(chksvc $HOST.wsgc.com:49446)"
+    echo "Akamai 	$(chksvc $AKAMAI:443)"
+
+    # check the db connections
+    timeStamp "Checking DB (up/down)"
+    for param in frontend.datasource.ecomDB.url datasource.session.url
+    do
+	    JDBC=$(svn cat $POM | grep "$param" | awk -F '[<>]' '{ print $3 }' | egrep -vi "\\\${" | sed -e s/jdbc://g -e s/oracle://g -e s/thin://g -e s/\@//g | awk -F: '{ print $1 ":" $2 }' )
+	    host=$(echo "$JDBC"| awk -F: '{ print $1 }')
+	    port=$(echo "$JDBC"| awk -F: '{ print $2 }')
+	    label=$(echo "$param" | sed -e s/frontend\.//g -e s/jms//g -e s/\.providerUrl//g -e s/\.url//g)
+	    echo "$label	$host:$port	$(chksvc $host:$port) "
+    done
+
+    timeStamp "Testing service connections (up/down) [from properties]"
+
+#    timeStamp "Checking JMS (up/down)"
+#    for param in $(svn cat $T_POM $P_POM $POM | egrep -i "frontend.*jms.*url|tcp://|frontend.kafkaServers|appdynamics.controller.hostname" | egrep -iv "<!--|-->|\\\${" | awk -F '[<>]' '{ print $2 }'| sort -u)
+#    do
+#	    for url in $(svn cat $T_POM $P_POM $POM | awk -F '[<>]' "/$param/{print \$3}" | egrep -vi "\\\${" | sed -e s/,/' '/g | sed -e s!tcp://!!g)
+#	    do
+#		    label=$(echo "$param" | sed -e s/frontend\.//g -e s/\.providerUrl//g -e s/\.url//g)
+#		    host=$(echo "$url"| awk -F: '{ print $1 }')
+#		    port=$(echo "$url"| awk -F: '{ print $2 }')
+#		    #echo "$label	$host:$port	$(chksvc $host:$port)"
+#        [[ $host =~ adyrck-vicn001 || $host =~ apm- ]] && port=5443
+#		    echo "$label	$host:$port "
+#        eval $JENKINS build -f checksvc -p Application=frontend -p Brand=$BRAND -p Environment=$ENV -p Target=$host:$port | egrep "checksvc:"
+#        ret=${PIPESTATUS[0]}
+#        [[ $ret != 0 ]] && SERVICE_FAILURE_INTERNAL="$label $host:$port
+#$SERVICE_FAILURE_INTERNAL"
+#	    done
+#    done
+
+    #echo "$GLOBALS $DEFAULTS $OVERRIDE"
+    timeStamp "Testing service connections (up/down) [from appsettings]"
+    for svc in $(svn cat $GLOBALS $DEFAULTS $OVERRIDE | egrep -ih "url\=|url\.|uri\=|uri\.|_uri|urls\=|urls\.|endeca_host|bgb_host" | awk -F\. '{ print $1 "." $2 }'|awk -F= '{ print $1 }'|sort -u|grep -iv "^#" | egrep -vi "$SVC_EXCLUDE")
+    do
+    #echo "svc: $svc"
+	    svc_url=$(svn cat $GLOBALS $DEFAULTS $OVERRIDE | egrep -i "$svc=|$svc.$ENV|$svc.$DB_ENV" |egrep -vi "^#" | awk -F= '{ print $NF }' | tail -1)
+	    [ -z "$svc_url" ] && continue
+      # skip services that are not in the wsgc.com domain
+      #echo "$svc_url" | grep -iq "wsgc.com" || { echo "Skipping external $svc_url"; continue; }
+      echo "$svc_url" | grep -iq "wsgc.com" || continue; 
+	    #echo "$svc - $svc_url	$(chksvc $svc_url)"
+      echo "$svc - $svc_url "
+      eval $JENKINS build -f checksvc -p Application=frontend -p Brand=$BRAND -p Environment=$ENV -p Target=$svc_url | egrep "checksvc:"
+      ret=${PIPESTATUS[0]}
+      [[ $ret != 0 ]] && SERVICE_FAILURE_INTERNAL="$svc $svc_url
+$SERVICE_FAILURE_INTERNAL"
+    done
+
+    timeStamp "Testing service connections (up/down) [from json]"
+    TMP_JSON=$TMP/$HOST.json
+    curl $TIMEOUT $USER_AGENT -sk --user "$LOGIN" https://$HOST.wsgc.com/admin/configuration/basic-view.json -o $TMP_JSON 
+    jq -rMS '.settingsJson[] | .name as $group |  .settings[] | { $group,name,value} | join(",")' $TMP_JSON 2>/dev/null | egrep -i "https://|tcp://|http://|host" | egrep -vi "$SVC_EXCLUDE|ec.host" |
+    while read svc
+    do
+    	svc_name=$(echo "$svc" | awk -F\, '{ print $1 "." $2}')
+    	svc_url=$(echo "$svc" | awk -F\, '{ print $3 }' | sed -es/\\[//g -es/\\]//g)
+    	[ -z "$svc_url" ] && continue
+      # skip services that are not in the wsgc.com domain
+      #echo "$svc_url" | grep -iq "wsgc.com" || { echo "Skipping external $svc_url"; continue; }
+      echo "$svc_url" | grep -iq "wsgc.com" || continue
+    	#echo "$svc_name	$svc_url	$(chksvc $svc_url)"
+      echo "$svc - $svc_url "
+      eval $JENKINS build -f checksvc -p Application=frontend -p Brand=$BRAND -p Environment=$ENV -p Target=$svc_url | egrep "checksvc:"
+      ret=${PIPESTATUS[0]}
+      [[ $ret != 0 ]] && SERVICE_FAILURE_INTERNAL="$svc $svc_url
+$SERVICE_FAILURE_INTERNAL"
+    done
+    rm -f $TMP_JSON
+#else
+#    echo "Waiting..."
+#    sleep 90 || true
+fi
+
+if [[ -n $SERVICE_FAILURE_INTERNAL ]]
+then
+  echo "===== Failed links: 
+$SERVICE_FAILURE_INTERNAL
+====="
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}CheckEnv: $BRAND $ENV {noformat:title=Failed Internal Links }$SERVICE_FAILURE_INTERNAL{noformat}"
+fi
+
+# basic test using either a specific URL or the frontend 
+timeStamp "Waiting for app to come up"
+[[ $WAR_STATUS =~ FAIL || $WAR_STATUS =~ ABORT ]] || waitFor $SUMMARY "testURL"
+
+# create a deeper default test URL
+case $BRAND in
+    mg ) SUBCAT_URL=$AKAMAI/shop/personalized-accessories/ ;;
+    pb ) SUBCAT_URL=$AKAMAI/shop/furniture/ ;;
+    pk ) SUBCAT_URL=$AKAMAI/shop/furniture/ ;;
+    pt ) SUBCAT_URL=$AKAMAI/shop/furniture/ ;;
+    we ) SUBCAT_URL=$AKAMAI/shop/furniture/ ;;
+    ws ) SUBCAT_URL=$AKAMAI/shop/cookware/ ;;
+    * ) SUBCAT_URL=$AKAMAI/shop/ ;;
+esac
+
+for URL in $SUMMARY $NON_AKAMAI $AKAMAI $SUBCAT_URL $AKAMAI/m/ $AKAMAI/shoppingcart $AKAMAI/account/login.html $TEST_URL1 $TEST_URL2 $TEST_URL3 $TEST_URL4 $TEST_URL5
+do
+  Notation "Test URL: $URL"
+  curl -fsqk $TIMEOUT $USER_AGENT --user "$LOGIN" "$URL" | \
+    sed -es%'</title>'%'</title>\n'%g -es%'<title>'%'\n<title>'%g | \
+    egrep -i "<title>" | head -1
+  ret=$?
+  [[ $ret -ne 0 ]] && echo " - curl returned $ret"
+done
+
+# test for Akamai error
+#Reference&#32;&#35;3&#46;b4e93217&#46;1660682622&#46;5b465b37
+for URL in $AKAMAI/admin/summary.html $AKAMAI 
+do
+  cause=
+  ref=$(curl -sqk $TIMEOUT $USER_AGENT --user "$LOGIN" "$URL" | xmlstarlet unesc 2>/dev/null | grep -i "Reference #")
+  if [[ -n $ref ]]
+  then
+    class=$(echo $ref | awk '{ print $2 }' | awk -F\. '{ print $1 }' | sed -es/\#//g)
+    case $class in
+      1 ) cause="ERR_READ_TIMEOUT|before_resp_hdrs. The forward connection to the origin server from the edge server timed out. " ;;
+      3 ) cause="ERR_READ_ERROR|no_resp_hdrs. The TCP connection from the edge server to the origin server was broken before the headers and object were successfully downloaded" ;;
+     18 ) cause="ERR_ACCESS_DENIED|waf. The request was denied by the configured Web Application Firewall rules." ;;
+      9 ) cause="ERR_INVALID_URL|invalidurlorhost" ;;
+     30 ) cause="ERR_FWD_SSL_HANDSHAKE|err_conn_strict_cert. Internal error. For more details, contact the support team." ;;
+      * ) cause="No cause defined for \"$class\" " ;;
+    102 ) cause="ERR_NO_GOOD_FWD_IP. This is triggered by the Origin Health Detect feature. This code means that edge server intentionally didn't go forward to the origin server because the origin is flagged as bad due to too many failures in retrieving content from it. "
+    esac
+    Notation "Akamai: $ref $URL $cause"
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV - Akamai error reference for $URL {noformat:title=$ref}$cause{noformat}"
+    break
+  fi
+done
+
+# check the golden paths
+#GOLD=$(mktemp -p /tmp tmp.checkenv-golden.XXX)
+#chk-golden-paths $BRAND $ENVIRO $TICKET | tee $GOLD
+
+for mfe in shop product stores search favorites registry phygital customer-service account
+do
+  URL=$AKAMAI/$mfe/
+  #Notation "Test MFE endpoint $mfe $URL"
+  [[ -e $TMP/mfe-matrix ]] || git clone -q --depth 1 $MFE_MATRIX $TMP/mfe-matrix || echo "Unable to clone $MFE_MATRIX as $GIT_USER"
+  message=$(curl -sqk $TIMEOUT $USER_AGENT --user "$LOGIN" $URL | jq -rMS . 2>/dev/null | egrep -i "message" | sed -es/\"//g | cut -d: -f2-)
+  code=$(curl -sqk $TIMEOUT $USER_AGENT --user "$LOGIN" $URL | jq -rMS . 2>/dev/null | egrep -i "status" | sed -es/\"//g -es/,//g | cut -d: -f2- | awk '{ print $1 }')
+  if [[ -n $message ]]
+  then
+    Notation "$mfe: $code - $message"
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV {noformat:title=$mfe error}$code - $message{noformat}"
+  fi 
+done
+
+# test specific SKUs
+for sku in $SKU $KEYWORD
+do
+  TEST_URL="$AKAMAI/services/addtocart/v1/?items=$sku"
+  Notation "Test Keyword/SKU $sku $TEST_URL"
+  curl -fsqk $TIMEOUT $USER_AGENT --user "$LOGIN" "$TEST_URL" > /dev/null 2>&1
+  TEST_URL="$AKAMAI/products/$sku/?words=$sku&sku=$sku"
+  Notation "Test Keyword/SKU $sku $TEST_URL"
+  curl -fsqk $TIMEOUT $USER_AGENT --user "$LOGIN" "$TEST_URL" > /dev/null 2>&1
+done
+
+# experimental MFE log capture
+NS_LIST=
+for TEST_URL in $TEST_URL1 $TEST_URL2 $TEST_URL3 $TEST_URL4 $TEST_URL5
+do
+  mfe=$(echo "$TEST_URL" | awk -F/ '{ print $4 }')
+
+  #Notation "jq output test"
+  S_ERROR=$(curl -sqk $TIMEOUT $USER_AGENT --user "$LOGIN" "$TEST_URL" | jq -rMS . 2>/dev/null | egrep -i "error")
+  if [[ $S_ERROR =~ error ]]
+  then
+    S_ERROR=$(curl -sqk $TIMEOUT $USER_AGENT --user "$LOGIN" "$TEST_URL" | jq -rMS . 2>/dev/null)
+    echo  "$S_ERROR"
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV {noformat:title=site error}$S_ERROR{noformat}"
+  fi
+
+  # map endpoint to MFE
+  mfe=$(path2mfe $mfe)
+  #[[ $mfe =~ events ]] && mfe=phygital
+  #[[ $mfe =~ product ]] && mfe=product
+  #[[ $mfe =~ search ]] && mfe=shop
+  #[[ $mfe =~ account ]] && mfe=customer
+  #[[ $mfe =~ customer-service ]] && mfe=order-servicing
+
+  [[ -e $TMP/mfe-matrix ]] || git clone -q --depth 1 $MFE_MATRIX $TMP/mfe-matrix || echo "Unable to clone $MFE_MATRIX as $GIT_USER"
+  #NS_LIST=$(grep ",${ENV}," $TMP/mfe-matrix/data/app-data_endpoints.csv | egrep -i -- "-$mfe" | awk -F, '{ print $5 }' | awk -F/ '{ print $3 }' | awk -F\. '{ print $1 }' | sort -u)
+  for ns in $(grep ",${ENV}," $TMP/mfe-matrix/data/app-data_endpoints.csv | egrep -i -- "-$mfe" | awk -F, '{ print $5 }' | awk -F/ '{ print $3 }' | awk -F\. '{ print $1 }' | sort -u)
+  do
+    Notation "MFE logs for $mfe ($ns)"
+    MFE_ERROR=$(get-mfe-log $ns 2>/dev/null | egrep -i "$HINTS_MFE_APP|$MFE_AKAMAI" | egrep -iv "$HINTS_MFE_EXCLUDE|^$" | dos2unix -q | uniq | tail -10)
+    echo "MFE_ERROR: $MFE_ERROR"
+    [[ -n $MFE_ERROR && -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV {noformat:title=$ns errors}$MFE_ERROR{noformat}"
+
+    CONTEXT=$(echo "$TEST_URL" | sed -es%$AKAMAI%%g | awk -F\? '{ print $1 }')
+    MFE_CONTEXT=$(get-mfe-log $ns 2>/dev/null | egrep -i -B+2 -A+5 "$CONTEXT|$MFE_AKAMAI" | egrep -vi "$HINTS_MFE_EXCLUDE|^$" | dos2unix -q | uniq | tail -10)
+    if [[ -n $MFE_CONTEXT ]]
+    then
+      echo "MFE_CONTEXT $mfe $ns:
+$MFE_CONTEXT"
+      [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}CheckEnv: $BRAND $ENV log context for $TEST_URL{noformat:title=$mfe $ns}$MFE_CONTEXT{noformat}"
+    fi
+
+    if [[ -n $KEYWORD ]]
+    then
+      #set -x
+      KEY_LOG=$(get-mfe-log $ns 2>/dev/null | egrep -i -B+5 -A+5 "$KEYWORD" | egrep -vi "^$" | uniq | tail -15)
+      if [[ -n $KEY_LOG ]]
+      then
+        echo "MFE log keyword [$KEYWORD]"
+        [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}CheckEnv: $BRAND $ENV {noformat:title=MFE log keyword [$KEYWORD]}$KEY_LOG{noformat}"
+      fi
+      #{ set +x; } 2>/dev/null 
+    fi
+  done
+
+done
+
+# if we had a test url, sniff out the catalog logs
+if [[ -n $TEST_URL ]]
+then
+  CAT_NS=$(grep -i ",${ENV},.*,ecom-svc-catalog," $TMP/mfe-matrix/data/app-data_endpoints.csv | awk -F, '{ print $5 }' | awk -F/ '{ print $3 }' | awk -F\. '{ print $1 }' | sed -r "s/[A-Z]{2}-//i")
+  [[ -z $CAT_NS ]] && echo "Why can't we find the catalog namespace for $BRAND $ENV ?"
+  CAT_POD=$(kubectl --kubeconfig=$KUBE_CONFIG get pods -n $CAT_NS | egrep -vi "^NAME" | awk '{ print $1 }' | grep ecom-svc-catalog-$BRAND)
+  [[ -z $CAT_POD ]] && echo "Why can't we find the catalog pod for $CAT_NS $BRAND ?"
+
+  CAT_MSG=$(get-mfe-log $CAT_NS $CAT_POD 2>/dev/null | egrep -i -B+1 -A+2 "$HINTS_MFE_APP|$MFE_AKAMAI" | egrep -iv "$HINTS_MFE_EXCLUDE|^$" | tail -5)
+  if [[ -n $CAT_MSG ]] 
+  then
+    Notation "catalog messages $CAT_NS $CAT_POD" 
+    echo "$CAT_MSG"
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}CheckEnv: $BRAND $ENV {noformat:title=catalog messages $CAT_NS}$CAT_MSG{noformat}"
+  fi
+
+  if [[ -n $KEYWORD ]]
+  then
+    echo "MFE log keyword [$KEYWORD]"
+    #set -x
+    KEY_MSG=$(get-mfe-log $CAT_NS $CAT_POD 2>/dev/null | egrep -i -B+5 -A+5 "$KEYWORD" | tail -15)
+    if [[ -n $KEY_MSG ]]
+    then
+      Notation "Log entries matching [$KEYWORD]"
+      echo "$KEY_MSG"
+      [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}CheckEnv: $BRAND $ENV {noformat:title=Log entries matching [$KEYWORD]}$KEY_MSG{noformat}"
+    fi
+    { set +x; } 2>/dev/null
+  fi
+fi
+
+# validate generations
+if [[ $OPTIONS =~ mfe && $OPTIONS =~ content ]]
+then 
+  # update generations
+  timeStamp "Run sync-mfe-generations"
+  eval $JENKINS build -s sync-mfe-generations -p APP_ENVIRONMENT=${ENV} -p RunBy=$RUNBY
+
+  timeStamp "Validate content generations"
+  validate-content-generations $BRAND $ENV $TICKET
+fi
+
+if [[ $OPTIONS =~ appsetting ]]
+then 
+  timeStamp "Validate appsettings"
+  validate-appsettings $BRAND $ENV $TICKET
+fi
+
+sleep $SLEEP || true
+timeStamp "Waiting ${SLEEP}s for the logs to capture anything interesting"
+sleep $SLEEP || true
+
+# if we had a test url, sniff out the ADG logs
+if [[ -n $TEST_URL || $OPTIONS =~ mfe || -n $CHK_ADG ]]
+then
+  ADG_NS=ecommerce-delivery-gateway-$ADG_ENV
+  ADG_POD=$(kubectl --kubeconfig=$KUBE_CONFIG get pods -n $ADG_NS | egrep -vi "^NAME" | awk '{ print $1 }' | grep delivery-gateway-$ENVIRO-)
+  Notation "ADG logs $ADG_NS $ADG_POD"
+  #set -x
+  get-mfe-log $ADG_NS $ADG_POD 2>/dev/null | egrep -i -B+1 -A+2 "$HINTS_ADG" | egrep -iv "$HINTS_ADG_EXCLUDE" | tail -15
+  { set +x; } 2>/dev/null
+fi
+
+if [[ -n $TEST_URL && $TEST_URL =~ checkout ]]
+then
+#set -x
+  INV_NS=$(get-svc-endpoint $ENVIRO inventory-service | awk -F/ '{ print $3 }' | awk -F. '{ print $1 }')
+  INV_POD=$(kubectl --kubeconfig=$KUBE_CONFIG get pods -n $INV_NS | egrep -vi "^NAME" | awk '{ print $1 }')
+  [[ -z $POD ]] && echo "*** No pods for $INV_NS ?"
+  get-mfe-log $INV_NS | egrep -i "$HINTS_MFE_APP|$MFE_AKAMAI" | egrep -iv "$HINTS_MFE_EXCLUDE" | uniq | tail -10
+{ set +x; } 2>/dev/null
+fi
+
+# capture application logs
+for LOG in application.log catalina.out #application-backup.log
+do
+  echo "$LOG" | grep -iq "application" && HINT_LIST="$HINTS_APP"
+  echo "$LOG" | grep -iq "catalina" && HINT_LIST="$HINTS_TOMCAT"
+  echo "$LOG" | grep -iq "catalina" && APP_LOG_LINES=$TOMCAT_LOG_LINES
+  [[ -n $SKU ]] && HINT_LIST="$HINT_LIST|$SKU"
+  [[ -n $KEYWORD ]] && HINT_LIST="$HINT_LIST|$KEYWORD"
+	TMP_LOG="$TMP/$HOST-$LOG-$$"
+	LOG_URL=https://$HOST.wsgc.com:$LOG_PORT/wsgc-tomcat-frontend/$LOG
+  curl $TIMEOUT $USER_AGENT --user $LOGVIEW -fsqk $LOG_URL > /dev/null 2>&1 || continue
+
+	echo "================================================================================="
+	fetchLog "$LOG" "$LOG_URL" "$TMP_LOG"
+	if [ -f "$TMP_LOG" ] 
+	then
+		HINTS=$(tail -$APP_LOG_LINES "$TMP_LOG" | egrep -i "$HINT_LIST|$FTL_HINT_LIST")
+		if [[ -n $HINTS ]]
+		then
+      Notation "Errors found in $(basename $LOG_URL)"
+			echo "*********************************************************************************"
+			tail -$APP_LOG_LINES "$TMP_LOG" | egrep -i -A+1 "$HINT_LIST" | egrep -iv "$LOG_EXCLUDE" | sed -r "$CLEAN_DATE" | uniq | tail -20
+			echo "--------------------------------------------------------------------------------"
+      tail -$APP_LOG_LINES "$TMP_LOG" | egrep -i -A+2 "$FTL_HINT_LIST" | sed -r "$CLEAN_DATE" | uniq | tail -20
+			echo "********************************************************************************"
+      if [[ -n $TICKET ]]
+      then
+        APP_PROBLEMS=$(tail -$APP_LOG_LINES "$TMP_LOG" | egrep -i "$HINT_LIST" | egrep -iv "$LOG_EXCLUDE" | sed -es/\"//g | egrep -iv "^$" | awk '{print substr($0, index($0,$5))}' | sed -es/\"/\'/g | egrep -iv "^$" | sed -r "$CLEAN_DATE" | uniq | tail -20)
+        [[ -n $APP_PROBLEMS ]] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV {noformat:title=DP messages: $LOG_URL }$APP_PROBLEMS{noformat}" 
+
+        # FTL errors are formatted differently in the log
+        FTL_PROBLEMS=$(tail -$APP_LOG_LINES "$TMP_LOG" | egrep -i -A+5 "$FTL_HINT_LIST" | sed -es/\"/\'/g | sed -r "$CLEAN_DATE" | uniq | tail -20)
+        [ -n "$FTL_PROBLEMS" ] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV - FTL Errors - please engage Engineering {noformat:title=$LOG_URL }$FTL_PROBLEMS{noformat}" 
+        fi
+      else
+        # we don't need as many lines of output if everything is "normal"
+        LOG_LINES=$(expr $APP_LOG_LINES / 4)
+        Notation "No errors matching pattern"
+        #Notation "No errors matching pattern, dumping last $LOG_LINES lines from $LOG_URL"
+        #echo "********************************************************************************"
+        #tail -$LOG_LINES "$TMP_LOG" | egrep -iv "$LOG_EXCLUDE" 
+        #echo "********************************************************************************"
+      fi
+
+    # sniff out apssetting issues
+    APPSETTING_PROBLEMS=$(egrep -i "$APPSETTING_HINT_LIST" $TMP_LOG | egrep -vi "$APPSETTING_EXCLUDE_LIST" | cut -d' ' -f 8- | sort -u)
+    if [ -n "$APPSETTING_PROBLEMS" ]
+    then
+        echo "Appsetting problems: 
+$APPSETTING_PROBLEMS"
+        [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_WARN}CheckEnv: $BRAND $ENV {noformat:title=Appsetting Problems }$APPSETTING_PROBLEMS{noformat}"
+    fi
+	else
+		echo "Unable to fetch $LOG from $LOG_URL"
+	fi
+	echo "================================================================================="
+	rm -f "$TMP_LOG"
+done
+
+[[ $OPTIONS =~ testssl ]] && eval $JENKINS build -f test-ssl -p Hostname=$HOST -p Ticket=$TICKET
+
+# capture apache logs - not sure this is helpful
+if [[ $OPTIONS =~ httpd ]]
+then
+  for LOG in $BRAND-error.log $BRAND-ssl-error.log 
+  do
+	  echo "================================================================================="
+	  TMP_LOG="$TMP/$HOST-$LOG-$$"
+	  LOG_URL=https://$HOST.wsgc.com:$LOG_PORT/httpd/$LOG
+	  fetchLog "$LOG" "$LOG_URL" $TMP_LOG 
+	  if [ -f $TMP_LOG ] 
+	  then
+		  echo "********************************************************************************"
+		  tail -$HTTP_LOG_LINES $TMP_LOG | uniq | tail -5
+		  echo "********************************************************************************"
+	  fi
+	  rm -f "$TMP_LOG"
+  done
+fi
+
+# turn on debugging if needed
+[[ -n $OBJECTS ]] && eval $JENKINS build -s tomcat-set-debug -p Brand=$BRAND -p Environment=$ENV -p Objects=$OBJECTS
+
+# turn down the debuggging
+#timeStamp "Set log level to 'ERROR'"
+#clear-jmx "$BRAND" "$ENV" >/dev/null 2>&1
+
+# update deployment matrix data
+eval jenkins-jnlp build generate-deployment-matrix-data -p ENV_LIST=${ENVIRO} >/dev/null 2>&1 &
+
+# update app-scan data
+[[ $RUNBY =~ AppScan ]] && { Notation "Update AppScan"; eval jenkins-jnlp build app-scan-nonprd -p Restart=false -p HostList=$HOST >/dev/null 2>&1 & }
+
+[[ -n $TICKET && $OPTIONS =~ auto-close && $RET -eq 0 ]] && jira-close "$TICKET" "${ICON_SUCC}CheckEnv auto-close"
+
+rm -rf $TMP
+
+echo "RET: $RET"
+exit $RET

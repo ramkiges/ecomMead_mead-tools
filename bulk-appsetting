@@ -1,0 +1,109 @@
+#!/bin/bash
+# TODO: add macros to interpolate brand/enviro/market
+PATH=/apps/mead-tools:/apps:/apps/scm-tools:/apps/maven/latest/bin:/apps/java/bin:/apps/emacs-nox-24.5/bin:/home/mavenbuild/bin/devscripts:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/puppetlabs/bin:/home/mavenbuild/bin:~/bin
+export PATH
+DEBUG=
+LOG="/apps/$(basename $0).log"
+
+[[ $RD_OPTION_BUILD_USER_ID =~ svc || $RD_OPTION_BUILD_USER_ID =~ ciuser ]] || RUNBY=${RD_OPTION_BUILD_USER_ID}
+[[ -z $RUNBY ]] && RUNBY=${RD_OPTION_BUILD_USER_ID}
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+	[[ -n $1 ]] && echo "
+$(hostname)/$(basename $0): 
+***
+ERROR: $*
+***" >&2
+
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_FAIL}$(basename $0): App setting $SETTING update *failed* (_${*}_) $BUILD_URL [${RUNBY}]" 
+	exit 255
+}
+
+Warning() { 
+    echo "///
+WARNING: $* 
+///" >&2
+    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_WARN}$(basename $0): $* [${RUNBY}]"
+}
+
+# argument assignment
+while getopts "a:b:e:s:t:c:r:h" opt 
+do
+  case ${opt} in
+    a) ACTION=$OPTARG ;;
+    b) BRAND_LIST=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+    e) ENV_LIST=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+    s) SETTINGS=$OPTARG ;;
+    c) COMMENTS=$OPTARG ;;
+    t) TICKET=$OPTARG ;;
+    r) RESTART=$OPTARG ;;
+    esac
+done
+
+[[ -z $BRAND_LIST ]] && BailOut "Need brand list"
+[[ -z $ENV_LIST ]] && BailOut "Need environment list"
+[[ -n $TICKET ]] && export TICKET=$TICKET
+[[ -z $ACTION ]] && ACTION="update"
+
+[[ -z $RUNBY && -n $BUILD_USER_ID ]] && RUNBY=$BUILD_USER_ID
+export COMMENTS="(${RUNBY}) $COMMENTS $ACTION"
+
+for pass in validate $ACTION
+do
+  echo 
+
+  # loop thru the settings string
+  echo "$SETTINGS" | egrep -vi "^$|^#" |
+  while read BULK 
+  do
+    # parsing and pre-validation
+    LEFT=$(echo "$BULK" | cut -d= -f 1)
+    VALUE=$(echo "$BULK" | cut -d= -f 2- | awk '{$1=$1};1')
+
+    LEFT=$(echo "$LEFT" | sed -es!/!.!g)
+    LEFT=$(echo "$LEFT" | sed -es/"\.'.*'"//g)
+    LEFT=$(echo "$LEFT" | sed -es/[[:space:]]//g)
+
+    SETTING=$(echo "$LEFT" | awk -F\. '{ print $1 "." $2 }')
+    TYPE=$(echo "$LEFT" | awk -F '[./]' '{ print $3 }' | awk -F '[=:]' '{ print $1 }')
+
+    GROUP=$(echo "$LEFT" | awk -F\. '{ print $1 }')
+    NAME=$(echo "$LEFT" | awk -F\. '{ print $2 }')
+
+    echo "$pass $GROUP.$NAME"
+    if [[ $pass =~ valid ]]
+    then 
+      if [[ $ACTION =~ update || $ACTION =~ add ]]
+      then
+        DC=$(echo "$LEFT" | tr -d -c "." | awk '{ print length; }')
+        [[ $DC -eq 2 ]] || BailOut "Malformed entry: $LEFT"
+      fi
+    else
+      echo "# ---- $(date +'%Y-%m-%d %H:%M') - $RUNBY $BUILD_USER_ID $BUILD_NUMBER $SETTING $BRAND_LIST $ENV_LIST $TICKET $COMMENTS $BUILD_URL ----" >> $LOG
+      wsi_settings --brand $BRAND_LIST --env $ENV_LIST $ACTION $SETTING --type $TYPE "$VALUE" --comments "$COMMENTS" $DEBUG --force
+    fi
+  done
+done
+
+if [[ $RESTART =~ true ]]
+then
+  echo "" # need to use the "" so Jenkins will actually print the blank line
+  for b in $(sed -es/","/" "/g <<< $BRAND_LIST)
+  do
+    #get-appsetting-job $b $e run >/dev/null 2>&1 &
+    for e in $(sed -es/","/" "/g <<< $ENV_LIST)
+    do
+      echo "* Initiate deployment for $b $e "
+      jenkins-jnlp build checkenv -p Brand=$b -p Environment=$e -p Options=Clear-Logs -p Options=Deploy-War -p Options=Validate-Appsettings -p Ticket=$TICKET -p RunBy=$(basename $0) >/dev/null 2>&1 &
+    done
+  done
+fi
+
+echo
+exit 0

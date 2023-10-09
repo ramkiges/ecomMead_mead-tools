@@ -1,0 +1,149 @@
+#!/bin/bash
+# captures appdynamics config and log files for support cases
+
+# time to sleep between commands
+SLEEP=3
+# minutes to run before collecting data
+RUNTIME=15
+
+BailOut() {
+  [[ -n $1 ]] && echo $*
+  echo "Usage: $(basename $0) <host> [ticket]"
+  exit 1
+}
+
+HOST=$1
+TICKET=$2
+[[ -z $HOST ]] && BailOut
+
+DNS=$(host $HOST | grep -i address | awk '{ print $1 }' | awk -F\. '{ print $1 }')
+[[ -z $DNS ]] && BailOut "host $HOST not found in DNS"
+
+LOGS=/var/log/weblogs/appdynamics
+OUT=~/Downloads/$(basename $0)/$HOST
+TAR=~/Downloads/$HOST.tar
+TMP=/tmp/$(basename $0)
+rm -rf $OUT $TMP
+mkdir -p $OUT $TMP
+cp $0 $(dirname $OUT) 2>/dev/null 
+
+# 
+echo "*** pre-capture cleanup ***"
+ssh -q -tt $HOST "sudo service wsgc-machineagent stop 2>/dev/null"; sleep $SLEEP
+ssh -q -tt $HOST "sudo service wsgc-machineagent7 stop 2>/dev/null"; sleep $SLEEP
+ssh -q -tt $HOST "sudo rm -f /apps/apmagents/machineagent/monitors/analytics-agent/analytics-agent.id"; sleep $SLEEP
+ssh -q -tt $HOST "sudo rm -rf $LOGS/machineagent/* $LOGS/machineagent-jdk7"; sleep $SLEEP
+ssh -q -tt $HOST "sudo service wsgc-machineagent start"; sleep $SLEEP
+
+echo "*** wait $RUNTIME ***"
+sleep $(expr $RUNTIME \* 60)
+
+echo "*** capture memory info ***"
+rm -f $OUT/memory-info.txt
+cat > /tmp/memory-info.sh << EOF
+#!/bin/bash
+set -x
+
+free -m
+
+free | grep Mem | awk '{print \$3/\$2 * 100.0}'
+
+cat /proc/meminfo
+set +x
+exit 0
+EOF
+
+chmod  775 /tmp/memory-info.sh
+scp -q /tmp/memory-info.sh $HOST:/tmp
+ssh -q $HOST "sh /tmp/appd-memory.sh > /tmp/memory-info.txt 2>&1"
+scp -q $HOST:/tmp/memory-info.txt $OUT
+
+echo "*** copy OS files"
+for file in /etc/os-release /etc/centos-release
+do
+  scp -q $HOST:$file $OUT/$(basename $file) >/dev/null 2>&1
+  sleep $SLEEP
+done
+
+echo "*** capture server info"
+for cmd in hostname 'free -h' 'ps -aef | egrep -i "java|machineagent" | grep -vi grep' 'hostname' 'rpm -qa |grep -i wsgc' '/sbin/chkconfig --list | grep -i wsgc'
+do
+  file=$(basename "$cmd" | awk '{ print $1 }')
+  ssh -q $HOST "$cmd" > $OUT/$file.out
+  sleep $SLEEP
+done
+
+echo "*** discover appagent"
+APP_AGENT=$(ssh -q $HOST "ls -d $LOGS/appagent-jdk7 2>/dev/null")
+sleep $SLEEP
+[[ -z $APP_AGENT ]] && APP_AGENT=$(ssh -q $HOST "ls -d $LOGS/appagent 2>/dev/null")
+[[ -z $APP_AGENT ]] && BailOut "Can't find appagent directory"
+sleep $SLEEP
+
+echo "*** discover machineagent"
+MACH_AGENT=$(ssh -q $HOST "ls -d $LOGS/machineagent 2>/dev/null")
+[[ -z $MACH_AGENT ]] && echo "Why don't we have a machineagent?"
+sleep $SLEEP
+scp -q $HOST:$MACH_AGENT/machineagent_error.log $OUT
+
+echo "*** collect conf files"
+sleep $SLEEP
+CONF=$(ssh -q $HOST "ls -d $APP_AGENT/conf/$HOST")
+sleep $SLEEP
+[[ -z $CONF ]] && CONF=$(ssh -q $HOST "ls -d $APP_AGENT/conf/$DNS")
+[[ -z $CONF ]] && BailOut "Can't find conf directory"
+for file in bcirules.xml processPersistenceFile.ser transactions.xml
+do
+  sleep $SLEEP
+  scp -q $HOST:$CONF/$file $OUT >/dev/null 2>&1
+done
+sleep $SLEEP
+scp -q $HOST:/apps/apmagents/machineagent/conf/controller-info.xml $OUT/machineagent_controller-info.xml
+sleep $SLEEP
+scp -q $HOST:/apps/apmagents-jdk7/machineagent/conf/controller-info.xml $OUT/appagent_controller-info.xml || scp -q $HOST:/apps/apmagents/machineagent/conf/controller-info.xml $OUT/appagent-controller-info.xml
+sleep $SLEEP
+scp -q $HOST:/apps/apmagents/machineagent/conf/logging/log4j.xml $OUT/machineagent_log4j.xml
+
+echo "*** collect profile"
+sleep $SLEEP
+PROFILE=$(ssh -q $HOST "find /apps -name profile 2>/dev/null | grep apmagents")
+[[ -z $PROFILE ]] && BailOut "Can't find appd profile"
+sleep $SLEEP
+scp -q $HOST:$PROFILE $OUT/profile
+
+echo "*** discover host directory"
+sleep $SLEEP
+HOST_DIR=$(ssh -q $HOST "ls -d $APP_AGENT/$HOST 2>/dev/null")
+sleep $SLEEP
+[[ -z $HOST_DIR ]] && HOST_DIR=$(ssh -q $HOST "ls -d $APP_AGENT/$DNS 2>/dev/null")
+[[ -z $HOST_DIR ]] && BailOut "Can't determine host directory"
+
+echo "*** copy logs"
+ssh -q -tt $HOST "sudo find /var/log/weblogs/appdynamics -type f -mtime +7 -delete"
+sleep $SLEEP
+FILE_LIST=$(ssh -q $HOST "ls -1 $HOST_DIR | awk -F\. '{ print \$1 }' | sort -u")
+[[ -z $FILE_LIST ]] && BailOut "Can't get list of files in $HOST_DIR"
+for file in $FILE_LIST
+do
+  sleep $SLEEP
+  log=$(ssh -q $HOST "ls -1t $HOST_DIR/$file.* | head -1")
+  [[ -z $log ]] && continue
+  scp -q $HOST:$log $OUT/$(basename $log) || BailOut "Unable to copy $(basename $log)"
+done
+
+sleep $SLEEP
+ssh -q $HOST "tar cf /tmp/logs-full.tar /var/log/weblogs/appdynamics"
+sleep $SLEEP
+scp -q $HOST:/tmp/logs-full.tar $OUT
+
+sleep $SLEEP
+ssh -q $HOST "tar cf /tmp/appd-jar.tar /apps/apmagents-jdk7/appagent/javaagent.jar /apps/apmagents/machineagent/machineagent.jar /apps/apmagents/appagent/javaagent.jar /apps/apmagents/README "
+sleep $SLEEP
+scp -q $HOST:/tmp/appd-jar.tar $OUT
+
+echo "*** create tar file $TAR"
+cd $(dirname $OUT)
+tar cf $TAR $HOST
+gzip -9f $TAR
+
+exit 0

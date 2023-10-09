@@ -1,0 +1,119 @@
+#!/bin/bash
+# creates GMTP properties files for a given market
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps/jdk8/bin:/apps/java/bin:/apps/jdk7/bin:/apps/scm-tools:~/bin
+DEPLOYMENTS="https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties"
+TMP=/tmp/$(basename $0)
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+	[ -n "$1" ] && echo "$*" >&2
+  echo "Usage: $(basename $0) <env> <market> [ticket]" >&2
+	exit 1
+}
+
+ENVIRO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+MARKET=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+[[ -z $MARKET ]] && BailOut "Need market"
+
+TICKET=$(echo "$3" | tr '[:lower:]' '[:upper:]')
+[[ -n $TICKET ]] && MSG=$TICKET || MSG="DEVOPS"
+
+[[ $MARKET = "ca" ]] && MARKET="can"
+[[ $MARKET = "domestic" ]] && MARKET="usa"
+[[ $MARKET = "us" ]] && MARKET="usa"
+
+case $MARKET in
+  can )
+    BGB=bgb-ca-rgs1-rk1v
+    BS=buildsystem-ca-rgs1-rk1v
+    CRED=cmx-ca-rgs1
+    ;;
+
+  usa )
+    BGB=bgb-rgs1-rk1v
+    BS=buildsystem-rgs1-rk1v
+    CRED=cmx-rgs1
+    ;;
+esac
+
+[[ -z $CRED ]] && BailOut "Why is \$CRED empty?"
+[[ -e $HOME/.credentials.d/$CRED-user ]] && source $HOME/.credentials.d/$CRED-user || BailOut "Can't find $HOME/.credentials.d/$CRED-user"
+
+rm -rf $TMP
+mkdir -p $TMP
+svn co -q $DEPLOYMENTS/$ENVIRO $TMP/deployments || BailOut "Could not checkout $DEPLOYMENTS/$ENVIRO"
+#svn up -q $TMP/deployments
+
+for brand in $(getbrandlist $ENVIRO)
+do
+  SITEID=$(getsiteid $brand $MARKET) 
+  DEPLOY=$TMP/deployments/$brand.properties
+  DEPLOY_MARKET=$TMP/deployments/$brand$MARKET.properties
+  [[ -e $DEPLOY ]] || { echo "Can't find deployment file ($DEPLOY)"; continue; }
+  #[[ -e $DEPLOY_MARKET ]] && continue
+
+  SCHEMA=$(getschema $brand $ENVIRO)    
+  [ -z "$SCHEMA" ] && { echo "Can't get schema for $BRAND $ENV"; continue; }
+  DB_PROPS=$(getdb $SCHEMA)
+  [ -z "$DB_PROPS" ] && BailOut "Can't get db props for schema $SCHEMA ($BRAND $ENV)"
+  SCHEMA=$(echo $SCHEMA | awk -F: '{ print $1 }')
+
+  dbHost=$(echo "$DB_PROPS" | awk -F\| '{ print $1 }')
+  dbOwner=$(echo "$DB_PROPS" | awk -F\| '{ print $2 }' | tr "A-Z" "a-z")
+  dbUser=$(echo "$DB_PROPS" | awk -F\| '{ print $3 }')
+  dbPass=$(echo "$DB_PROPS" | awk -F\| '{ print $4 }')
+  dbSID=$(echo "$DB_PROPS" | awk -F\| '{ print $5 }' | tr "A-Z" "a-z")
+  dbPort=$(echo "$DB_PROPS" | awk -F\| '{ print $6 }')
+  dbTable=$(echo "$DB_PROPS" | awk -F\| '{ print $7 }')
+  dbConnect=$(echo "$DB_PROPS" | awk -F\| '{ print $10 }')
+
+  echo "Create $ENVIRO/$(basename $DEPLOY_MARKET)"
+  [[ -e $DEPLOY_MARKET ]] || svn cp $DEPLOY $DEPLOY_MARKET
+
+  grep -q "DBSchema=" $DEPLOY_MARKET || echo "DBSchema=" >> $DEPLOY_MARKET
+  grep -q "DBHost=" $DEPLOY_MARKET || echo "DBHost=" >> $DEPLOY_MARKET
+  grep -q "DBInst=" $DEPLOY_MARKET || echo "DBInst=" >> $DEPLOY_MARKET
+  grep -q "DBUid=" $DEPLOY_MARKET || echo "DBUid=" >> $DEPLOY_MARKET
+  grep -q "DBPwd=" $DEPLOY_MARKET || echo "DBPwd=" >> $DEPLOY_MARKET
+  #grep -q "bgb.stage=" $DEPLOY_MARKET || echo "bgb.stage=" >> $DEPLOY_MARKET
+  grep -q "^bgburi=" $DEPLOY_MARKET || echo "bgburi=" >> $DEPLOY_MARKET
+  grep -q "^bsuri=" $DEPLOY_MARKET || echo "bsuri=" >> $DEPLOY_MARKET
+  #grep -q "^hostLogin=" $DEPLOY_MARKET || echo "hostLogin=" >> $DEPLOY_MARKET
+  #grep -q "^LDAPLogin=" $DEPLOY_MARKET || echo "LDAPLogin=" >> $DEPLOY_MARKET
+
+  grep -q "slack=" $DEPLOY_MARKET || echo "slack=" >> $DEPLOY_MARKET
+
+  sed -es%"DBSchema=.*"%"DBSchema=${SCHEMA}"%g -i $DEPLOY_MARKET 
+  sed -es%"DBHost=.*"%"DBHost=${dbHost}"%g -i $DEPLOY_MARKET 
+  sed -es%"DBInst=.*"%"DBInst=${dbSID}"%g -i $DEPLOY_MARKET 
+  sed -es%"DBUid=.*"%"DBUid=${dbUser}"%g -i $DEPLOY_MARKET 
+  sed -es%"DBPwd=.*"%"DBPwd=${dbPass}"%g -i $DEPLOY_MARKET 
+  #sed -es%"bgb.stage=.*"%"bgb.stage=$ENVIRO"%g -i $DEPLOY_MARKET 
+  sed -es%"bgburi=.*"%"bgburi=https://$BGB.wsgc.com"%g -i $DEPLOY_MARKET 
+  sed -es%"bsuri=.*"%"bsuri=https://$BS.wsgc.com"%g -i $DEPLOY_MARKET 
+  #sed -es%"hostLogin=.*"%"hostLogin=${hostLogin}"%g -i $DEPLOY_MARKET 
+  #sed -es%"LDAPLogin=.*"%"LDAPLogin=${LDAPLogin}"%g -i $DEPLOY_MARKET 
+
+  sed -es%"site.id=.*"%"site.id=${SITEID}"%g -i $DEPLOY_MARKET 
+  sed -es%"project=.*"%"project=$brand${MARKET}"%g -i $DEPLOY_MARKET
+
+  egrep -iv "hostLogin|LDAPLogin" $DEPLOY_MARKET > $DEPLOY_MARKET.new;mv $DEPLOY_MARKET.new $DEPLOY_MARKET
+
+done
+
+cd $TMP/deployments
+svn status
+svn commit -m "[$MSG] create market deployment property files for $ENVIRO $MARKET"
+[[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}$(basename $0): Created market deployment property files for $ENVIRO $MARKET"
+
+#rm -rf $TMP
+
+exit 0 
+

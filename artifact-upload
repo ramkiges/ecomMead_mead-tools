@@ -1,0 +1,50 @@
+#!/bin/bash
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin
+#export PATH="/usr/local/opt/openssl@1.1/bin:$PATH"
+ART_CRED=~/.artifactory
+
+BailOut() {
+    [ -n "$1" ] && echo "$*"
+    echo "Usage: $(basename $0) <file> <destination>"
+    exit 1    
+}
+
+FILE=$1
+DEST=$2
+REPO=$3
+[[ -z $DEST ]] && BailOut 
+
+# parse artifactory properties
+[[ -f $ART_CRED ]] || BailOut "Can't find cred file $ART_CRED"
+
+[[ -z $ART_USER ]] && ART_USER=$(grep ART_USER $ART_CRED | grep -iv "^.*#" | tail -1 | awk -F= '{ print $2 }')
+[[ -z $ART_PASS ]] && ART_PASS=$(grep ART_PASS $ART_CRED | grep -iv "^.*#" | tail -1 | awk -F= '{ print $2 }')
+[[ -z $ART_REPO ]] && { ART_REPO=$(grep ART_REPO $ART_CRED | grep -iv "^.*#" | tail -1 | awk -F= '{ print $2 }'); echo "ART_REPO=$ART_REPO"; }
+[[ -z $ART_URL ]] && ART_URL=$(grep ART_URL $ART_CRED | grep -iv "^.*#" | tail -1 | awk -F= '{ print $2 }')
+[[ -n $REPO ]] && ART_REPO=$REPO
+
+if echo "$DEST" | grep -iq "snapshot" 
+then
+    ART_USER=$SNP_USER
+    ART_PASS=$SNP_PASS
+    ART_URL="https://snapshotrepo.wsgc.com/artifactory"
+fi
+
+# clean up the destination
+#DEST=$(echo $DEST | sed -es%$ART_URL/%%g)
+#DEST=$(echo $DEST | sed -es%$ART_REPO/%%g)
+DEST=$(echo "$DEST" | sed -es%/$%%g)
+[[ -z $DEST ]] && BailOut "Parsed DEST ended up empty"
+
+[[ -z $ART_USER ]] && BailOut "Can't parse artifactory user from $ART_CRED"
+[[ -z $ART_PASS ]] && BailOut "Can't parse artifactory pass from $ART_CRED"
+[[ -z $ART_REPO ]] && BailOut "Can't parse artifactory repo from $ART_CRED"
+[[ -z $ART_URL ]] && BailOut "Can't parse artifactory URL from $ART_CRED"
+
+SHA1SUM=$(sha1sum -b "$FILE" | awk '{print $1}')
+CHECKSUM_HEADER="-H 'X-Checksum-Sha1:$SHA1SUM'"
+[[ -z $SHA1SUM || -z $CHECKSUM_HEADER ]] && BailOut "There is a problem with sha1sum"
+
+curl -s -k -u $ART_USER:$ART_PASS -X PUT $CHECKSUM_HEADER "$ART_URL/$ART_REPO/$DEST/$(basename $FILE)" -T "$FILE"
+
+exit $?

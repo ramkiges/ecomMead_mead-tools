@@ -1,0 +1,324 @@
+#!/bin/bash
+# perform post-installation validation of DP environments
+
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/java/bin:/apps/scripts:/apps/scm-tools:$PATH:~/bin
+export PATH
+
+WORK=/apps/tmp/$(basename $0)
+REPO=git@github.wsgc.com:eCommerce-DevOps/toolchain-resource-model.git
+COMMON=https://repos.wsgc.com/svn/devops/application/frontend-2.1/common/config/trunk/pom.xml
+TIMEOUT="--connect-timeout 15 --max-time 30"
+FAIL="#cc0000"
+SUCC="#66ff33"
+TODAY=$(date +'%Y-%m-%d')
+DAYS=30
+ret=0
+umask 000
+
+# ssh props
+#SSH_KEY=/home/rundeck/.ssh/id_rsa
+SSH_KEY=$HOME/.ssh/id_rsa
+[[ $LOGNAME =~ a_ ]] && SSH_USER=$LOGNAME || SSH_USER=imageuser
+SSH_OPTS="-o StrictHostKeyChecking=no -tt -q -i $SSH_KEY"
+
+BailOut() {
+	[ -n "$1" ] && echo ">>> $(basename $0): $* <<<" >&2
+  echo "Usage: $(basename $0) <brand> <env> [slack]"
+	exit 0
+}
+
+## argument assignment support positional and explict args
+BRAND=$1
+ENVIRO=$2
+[[ -n $3 ]] && SLACK=$3
+
+[[ $RUNDECK_USER =~ ^svc ]] && RUNDECK_USER=
+AGENT="$(basename $0) $RUNDECK_USER"
+
+[[ -e $SSH_KEY ]] || BailOut "Unable to find ssh key ($SSH_KEY)"
+
+while getopts "b:e:c:" opt 
+do
+    case ${opt} in
+        b) BRAND=$OPTARG ;;
+        e) ENVIRO=$OPTARG ;;
+        c) SLACK=$OPTARG ;;
+    esac
+done
+
+[[ -n $SLACK ]] && echo "Slack channel: $SLACK"
+echo "*** DP Post-Deployment Validation $BRAND $ENVIRO ***"
+[[ -z $BRAND ]] && BailOut
+[[ -z $ENVIRO ]] && BailOut
+
+# get frontend creds
+AUTH_FILE=~/.credentials.d/frontend-user
+[ -e $AUTH_FILE ] || BailOut "Auth file ($AUTH_FILE) not found"
+AUTH_USER=$( (source "$AUTH_FILE"; echo "$USERNAME") )
+AUTH_PASS=$( (source "$AUTH_FILE"; echo "$PASSWORD") )
+LOGIN="$AUTH_USER:$AUTH_PASS"
+
+if [[ -z $SLACK ]]
+then
+  # default slack channel to use
+  SLACK=team-devops-notice
+
+  # change the slack channel for prod
+  [[ $ENVIRO =~ prd ]] && SLACK=team-devops-notice
+
+  # for hand-testing
+  [[ $LOGNAME =~ ^a_ ]] && SLACK=team-devops-notice
+fi
+
+mkdir -p $WORK || BailOut "Unable to create $WORK"
+[[ -e $WORK/toolchain-resource-model/.git ]] || git clone -q $REPO $WORK/toolchain-resource-model
+cd $WORK/toolchain-resource-model
+git pull >/dev/null 2>&1
+
+NODE_LIST=$(grep -ihr "frontend" $WORK/toolchain-resource-model | \
+  grep -iw "$BRAND" | \
+  grep -iw "$ENVIRO" | \
+  awk -F 'node name=' '{ print $2 }' | awk '{ print $1 }' | \
+  sed -es"/[^[:alnum:]-]//"g \
+)
+[[ -z $NODE_LIST ]] && BailOut "Node list came up empty for $BRAND $ENVIRO"
+NODES_COUNT=$(wc -w <<< $NODE_LIST)
+
+MANIFEST=$WORK/$BRAND-$ENVIRO-$$.manifest
+REPORT=$WORK/$BRAND-$ENVIRO-$$.report
+rm -f $MANIFEST $REPORT
+
+NODES_FAIL=
+NODES_BLANK=
+NODES_MISSING=
+NODES_DNS=
+NODES_BRAND=
+NODES_BROKEN=
+NODES_EMPTY=
+NODES_CERT_EMPTY=
+NODES_CERT_SHORT=
+NODES_CERT_EXP=
+
+date > $REPORT
+
+echo "+++ Scanning nodes +++"
+# header
+echo "# Node,InstallStatus,RunStatus,StartTime,WarVersion,ConfigPackage,ConfigPkgVersion,NodePkgVersion,CertDate" | tee -a $MANIFEST
+for node in $NODE_LIST
+do
+  # check to see that it's in DNS, eg not an old decomm'd node
+  IP=$(host $node 2>/dev/null | grep -i address | awk '{ print $NF }')
+  if [[ -z $IP ]]
+  then 
+    NODES_DNS="$node $NODES_DNS"
+    NODES_FAIL="$node $NODES_FAIL"
+    continue
+  fi
+
+  # check that DP is installed
+  INSTALL=$(ssh $SSH_OPTS $SSH_USER@$node '/sbin/chkconfig wsgc-tomcat-frontend >/dev/null 2>&1; echo $?' | tr -d '\r')
+  if [[ $INSTALL != 0 ]]
+  then
+    NODES_BLANK="$node $NODES_BLANK"
+    NODES_FAIL="$node $NODES_FAIL"
+  fi
+
+  # check that DP is running
+  STATUS=$(ssh $SSH_OPTS $SSH_USER@$node '/sbin/service wsgc-tomcat-frontend status >/dev/null 2>&1; echo $?' | tr -d '\r')
+  [[ $INSTALL = 0 && $STATUS != 0 ]] && NODES_FAIL="$node $NODES_FAIL"
+
+  # make sure node is in common config
+  svn cat $COMMON | grep -iq "hostnameShort=.*$node" || NODES_MISSING="$node $NODES_MISSING"
+
+  summary=https://$node/summary.html
+  WAR=$(curl $TIMEOUT --user "$LOGIN" -sqk $summary | grep '<td>WAR</td>' | awk -F '[<>]' '{ print $9 }' | awk -F- '{ print $1 }')
+  if [[ -z $WAR ]]
+  then
+    NODES_BROKEN="$node $NODES_BROKEN"
+    #NODES_FAIL="$node $NODES_FAIL"
+  fi
+
+  START=$(ssh $SSH_OPTS $SSH_USER@$node "ps -eo lstart,cmd|grep /apps/tomcat/bin/tomcat | grep -iv grep | awk '{ print \$1,\$2,\$3,\$4,\$5 }'" | tr -d '\r')
+  START=$(date -d "$START" +'%Y-%m-%d %H:%M')
+
+  PKG=$(ssh $SSH_OPTS $SSH_USER@$node "rpm -qa | grep -i 'wsgc-devops-frontend-.*-config-app'" | awk 'BEGIN{FS=OFS="-"}{NF--; print}')
+  if [[ -n $PKG ]]
+  then
+    N=$(echo "$PKG" | awk 'BEGIN{FS=OFS="-"}{NF--; print}')
+    V=$(echo "$PKG" | awk -F- '{ print $NF }' | tr -d '\n')
+    B=$(echo "$PKG" | awk -F- '{ print $7 }' | tr -d '\n')
+    if [[ $B != $BRAND ]]
+    then
+      NODES_BRAND="$node ($B) $NODES_BRAND"
+      NODES_FAIL="$node $NODES_FAIL"
+    fi
+  else
+      NODES_EMPTY="$node $NODES_EMPTY"
+  fi
+  
+  NODE_PKG=$(ssh $SSH_OPTS $SSH_USER@$node "rpm -qa | grep -i 'wsgc-devops-toolchain-node-'" | awk 'BEGIN{FS=OFS="-"}{NF--; print}')
+  NV=$(echo "$NODE_PKG" | awk -F- '{ print $NF }' | tr -d '\n')
+
+  CERT_DATE=$(/bin/timeout -k 10s 5s openssl s_client -connect $node.wsgc.com:443 -servername $node.wsgc.com -showcerts </dev/null 2>&1| openssl x509 -noout -enddate 2>&1 | grep -i notafter | awk -F= '{ print $2 }') 
+  if [[ -n $CERT_DATE ]]
+  then 
+    CERT_DATE=$(date -d "$CERT_DATE" +'%Y-%m-%d')
+    days=$(( ($(date --date="$CERT_DATE" '+%s') - $(date --date="$TODAY" '+%s')) / 86400))
+    [[ $days -lt $DAYS && $days -gt 0 ]] && NODES_CERT_SHORT="$node($days) $NODES_CERT_SHORT"
+    [[ $days -le 0 ]] && NODES_CERT_EXP="$node $NODES_CERT_EXP"
+  else
+    NODES_CERT_EMPTY="$node $NODES_CERT_EMPTY"
+  fi
+  
+  line="$node,$INSTALL,$STATUS,$START,$WAR,$N,$V,$NV,$CERT_DATE" 
+  echo "$line" | tee -a $MANIFEST
+done
+
+# output 
+
+echo "Total nodes in RunDeck: \`$NODES_COUNT\`" | tee -a $REPORT
+
+#NODES_FAIL=$(echo $NODES_FAIL | xargs -n1 | sort -u | tr '\n' ' ')
+#NODES_BROKEN=$(echo $NODES_BROKEN | xargs -n1 | sort -u | tr '\n' ' ')
+#NODES_DNS=$(echo $NODES_DNS | xargs -n1 | sort -u | tr '\n' ' ')
+#NODES_MISSING=$(echo $NODES_MISSING | xargs -n1 | sort -u | tr '\n' ' ')
+#NODES_BLANK=$(echo $NODES_BLANK | xargs -n1 | sort -u | tr '\n' ' ')
+
+if [[ -n $NODES_DNS ]]
+then
+  echo "Nodes not in DNS: \`$NODES_DNS\`" | tee -a $REPORT
+else
+  echo "All nodes present in DNS" | tee -a $REPORT
+fi
+
+if [[ -n $NODES_FAIL ]]
+then
+  ret=1
+  echo "Failed nodes: \`$NODES_FAIL\`" >> $REPORT | tee -a $REPORT
+else
+  echo "No node failures detected" >> $REPORT | tee -a $REPORT
+fi
+
+[[ -n $NODES_BRAND ]] && echo "Node config package brand does _*not*_ match $BRAND: \`$NODES_BRAND\`" | tee -a $REPORT
+
+if [[ $ENVIRO =~ prd ]]
+then
+  if [[ -n $NODES_MISSING ]]
+  then
+    ret=1
+    nc=$(echo $NODES_MISSING | wc -w)
+    [[ $nc -gt 1 ]] && p=s || p=
+    echo "Node${p} missing from common config: \`$NODES_MISSING\`" | tee -a $REPORT
+  else
+    echo "All nodes present in common config" | tee -a $REPORT
+  fi
+fi
+
+if [[ -n $NODES_BLANK ]]
+then
+  ret=1
+  echo "Nodes not installed: \`$NODES_BLANK\`" | tee -a $REPORT
+else
+  echo "All nodes have DP installed" | tee -a $REPORT
+fi
+
+if [[ -n $NODES_BROKEN ]]
+then
+  ret=1
+  echo "Nodes not running: \`$NODES_BROKEN\`" | tee -a $REPORT
+else
+  echo "All nodes have DP running" | tee -a $REPORT
+fi
+
+# make sure the wars are the same for all nodes
+if [[ -n $WAR ]]
+then
+  w_count=$(cat $MANIFEST | awk -F, '{ print $5 }'  | egrep -iv "^$|#|Version" | sort -u | wc -l)
+  if [[ $w_count -gt 1 ]]
+  then
+    ret=1
+    WAR_LIST=$(cat $MANIFEST | awk -F, '{ print $5 }'  | egrep -iv "^$|#|Version" | sort -u | tr '\n' ' ')
+    echo "Not all WARS are the same version: $WAR_LIST" | tee -a $REPORT
+  else
+    echo "All WAR versions match: $WAR" | tee -a $REPORT
+  fi
+fi
+
+if [[ $ENVIRO =~ prd ]]
+then
+  c_count=$(cat $MANIFEST | awk -F, '{ print $7 }'  | egrep -iv "^$|#|Version" | sort -u | wc -l)
+  if [[ $c_count -gt 1 ]]
+  then
+    ret=1
+    CFG_LIST=$(cat $MANIFEST | awk -F, '{ print $7 }'  | egrep -iv "^$|#|Version" | sort -u | tr '\n' ' ')
+    echo "Not all config packages are the same version: $CFG_LIST" | tee -a $REPORT
+  elif [[ $c_count -gt 0 ]]
+  then
+    AV=$(getversion $N 2>/dev/null | tr -d '\n')
+    #echo "Config package: $N" | tee -a $REPORT
+    echo "Config package ($N) versions match: $V (Latest=$AV)" | tee -a $REPORT
+  else
+    echo "No config packages are installed" | tee -a $REPORT
+  fi
+fi
+
+if [[ -n $NODES_CERT_EMPTY ]]
+then
+  ret=1
+  echo "Nodes without SSL certs: \`$NODES_CERT_EMPTY\`" | tee -a $REPORT
+fi
+
+if [[ -n $NODES_CERT_SHORT ]]
+then
+  ret=1
+  echo "Nodes with SSL certs expiring in less that $DAYS days: \`$NODES_CERT_SHORT\`" | tee -a $REPORT
+fi
+
+if [[ -n $NODES_CERT_EXP ]]
+then
+  ret=1
+  echo "Nodes with expired SSL certs: \`$NODES_CERT_EXP\`" | tee -a $REPORT
+fi
+
+#if [[ $ENVIRO =~ prd ]]
+#then
+#  n_count=$(cat $MANIFEST | awk -F, '{ print $8 }'  | egrep -iv "^$|#|Version" | sort -u | wc -l)
+#  if [[ $c_count -gt 1 ]]
+#  then
+#    ret=1
+#    CFG_LIST=$(cat $MANIFEST | awk -F, '{ print $7 }'  | egrep -iv "^$|#|Version" | sort -u | tr '\n' ' ')
+#    echo "Not all node config packages are the same version: $CFG_LIST" | tee -a $REPORT
+#  else
+#    AV=$(getversion $N 2>/dev/null | tr -d '\n')
+#    #echo "Config package: $N" | tee -a $REPORT
+#    echo "Config package ($N) versions match: $V (Latest=$AV)" | tee -a $REPORT
+#  fi
+#fi
+
+# 
+if [[ -n $SLACK && $ret != 0 ]]
+then
+  slack-comment \
+    -f "$AGENT" \
+    -t "$FAIL" \
+    -c $SLACK \
+    -s "DP Deployment Problems: *$BRAND* *$ENVIRO*" \
+    -m "$(cat $REPORT)"
+fi
+
+# only update the slack channel on success for prod/aktest environments
+if [[ -n $SLACK && $ret = 0 && $ENVIRO =~ prd ]]
+then 
+  slack-comment \
+    -f "$AGENT" \
+    -t "$SUCC" \
+    -c $SLACK \
+    -s "DP Deployment Success: *$BRAND* *$ENVIRO*" \
+    -m "$(cat $REPORT)"
+fi
+
+[[ $ret = 0 ]] && rm -f $MANIFEST $REPORT
+
+echo "*** $(basename $0) complete ***" 
+
+exit 0

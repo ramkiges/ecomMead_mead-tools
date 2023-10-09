@@ -1,0 +1,199 @@
+#!/bin/bash
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/apps/mead-tools
+OUT=/tmp/$(basename $0).log
+DATE=$(date +'%Y-%m-%d %H:%M')
+[[ $(whoami) = "jenkins" ]] || SUDO=$(which sudo)
+umask 000
+mfe=
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  exit 255
+}
+
+cleanBuild() {
+  dir=$1
+  /bin/echo -n "$dir [$($SUDO du -sh $dir | awk '{ print $1 }')] "
+
+  proc=$(ps -ef | grep -i "mfe-config-template-manifest" | egrep -v "grep|$$")
+  [[ -n $proc ]] && { echo " - job running"; return; } 
+
+  pid=$($SUDO lsof +D $dir 2>/dev/null | awk '{ print $2 }' | grep -vi "PID")
+  if [[ -n $pid ]]
+  then 
+    echo "- in use"
+    return
+  else
+    echo "- remove" 
+    $SUDO rm -rf $dir 
+  fi
+}
+
+renice -n +20 $$ >/dev/null 2>&1
+
+date
+df -kh | egrep "/tmp /apps/tmp"
+
+# looking for long-running processes
+# there's a much better way to do this, but it will take some experimentation - this way is expedient
+MONTHS=" jan.*[0-9]| feb.*[0-9]| mar.*[0-9]| apr.*[0-9]| may.*[0-9]| jun.*[0-9] | jul.*[0-9] | aug.*[0-9] | sep.*[0-9] | oct.*[0-9] | nov.*[0-9] | dec.*[0-9] "
+EXCLUDE="jenkins.war|sshd|jenkins-slave|appd|apm|grep"
+ps -fu jenkins | egrep -i "$MONTHS" | egrep -iv "$EXCLUDE"
+$SUDO kill -9 $(ps -fu jenkins | egrep -i "$MONTHS" | egrep -iv "$EXCLUDE" | awk '{ print $2 }') 2>/dev/null
+
+# clear out old logs
+$SUDO find /apps/jenkins/logs/slaves /apps/jenkins/logs/tasks  /apps/jenkins/logs/custom -type f -mtime +1 -ctime +1 -delete 2>/dev/null
+
+# extend /tmp
+#[[ -e /dev/mapper/vg_root-lv_tmp ]] && sudo lvextend -r -L 101G /dev/mapper/vg_root-lv_tmp
+
+if [[ -n $SUDO ]]
+then
+  if [[ -e /apps/npm ]]
+  then
+    $SUDO rm -rf /apps/npmcache
+    $SUDO mkdir -p /apps/npm/jenkins-npm-cache
+    $SUDO ln -sf /apps/npm/jenkins-npm-cache /apps/npmcache
+    $SUDO mkdir -p /apps/npm/jenkins-npm-cache
+    $SUDO chmod 775 /apps/npm/jenkins-npm-cache
+    $SUDO chown -R jenkins:jenkins /apps/npm/jenkins-npm-cache >/dev/null 2>&1 &
+  else
+    $SUDO mkdir -p /apps/npmcache 
+    $SUDO chmod 775 /apps/npmcache
+    $SUDO chown -R jenkins:jenkins /apps/npmcache &
+  fi
+fi
+
+$SUDO find /apps/tmp/devops-mfe -maxdepth 1 -mindepth 1 -type f -name "mfe-config-*" -mtime +1 -delete 2>/dev/null
+#$SUDO find /apps/tmp/devops-mfe -maxdepth 1 -mindepth 1 -type d -mmin +90 -exec ls -ld {} \; #>/dev/null 2>&1 &
+
+for try in {1..5}
+do
+  #mfe=$(ps -ef | grep -i "mfe-config-template" | egrep -iv "grep")
+  #[[ $1 =~ force ]] && mfe=
+  if [[ -z $mfe ]]
+  then
+    for dir in \
+      $($SUDO ls -dtr $($SUDO find /tmp /apps/tmp -maxdepth 1 -mindepth 1 -type d -name "conceptbuild*" -mmin +120 2>/dev/null) | grep -iv "\.") \
+      $($SUDO ls -dtr $($SUDO find /tmp /apps/tmp -maxdepth 2 -mindepth 1 -type d -name "mfe-config-*" -mmin +120 2>/dev/null) | grep -iv "\.")
+    do
+      cleanBuild $dir 
+    done
+    break
+  fi
+  echo "mfe build running - waiting"
+  sleep 600
+done
+
+# clean up /tmp
+$SUDO find /tmp -maxdepth 1 -user jenkins -mtime +1 -ctime +1 -type d -exec rm -rf {} \; >/dev/null 2>&1 &
+$SUDO find /tmp -maxdepth 1 -user jenkins -mtime +1 -ctime +1 -type f -exec rm -rf {} \; >/dev/null 2>&1 &
+$SUDO rm -f /tmp/wsgc-*rpm >/dev/null 2>&1 </dev/null &
+$SUDO find /tmp -maxdepth 1 -name "synchronoss-file-upload*" -type d -mtime +1 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "osgi-*" -type d -mtime +1 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "tmp.*" -type f -amin +120 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "tmp.*" -type d -amin +120 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "*.data" -type d -mtime +1 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "clone-appsettings-*" -type d -mtime +1 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "com_*" -type d -mtime +1 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "MIG-TEST*" -type d -mtime +1 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "dbTemp.*" -type d -mtime +1 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -name "scan-mfe-builds-*" -type d -amin +120 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp/checkenv.d -maxdepth 1 -type d -mmin +250 -exec rm -rf {} \; >/dev/null 2>&1
+$SUDO find /tmp -maxdepth 1 -user jenkins -type d -atime +1 -exec rm -rf {} \; >/dev/null 2>&1 &
+$SUDO find /tmp -maxdepth 1 -user jenkins -type f -atime +1 -exec rm -f {} \; >/dev/null 2>&1 &
+$SUDO find /tmp /apps/mavenrelease-tmp-mavenbuild -type f -atime +1 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp /apps/mavenrelease-tmp-mavenbuild -type d -atime +1 -empty -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "frontend-*.log" -type f -amin +120 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "*.jira" -type f -amin +120 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp --maxdepth 1 name "_*.xml" -type f -amin +60 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "scatterzipfragment*" -type f -amin +60 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "plugin*" -type f -amin +60 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "tomcat.*" -type d -amin +60 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name ".ansible-runner-*" -type d -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "ansible-tmp*" -type d -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "contracts*" -type d -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "jenkins*.sh" -amin +60 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "migration*" -amin +60 -delete >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "aether-local*" -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 &
+$SUDO find /tmp -maxdepth 1 -name "tomcat*" -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "junit*" -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "jetcd_test*" -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "WSI_TransactionDetails*" -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "validate-appsettings*" -amin +60 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "mfe-build-status*" -amin +90 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "mfe-index*" -amin +90 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "mfe-data*" -amin +90 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "custom-frontend-deployer*" -type d -amin +90 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+$SUDO find /tmp -maxdepth 1 -name "schema-switch*" -type d -mtime +1 -exec rm -rf {} \; >/dev/null 2>&1 </dev/null  &
+
+PCT=$(df --sync -kh /apps | grep "/apps" | awk '{ print $5 }' | grep '%' | sed -es/%//g)
+[[ -z $THRESH ]] && THRESH=70
+[[ -z $HOURS ]] && HOURS=12
+echo "$(hostname) $(date +'%Y-%m-%d %H:%M') $PCT" > $OUT
+
+[[ $PCT -lt $THRESH ]] && exit 0
+
+if [[ $(whoami) = "jenkins" ]]
+then 
+  docker rmi -f $(docker images 2>/dev/null | grep '<none>' | awk '{print $3}') 2>/dev/null  &
+  #docker image prune --all --force &
+  #docker container prune --force &
+fi
+
+for DAYS in 5 4 3 2 1 0
+do
+  [[ $PCT -gt 85 ]] && HOURS=12
+  [[ $PCT -gt 90 ]] && HOURS=8
+  [[ $PCT -gt 95 ]] && HOURS=4
+  [[ $PCT -gt 98 ]] && HOURS=2
+  [[ $PCT -gt 99 ]] && HOURS=1
+
+  [[ $DAYS -eq 0 ]] && MTIME="-mmin +$(expr $HOURS \* 60) -cmin +$(expr $HOURS \* 60) -amin +$(expr $HOURS \* 60)" || MTIME="-mtime +$DAYS +$DAYS -ctime +$DAYS"
+  #echo "MTIME: $MTIME ($DAYS)"
+
+  $SUDO find /var/log/weblogs/jenkins -name "*.gz" -mtime +$DAYS -delete >/dev/null 2>&1 </dev/null &
+
+  #/apps/jenkins/jobs
+  find /apps/jenkins-slave/workspace /apps/jenkins/workspace -maxdepth 1 -type d $MTIME 2>/dev/null </dev/null |
+  while read dir
+  do
+	  $SUDO rm -rf "$dir" 
+  done
+
+  # when we fall below the threshold, we're done
+  PCT=$(df --sync -kh /apps | grep "/apps" | awk '{ print $5 }' | grep '%' | sed -es/%//g)
+  [[ $PCT -le $THRESH ]] && break
+done
+
+echo "$(hostname) $(date +'%Y-%m-%d %H:%M') $PCT" >> $OUT
+
+[[ $(whoami) = "jenkins" && $PCT -gt 90 ]] && docker image prune --all --force &
+
+$SUDO chmod 666 /tmp/clean-jenkins*
+
+# something keeps screwing up the privs on the home directory
+$SUDO chmod 700 /var/lib/jenkins
+
+df -kh | egrep "/tmp /apps/tmp"
+
+# special snowflake job cleanup
+if [[ -e /apps/maven/localrepo/com/wsgc/ecommerce/dp-end2end-test-support ]]
+then
+  cd /apps/maven/localrepo/com/wsgc/ecommerce/dp-end2end-test-support
+  set -x
+  $SUDO rm -rf 1.1-SNAPSHOT-old/
+  $SUDO mv 1.1-SNAPSHOT/ 1.1-SNAPSHOT-old
+  { set +x; } 2>/dev/null
+fi
+
+if [[ -e /apps/maven/localrepo/com/wsgc/ecommerce/dp-end2end-test ]]
+then
+  set -x
+  cd /apps/maven/localrepo/com/wsgc/ecommerce/dp-end2end-test
+  $SUDO rm -rf 1.1-SNAPSHOT-old/
+  $SUDO mv 1.1-SNAPSHOT/ 1.1-SNAPSHOT-old
+  { set +x; } 2>/dev/null
+fi
+
+exit 0

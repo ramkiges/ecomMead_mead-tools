@@ -1,0 +1,21 @@
+#!/bin/bash
+# simple captcha to be used to prevent people accidently running things
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps/mead-tools
+
+TOKEN=$RANDOM
+MSG=$1
+[[ -n $MSG ]] && MSG="$MSG - "
+
+/bin/echo -n "${MSG}Please enter token '${TOKEN}' "
+read response
+
+if [[ $response = ${TOKEN} ]]
+then 
+  echo "Pass" >&2 
+  exit 0
+else
+  echo "Fail" >&2 
+  exit  255
+fi
+
+

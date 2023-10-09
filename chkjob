@@ -1,0 +1,149 @@
+#!/bin/bash 
+# parse jenkins job output for clues
+#export PATH=$JAVA_HOME/bin:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/apps/mead-tools:/home/jenkins/node_modules/.bin
+export PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin
+BUILD=false
+WIPE=false
+AUTO=false
+
+HINTS="ERROR!|\[ERROR\] Errors:| error: |Failed to execute|Exception encountered|BeanCreationException|Could not resolve placeholder|SilentCancelException|npm ERR!|lerna ERR!|outOfMemoryError:|rundeck deployment.*failed.|Failed resource|NotFound desc|GitException|hudson.AbortException|Killed|not in the npm registry|ORA-.*[0-9].*:|unexpected.*tag|Could not transfer metadatai|Transfer failed for|No such file or directory|No X11 DISPLAY|Couldn't create workspace arena folder|ARCHIVE FAILED|build commands failed|Not a valid section definition"
+FTL_HINT_LIST="FreeMarker template error|FTL stack trace|Error executing FreeMarker template"
+
+HINTS="$HINTS|$FTL_HINT_LIST"
+
+EXCLUDE="Outward Composer API Returned Error|UnhandledPromiseRejectionWarning|Status progress"
+
+TIMEOUT="--connect-timeout 30 --max-time 90"
+USER_AGENT="--user-agent $(basename $0)"
+TAIL=25
+
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+[ -z "$JENKINS" ] && BailOut "Can't find 'jenkins-jnlp'"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"  >&2
+  exit 255
+}
+
+Usage() {
+  echo "Usage: $(basename $0) -j <job_url> -t [ticket] -b -w -a 
+-b  - run a build
+-j  - job URL
+-w  - wipe workspace
+-t  - jira ticket
+-a  - auto-close " >&2
+
+  exit 0
+}
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+
+[[ -z $1 ]] && Usage
+
+## argument assignment
+while getopts "hbwaj:t:" opt 
+do
+    case ${opt} in
+        h) Usage ;;            
+        j) export JOB=$OPTARG ;;
+        w) export WIPE=true ;;
+        a) export AUTO=true ;;
+        b) export BUILD=true ;;
+        t) export TICKET=$(echo $OPTARG | tr "a-z" "A-Z") ;;
+    esac
+done
+
+[[ -z $JOB ]] && Usage
+
+# clean up job link
+JOB=$(echo "$JOB" | sed -es%/console$%%g) 
+[[ ${JOB:0-1} = '/' ]] || JOB="$JOB/"
+
+# if the end of the URL is not a build number, then we need to build it
+#[[ $JOB =~ \/[0-9]*\/$ ]] || BUILD=true
+
+if [[ $JOB =~ blue/ ]]
+then
+set -x
+  JOB=$(echo "$JOB" | sed -es/'\%2F'/'\/'/g)
+  JOB=$(echo "$JOB" | awk -F '/jenkins/' '{ print $3 }')
+  exit
+fi
+
+[[ $JOB =~ view/ ]] && JOB=$(echo "$JOB" | awk -F 'job/' '{ print $2 }' | awk -F/ '{ print $1 }')
+
+JOB=$(echo "$JOB" | sed \
+  -es%https://%%g \
+  -es%http://%%g \
+  -es%ecombuild.wsgc.com%%g \
+  -es%/jenkins%%g \
+  -es%^/%%g \
+  -es%^job/%%g \
+  -es%/lastFailedBuild/consoleFull%%g \
+  -es%/[0-9]*/console%%g \
+  -es%/[0-9]*/pipeline%%g \
+  -es%/console%%g \
+  -es%/pipeline%%g \
+  -es%/$%%g )
+
+LABEL=$(echo "$JOB" | sed -es%job/%%g -es%/$%%g -es%/%_%g)
+CONSOLE_OUT=/tmp/$(basename $0)-$LABEL
+[[ $AUTO = "true" && -z $TICKET ]] && TICKET=$(jira-create -p MEAD -s "$(basename $0) $LABEL" -d "Auto-Generated ticket to build $LABEL")
+
+#    curl -sqk $JENKINS_URL/job/$JOB/lastBuild/consoleText > $CONSOLE_OUT 
+#    STATUS_JOB=$(curl --fail $TIMEOUT $USER_AGENT -s -k -H 'Cache-Control: no-cache' $result_url | jq -r .result)
+#    STATUS_CON=$(grep "Finished:" $CONSOLE_OUT | tail -1 | awk '{ print $NF }')
+
+[[ $WIPE = true ]] && wipe-workspace $JOB
+
+if [[ $BUILD = true ]]
+then
+  echo "Begin build $JENKINS_URL/job/$JOB"
+  #[[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO} Begin build $JENKINS_URL/job/$JOB"
+  eval $JENKINS build -s $JOB
+fi
+
+echo "$JENKINS_URL/job/$JOB/lastBuild/consoleText" >&2
+curl -sqk $JENKINS_URL/job/$JOB/lastBuild/consoleText > $CONSOLE_OUT.out
+dos2unix  $CONSOLE_OUT.out >/dev/null 2>&1
+iconv -c -f utf-8 -t $CONSOLE_OUT.out >/dev/null 2>&1 </dev/null
+
+echo "$JENKINS_URL/job/$JOB/lastBuild/api/json?tree=result" >&2
+for try in 1 2 3 4 5
+do
+  RESULT=$(curl -sqk $JENKINS_URL/job/$JOB/lastBuild/api/json?tree=result | jq -r .result)
+
+  STATUS=$(grep "Finished:" $CONSOLE_OUT.out | tail -1 | awk '{ print $NF }')
+  [[ $STATUS =~ null ]] && STATUS=
+  [[ -n $STATUS ]] && break
+  sleep 10
+done
+
+echo "Result: $RESULT"
+echo "Status: $STATUS"
+[[ -n $RESULT && -z $STATUS ]] && STATUS=$RESULT
+
+if [[ $RESULT =~ SUCCESS || $STATUS =~ SUCCESS ]]
+then
+  jira-comment "$TICKET" "${ICON_SUCC}$(basename $0) Success $JENKINS_URL/job/$JOB/lastBuild/consoleText"
+  [[ $AUTO =~ true ]] && jira-close -t "$TICKET" -c "AutoClose on successful build"
+  exit 0
+fi
+
+#ERRORS=$(egrep -i "$HINTS" $CONSOLE_OUT.out | sed -es/\"//g | tr -cd "[:print:]" | egrep -vi "$EXCLUDE" | uniq)
+ERRORS=$(egrep -i -A+2 "$HINTS" $CONSOLE_OUT.out | sed -es/\"//g | egrep -vi "$EXCLUDE" | uniq | head -20 | sed -es/'\[NORMAL\] '//g)
+if [[ -n $ERRORS ]]
+then
+  echo "$ERRORS"
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}$(basename $0): result=$RESULT {noformat:title=$JENKINS_URL/job/$JOB}$ERRORS{noformat}"
+else
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO}$(basename $0) $STATUS $JENKINS_URL/job/$JOB/lastBuild/consoleText"
+fi
+
+exit 255

@@ -1,0 +1,31 @@
+#!/bin/bash
+#https://confluence.wsgc.com/display/ES/Using+tomcat-crypto-factory
+BRAND=ws
+ENVIRO=uat3
+SCRIPT=$(basename $0).sh
+
+PASS=$1
+[[ -z $PASS ]] && { echo "Need password" >&2; exit 255; }
+
+HOST=$(gethost $BRAND $ENVIRO)
+
+cat > /tmp/$SCRIPT << EOF
+#!/bin/bash
+export PATH=/usr/local/bin:/bin:/sbin:/usr/sbin:/apps/java/bin:/apps/jdk8/bin
+
+cd /apps/tomcat/conf || { echo "Can't cd to /apps/tomcat/conf"; exit 1; }
+
+PASS=\$1
+[[ -z \$PASS ]] && { echo "Need password" >&2; exit 255; }
+
+ENC=\$(java -jar ../lib/tomcat-crypto-factory-2.0.2.jar -k config.key encrypt frontend.datasource.ecomDB.password "\$PASS" | awk '{ print \$NF }')
+
+[[ -n \$ENC ]] && echo "\$ENC"
+
+exit 0
+EOF
+
+chmod 755 /tmp/$SCRIPT
+scp -q /tmp/$SCRIPT $HOST:/tmp
+ssh -q $HOST "sh /tmp/$SCRIPT \"$PASS\" "
+

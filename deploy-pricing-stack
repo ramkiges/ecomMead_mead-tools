@@ -1,0 +1,65 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/java/bin:/apps/mead-tools:/apps:/apps/scripts:$PATH:~/bin
+export PATH
+
+ENV=$1
+SERVICE_LIST="publisher singleuse pricing"
+#COMMON="tomcat common"
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <env>"
+	exit 1
+}
+
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+[ -z "$JENKINS" ] && BailOut "Can't find 'jenkins-jnlp'"
+[ -z "$ENV" ] && BailOut
+
+for level in $COMMON
+do
+	for service in $SERVICE_LIST
+	do
+		job=$(eval $JENKINS list-jobs | grep "$service" | grep "$level")
+        [ -z "$job" ] && BailOut "Why can't we find a common config job for $level $service?"
+        echo "*** running $JENKINS_URL/job/$job"
+		eval $JENKINS build -s $job
+	done
+done
+
+for service in $SERVICE_LIST
+do
+    job=$(eval $JENKINS list-jobs | grep "$service" | grep "wsgc.*config" | grep $ENV)
+    if [ -z "$job" ] 
+    then
+        echo "Why can't we find a config job for $service?"
+        continue
+    fi
+    echo "*** running $JENKINS_URL/job/$job"
+    eval $JENKINS build -s $job
+    [ $? -ne 0 ] && BailOut "$job failed"
+done
+
+for service in $SERVICE_LIST
+do
+    job=$(eval $JENKINS list-jobs | grep "deploy-$service" | grep "deploy" | grep $ENV)
+    if [ -z "$job" ] 
+    then
+        echo "Why can't we find a config job for $service?"
+        continue
+    fi
+    echo "*** running $JENKINS_URL/job/$job"
+    eval $JENKINS build -s $job
+done
+
+echo "http://singleuse-${ENV}-rk1v.wsgc.com/summary.html"
+echo "http://singleuse-${ENV}-rk1v.wsgc.com:38667/wsgc-tomcat-singleuse/?C=M;O=A"
+
+echo "http://publisher-${ENV}-rk1v.wsgc.com/admin/summary.html"
+echo "http://publisher-${ENV}-rk1v.wsgc.com:38667/wsgc-tomcat-publisher/?C=M;O=A"
+
+echo "http://pricing-${ENV}-rk1v.wsgc.com/admin/summary.html"
+echo "http://pricing-${ENV}-rk1v.wsgc.com:38667/wsgc-tomcat-pricing/?C=M;O=A"
+
+exit 0

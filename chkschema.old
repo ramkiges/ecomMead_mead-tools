@@ -1,0 +1,132 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin:$PATH
+SSHOPTS="-o StrictHostKeyChecking=no"
+DST=~/Downloads/logs
+#ECMAGENT=ecmagentintrk1v
+ECMAGENT=ecmagent-int-rk1v
+BGB=bgb-uat3-rk1v
+
+BailOut() {
+	[ -n "$1" ] && echo "$1" 
+	echo "Usage: $(basename $0) <brand> <env>"
+	exit 1
+}
+
+[ $# -ne 2 ] && BailOut
+BRAND=$1
+ENV=$2
+
+SITE=$(brand2site $BRAND)
+POM=/tmp/$BRAND-$ENV-pom.xml
+
+svn cat https://repos.wsgc.com/svn/devops/application/frontend-2.1/qa/config/app/trunk/$BRAND/$ENV/pom.xml > $POM
+
+echo "POM: (devops/application/frontend-2.1/qa/config/app/trunk/$BRAND/$ENV/pom.xml)"
+for param in tableOwner ecomdb.url ecomdb.username session.url session.username
+do
+	value=$(cat $POM | egrep -iv '<!--' | grep -i "$param" | awk -F '[<>]' '{ print $3 }' | tr "[A-Z]" "[a-z]")
+	echo "$param: $value"
+done
+
+# capture values for analysis
+tableOwner=$(grep -i frontend.tableOwner $POM | egrep -iv '<!--' | awk -F '[<>]' '{ print $3 }' | tr "[A-Z]" "[a-z]")
+ECOMDB_HOST=$(grep -i ecomdb.url $POM   | egrep -iv '<!--' | awk -F '[<>]' '{ print $3 }' | awk -F '[:/]' '{ print $4 }' | sed -e s/\@//g | tr "[A-Z]" "[a-z]" | awk -F\. '{ print $1 }')
+ECOMDB_SID=$(grep -i ecomdb.url $POM    | egrep -iv '<!--' | awk -F '[<>]' '{ print $3 }' | awk -F '[:/]' '{ print $6 }' | tr "[A-Z]" "[a-z]")
+SESSION_HOST=$(grep -i session.url $POM | egrep -iv '<!--' | awk -F '[<>]' '{ print $3 }' | awk -F '[:/]' '{ print $4 }' | sed -e s/\@//g | tr "[A-Z]" "[a-z]" | awk -F\. '{ print $1 }')
+SESSION_SID=$(grep -i session.url $POM  | egrep -iv '<!--' | awk -F '[<>]' '{ print $3 }' | awk -F '[:/]' '{ print $6 }' | tr "[A-Z]" "[a-z]")
+
+# crude testing of base paths
+case $tableOwner in
+        ws_app_owner )
+            for base in $(egrep -i "docimagebase|scriptSubPath" $POM | awk -F '[<>]' '{ print $2 }' | sed -es/frontend\.//g) 
+            do 
+                 egrep -iw "$base" $POM | grep -iq "uat1" && echo "* Frontend pom: $base is probably wrong"
+            done
+        ;;
+esac
+
+BGB_ENV=$(get-installation $BRAND $ENV)
+
+get-ecm-env $BRAND $ENV
+
+echo
+for ECMAGENT in $(get-ecm-env $BRAND $ENV)
+do
+  echo
+  cfg 
+  echo "ECM DB ($ECMAGENT:/apps/ecmagent/apps/ecmagent/etc/ecm-pubagent-config.json)"
+  #ECMDB=$(ssh -q $SSHOPTS $ECMAGENT "cat /apps/ecmagent/apps/ecmagent/etc/ecm-pubagent-config.json | grep -i '$BGB_ENV' | grep -i '$SITE' | awk -F, '{ print \$3, \$4 }' | tr "[A-Z]" "[a-z]"" 2>/dev/null)
+  #echo $ECMDB
+  dataSource=$(ssh -q $SSHOPTS $ECMAGENT "cat /apps/ecmagent/apps/ecmagent/etc/ecm-pubagent-config.json | grep -iw '$BGB_ENV' | grep -i '$SITE' | awk -F, '{ print \$3 }' | awk -F\: '{ print \$2 }' | tr "[A-Z]" "[a-z]"" 2>/dev/null)
+  dataSource=$(echo "$dataSource" | sed -e s/\"//g)
+  echo "DataSource: $dataSource"
+  databaseSchema=$(ssh -q $SSHOPTS $ECMAGENT "cat /apps/ecmagent/apps/ecmagent/etc/ecm-pubagent-config.json | grep -iw '$BGB_ENV' | grep -i '$SITE' | awk -F, '{ print \$4 }' | awk -F\: '{ print \$2 }'" | tr "[A-Z]" "[a-z]" 2>/dev/null)
+  databaseSchema=$(echo "$databaseSchema" | sed -e s/\"//g -e s/\}//g )
+  echo "databaseSchema: $databaseSchema"
+done
+
+echo
+echo "Deployment Properties: (^deployments/content/trunk/deploy/properties/$ENV/$BRAND.properties)"
+PROPERTIES="https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties/$ENV/$BRAND.properties"
+#svn cat $PROPERTIES | egrep -i "DBhost|dbschema|dbinst|dbuid" | grep -iv "^#" | tr "[A-Z]" "[a-z]"
+DEPLOY_SID=$(svn cat $PROPERTIES | grep -i dbinst | grep -vi "^#" | awk -F= '{ print $2 }' | tr "[A-Z]" "[a-z]")
+
+DEPLOY_USER=$(svn cat $PROPERTIES | grep -i dbuid | grep -vi "^#" | awk -F= '{ print $2 }' | tr "[A-Z]" "[a-z]")
+[ -z "$DEPLOY_USER" ] && DEPLOY_HOST=$(svn cat $(dirname $(dirname $PROPERTIES))/deploy.properties | grep -i dbuid | grep -vi "^#" | awk -F= '{ print $2 }' | tr "[A-Z]" "[a-z]")
+
+DEPLOY_HOST=$(svn cat $PROPERTIES | grep -i dbhost | grep -vi "^#" | awk -F= '{ print $2 }' | tr "[A-Z]" "[a-z]"i | awk -F\. '{ print $1 }')
+[ -z "$DEPLOY_HOST" ] && DEPLOY_HOST=$(svn cat $(dirname $(dirname $PROPERTIES))/deploy.properties | grep -i dbhost | grep -vi "^#" | awk -F= '{ print $2 }' | tr "[A-Z]" "[a-z]" | awk -F\. '{ print $1 }')
+
+DEPLOY_SCHEMA=$(svn cat $PROPERTIES | grep -i dbschema | grep -vi "^#" | awk -F= '{ print $2 }' | tr "[A-Z]" "[a-z]" | tr "[A-Z]" "[a-z]")
+[ -z "$DEPLOY_SCHEMA" ] && DEPLOY_SCHEMA=$(svn cat $(dirname $(dirname $PROPERTIES))/deploy.properties | grep -i dbschema | grep -vi "^#" | awk -F= '{ print $2 }' | tr "[A-Z]" "[a-z]" | tr "[A-Z]" "[a-z]")
+
+echo "DBHost:   $DEPLOY_HOST"
+echo "dbschema: $DEPLOY_SCHEMA"
+echo "dbinst:   $DEPLOY_SID"
+echo "dbuid:    $DEPLOY_USER"
+
+echo
+echo "BGB ($BGB:/bgb/tomcat-bgb/apps/bgb/etc/dp$BGB_ENV)"
+BGB_INFO=$(ssh -q $SSHOPTS $BGB "cat /bgb/tomcat-bgb/apps/bgb/etc/dp$BGB_ENV")
+echo "$BGB_INFO"
+BGBDB_HOST=$(echo "$BGB_INFO" | grep host= | awk -F= '{ print $3 }' | awk -F\; '{ print $1 }' | tr "[A-Z]" "[a-z]" | awk -F\. '{ print $1 }')
+BGBDB_SID=$(echo "$BGB_INFO" | grep sid= | awk -F= '{ print $4 }' | awk -F\; '{ print $1 }' | tr "[A-Z]" "[a-z]")
+
+echo
+echo "BGB ($BGB:/bgb/tomcat-bgb/apps/bgb/etc/environmentConfig.xml)"
+ssh -q $SSHOPTS $BGB "grep -iA6 'id=\"dp$BGB_ENV\"' /bgb/tomcat-bgb/apps/bgb/etc/environmentConfig.xml"
+
+SUMMARY=$(geturls $BRAND $ENV | grep -i summary.html | awk '{ print $1 }')
+echo
+#echo "Summary page: $SUMMARY"
+#SUMMARY_SAMPLETABLE=$(curl --connect-timeout 10 -s -k -H --connect-timeout 30 'Cache-Control: no-cache' $SUMMARY 2>/dev/null | grep -i "tableowner" | awk -F '[<>]' '{ print $13 }' | awk -F\. '{print $1 }' | tr "[A-Z]" "[a-z]")
+#echo "SampleTable Owner: $SUMMARY_SAMPLETABLE"
+
+echo
+echo "Analysis for $BRAND $ENV:"
+
+[ "$databaseSchema" != "$DEPLOY_SCHEMA" ] && { echo "* ECM DB Schema ($databaseSchema) and Deployments Schema ($DEPLOY_SCHEMA) don't match"; ERROR=1; }
+[ "$databaseSchema"  != "$tableOwner" ] && { echo "* ECM DB Schema ($databaseSchema) and tableOwner ($tableOwner) don't match"; ERROR=1;}
+# need to figure out how to verify the 'dataSource' from ECM DB
+#[ "$dataSource" != 
+
+[ "$ECOMDB_SID"  != "$SESSION_SID" ] && { echo "* EcomDB ($ECOMDB_SID) and Session ($SESSION_SID) SIDs don't match"; ERROR=1; }
+[ "$ECOMDB_SID"  != "$DEPLOY_SID" ] && { echo "* EcomDB ($ECOMDB_SID) and Deployer ($DEPLOY_SID) SIDs don't match"; ERROR=1; }
+[ "$ECOMDB_SID"  != "$BGBDB_SID"  ] && { echo "* EcomDB ($ECOMDB_SID) and BGB ($BGBDB_SID) SIDs don't match"; ERROR=1; }
+[ "$BGBDB_SID"   != "$DEPLOY_SID" ] && { echo "* BGB ($BGBDB_SID) and Deployer ($DEPLOY_SID) SIDs don't match"; ERROR=1; }
+[ "$SESSION_SID" != "$DEPLOY_SID" ] && { echo "* Session ($SESSION_SID) and Deployer ($DEPLOY_SID) SIDs don't match"; ERROR=1; }
+
+[ "$SESSION_HOST" != "$BGBDB_HOST" ] && { echo "* Session ($SESSION_HOST) and BGB ($BGBDB_HOST) hosts don't match"; ERROR=1; }
+[ "$SESSION_HOST" != "$DEPLOY_HOST" ] && { echo "* Session ($SESSION_HOST) and Deployer ($DEPLOY_HOST) hosts don't match"; ERROR=1; }
+[ "$ECOMDB_HOST" != "$DEPLOY_HOST" ] && { echo "* EcomDB ($ECOMDB_HOST) and Deployer ($DEPLOY_HOST) hosts don't match"; ERROR=1; }
+[ "$BGBDB_HOST" != "$DEPLOY_HOST" ] && { echo "* BGB ($BGBDB_HOST) and Deployer ($DEPLOY_HOST) hosts don't match"; ERROR=1; }
+
+if [ -n "$ERROR" ]
+then
+	exit 1
+else
+	echo "Looks OK!"
+	exit 0
+fi
+
+

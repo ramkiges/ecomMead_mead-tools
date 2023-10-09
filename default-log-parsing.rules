@@ -1,0 +1,16 @@
+# rules for for log parser plugin
+# https://wiki.jenkins.io/display/JENKINS/Log+Parser+Plugin
+
+ok /set log level/
+
+error /FAILED/
+error /ERROR/
+error /(?i)sync.*error/
+error /(?i)OrderError/
+error /(?i)fatal alert:/
+
+warning /[Ww]arning/
+warning /WARNING/
+warning /WARN/
+
+info /INFO/

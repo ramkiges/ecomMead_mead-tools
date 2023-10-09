@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# this is all of the files in the set-backend ecosystem
+FILES=$(ls set-backend-veqa*)
+
+# this is just a subset we are auditing
+ENVS="set-backend-veqa1 set-backend-veqa2 set-backend-veqa3"
+
+SETTINGS=$(grep -- "--bulk" $FILES | awk -F '--bulk ' '{ print $2 }' | sed -es/\'//g | awk -F\. '{ print $1 "." $2 }' | sort -u)
+
+for s in $SETTINGS
+do
+  for file in $ENVS
+  do
+    a=$(grep "$s" $file | grep -v "^#")
+    f=$(grep "$s" set-backend-any | grep -v "^#")
+
+    # if it's only in the -any file, we're good
+    [[ -n $a && -z $f ]] && continue
+
+    # if it's not in one of the files, call it out
+    [[ -z $f ]] && echo "$s not in $file"
+
+    # if it's in both the -any and backend-specific files, call it out
+    #[[ -n $a && -n $f ]] && echo "$s in both set-backend-any and $file "
+  done
+done
+

@@ -1,0 +1,908 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/apps/scm-tools:/apps/maven/latest/bin:/apps/java/bin:/apps/emacs-nox-24.5/bin:/home/mavenbuild/bin/devscripts:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/opt/puppetlabs/bin:/home/mavenbuild/bin:~/bin
+export PATH
+#BUILD_USER_ID="${option.BUILD_USER_ID}"
+
+#TODO: test * from jenkins form
+
+DEBUG=1
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+DEVOPS=https://repos.wsgc.com/svn/devops
+PROPERTIES=packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site
+WSGC=/apps/tmp/wsgc-$(basename $0)
+export LC_CTYPE=en_US.UTF-8
+export LC_ALL=C
+LOG="/apps/$(basename $0).log"
+JMX_PORT=39667
+DEFAULT_EMAIL="ecomHuron@wsgc.com"
+TIMEOUT="--connect-timeout 20  --max-time 120"
+USER_AGENT="--user-agent $(basename $0)"
+DAYS=5
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+	[ -n "$1" ] && echo "***
+ERROR: $*
+***" 
+	#echo "$(basename $0): -b <brands> -e <environments> -s <setting> -v <value> -d <datatype> -a <add|update|delete> -t [ticket]"
+	#echo 
+
+	# cleanup
+	#rm -rf $WSGC >/dev/null 2>&1
+
+    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_FAIL}$(basename $0): App setting $SETTING update *failed* (_${*}_) $BUILD_URL" 
+
+	exit 1
+}
+
+Warning() { 
+    echo "///
+WARNING: $* 
+///" >&2
+    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_WARN}$(basename $0): $*"
+}
+
+timeStamp() { echo ">>>> $* $(date +'%Y-%m-%d %H:%M') <<<<"; }
+
+adhocStats() {
+    echo "Stats for last $DAYS days"
+    for day in $(grep "^#.*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" $LOG |awk '{ print $3 }' | sort -u | tail -$DAYS)
+    do
+        count=$(grep "#.*$day" $LOG | wc -l)
+        echo "$day  $count"
+    done
+}
+
+WSI_SETTINGS=$(which wsi_settings 2>/dev/null)
+[ -z "$WSI_SETTINGS" ] && BailOut "Can't find wsi_settings"
+
+GETURLS=$(which geturls 2>/dev/null)
+[ -z "$GETURLS" ] && BailOut "Can't find geturls"
+
+GETSCHEMA=$(which getschema 2>/dev/null)
+[ -z "$GETSCHEMA" ] && BailOut "Can't find getschema"
+
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+[ -z "$JENKINS" ] && BailOut "Can't find jenkins-jnlp"
+
+for dir in /wsgc/bin /apps ~/bin
+do
+	[ -e $dir/jmxclient.jar ] && { JMX_JAR=$dir/jmxclient.jar; break; }
+done
+
+# check out the frontend and appsettings repos
+checkOut() {
+    echo
+    echo ">>> $FUNCNAME <<<"
+    FUNCTION=$FUNCNAME
+
+	umask 000
+	rm -rf $WSGC >/dev/null 2>&1
+	mkdir -p $WSGC 
+	cd $WSGC || BailOut "Could not cd to $WSGC"
+
+	/bin/echo -ne "Checking out appsettings repo... "
+	mkdir -p $WSGC/$(dirname $PROPERTIES) 
+	cd $WSGC/$(dirname $PROPERTIES) 
+	svn -q co $DEVOPS/$PROPERTIES $(basename $PROPERTIES) || BailOut "Could not svn co appsettings repo"
+	svn -q up || BailOut "Could not svn up appsettings repo as $(whoami)"
+	echo "Done"
+
+	/bin/echo -ne "Checking out frontend... "
+	mkdir -p $WSGC/$(dirname $FRONTEND)
+	cd $WSGC/$(dirname $FRONTEND) 
+	svn -q co $DEVOPS/$FRONTEND $(basename $FRONTEND)
+	svn -q up
+	echo "Done"
+
+	echo $WSGC > ~/.wsi_settings
+#    echo "WSGC: $WSGC"
+}
+
+# basic sanity checking of datatype against other records
+getType() {
+    echo
+    echo ">>> $FUNCNAME <<<"
+    FUNCTION=$FUNCNAME
+
+    #type=$(grep -ihr "$SETTING" $WSGC/$(dirname $PROPERTIES) | awk -F= '{ print $1 }' | awk -F \. '{ print $NF }' | sort -u)
+    type=$(grep -ih "$SETTING" $(find $WSGC/$(dirname $PROPERTIES) -name override.properties) | awk -F= '{ print $1 }' | awk -F \. '{ print $NF }' | sort -u)
+    [ -z "$type" ] && Warning "Didn't find an existing datatype for '$SETTING' " >&2
+
+    type_cnt=$(echo "$type" | wc -l | awk '{ print $1 }')
+    [ -z "$type" ] && type_cnt=0
+
+    if [ $type_cnt -eq 0 ]
+    then
+        echo "No prior example of '$SETTING' in repo"
+    else
+        if [ $type_cnt -gt 1 ]
+        then
+            type_list=$(echo "$type" | tr '\012\015' ',' | sed -es/,$//g)
+            Warning "Multiple datatypes defined for '$SETTING': $type_list" 
+        else
+            # if datatype is blank but we have it from the overrides, go ahead and set it
+            if [ -z "$DATATYPE" -a "$ACTION" != "delete" ]
+            then
+                Warning "Datatype for '$SETTING' is blank - using '$type'" 
+                DATATYPE=$type
+            else
+                if [ "$type" != "$DATATYPE" ]
+                then
+                    [ -n "$DATATYPE" ] && Warning "Datatype '$DATATYPE' for '$SETTING' does not match existing entries with type '$type'" 
+                else
+                    echo "$SETTING is type '$type'" >&2
+                fi
+            fi
+        fi
+    fi
+}
+
+# basic checks to make sure someone is authorized to make the change
+checkACL() {
+    #[ -n "$DEBUG" ] && echo "ACL: $ACL ($BUILD_USER_ID)"
+    
+    [ -z "$ACL" ] && BailOut "$FUNCNAME: ACL is empty - user much be in ACL to update prd/preprd environments"
+    [ -z "$BUILD_USER_ID" ] && BailOut "$FUNCNAME: BUILD_USER_ID is empty"
+    echo "$ACL" | egrep -iq "$BUILD_USER_ID@" || BailOut "$FUNCNAME: $BUILD_USER_ID is not in ACL ($ACL)"
+}
+
+sendEmail() {
+    echo
+    echo ">>> $FUNCNAME - $EMAIL <<<"
+    FUNCTION=$FUNCNAME
+    MSG="/tmp/appsetting-msg.txt"
+
+    [ "$ACTION" = "add" ] && tense="ed"
+    [ "$ACTION" = "delete" ] && tense="d"
+    [ "$ACTION" = "update" ] && tense="d"
+    EMAIL=$(echo "$EMAIL" | sed -es/','/' '/g)
+
+	cat > $MSG << EOM
+
+An appsetting has been ${ACTION}${tense}
+
+Brands:     $BRANDS 
+Scope:      $SCOPE 
+Coast:      $COAST 
+User:       $BUILD_USER_ID
+Ticket:     $TICKET 
+Comments:   $COMMENTS
+
+Setting:
+$SETTING.$DATATYPE=$VALUE
+
+Diff:
+$DIFF
+
+EOM
+	[ -n "$EMAIL" ] && mailx -s "Appsetting Update: $SETTING" $EMAIL < $MSG
+
+}
+
+# this function replaces the setting functionality of wsi_settings
+settingUpdate() {
+    echo
+    echo ">>> $FUNCNAME <<<"
+    FUNCTION=$FUNCNAME
+
+    for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+    do
+    	for ENV in $(echo "$ENVS" | sed -e s/","/" "/g)
+        do
+            MOD=/tmp/$BRAND-$ENV-$GROUP-$NAME
+
+            pe=$ENV
+            [[ $pe = "qa" ]] && pe=qa1
+            POM="$DEVOPS/$FRONTEND/$BRAND/$pe/pom.xml"
+#[[ -n $DEBUG ]] && echo "POM: $POM"
+            svn cat $POM >/dev/null 2>&1 || { echo "/// No pom found for $BRAND $ENV ($POM) ///"; POM=; continue; }
+
+            SCHEMA=$(svn cat $POM 2>/dev/null|egrep -i "<frontend.tableowner>" \
+                | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+            [ -z "$SCHEMA" ] && BailOut "Can't figure out schema"
+[[ -n $DEBUG ]] && echo "SCHEMA: $SCHEMA"
+
+            SERVER=$(svn cat $POM 2>/dev/null|egrep -i "<frontend.datasource.ecomDB.url>|<xcadm.datasource.ecomDB.url>" \
+                | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z" | awk -F\@ '{ print $2 }' | awk -F: '{ print $1 }' | awk -F\. '{ print $1 }')
+            [ -z "$SERVER" ] && BailOut "Can't figure out DB server"
+[[ -n $DEBUG ]] && echo "SERVER: $SERVER"
+
+            SERVICE=$(svn cat $POM 2>/dev/null|egrep -i "<frontend.datasource.ecomDB.url>|<xcadm.datasource.ecomDB.url>" \
+                | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z" | awk -F [/:] '{ print $NF }')
+            [ -z "$SERVICE" ] && BailOut "Can't figure out DB server"
+#[[ -n $DEBUG ]] && echo "SERVICE: $SERVICE"
+
+            OVERRIDE_URL="$DEVOPS/$PROPERTIES/$SERVICE/$SCHEMA/$BRAND/override/override.properties"
+            DEFAULT_URL="$DEVOPS/$PROPERTIES/$SERVICE/$SCHEMA/$BRAND/default/default.properties"
+
+            OVERRIDE="$WSGC/$PROPERTIES/$SERVICE/$SCHEMA/$BRAND/override/override.properties"
+            [ -z "$OVERRIDE" -o ! -e "$OVERRIDE" ] && BailOut "Can't find Override for $BRAND $ENV"
+            #[[ -e $OVERRIDE ]] || BailOut "The override.properies file isn't there ($OVERRIDE)"
+#[[ -n $DEBUG ]] && echo "OVERRIDE: $OVERRIDE"
+
+            DEFAULT="$WSGC/$PROPERTIES/$SERVICE/$SCHEMA/$BRAND/default/default.properties"
+            [[ -e $DEFAULT ]] || BailOut "The default.properies file isn't there ($DEFAULT)"
+
+            if [[ $ENV =~ ^preprd || $ENV =~ ^${MARKET}preprd ]]
+            then
+[[ -n $DEBUG ]] && echo "+++ AKTEST +++"
+                checkACL
+
+                # add to either or both scopes
+                for scope in $(echo "$SCOPE" | sed -es/,/' '/g)
+                do
+                    echo "=== $ACTION $BRAND $ENV $SERVER $scope ==="
+
+                    # construct a string to use to delete old record
+                    RECORD_OLD="$GROUP\.$NAME\.$scope\..*="
+
+                    # delete record
+                    cat $OVERRIDE | grep -vi "$RECORD_OLD" > $MOD 
+                    mv $MOD $OVERRIDE
+                    ret=$?
+                    [ $ret -ne 0 ] && BailOut "Something went wrong with the override update"
+
+                    # add record if $ACTION dictates
+                    if echo "$ACTION" | egrep -iq "add|update" 
+                    then
+                        echo "$GROUP.$NAME.$scope.$DATATYPE=$VALUE" >> $OVERRIDE
+                        ret=$?
+                    fi
+                done
+                echo "Diff $BRAND $ENV"
+                svn diff $OVERRIDE | egrep "^-|^\+" | grep -vi "\.properties"
+            fi
+
+            if [[ $ENV =~ ^prd || $ENV =~ ^${MARKET}prd ]]
+            then
+[[ -n $DEBUG ]] && echo "+++ Production +++"
+                # validate that we're allowed to even be here
+                checkACL
+
+                echo "--- $BRAND $ENV ---"
+                #[ -n "$DEBUG" ] && echo "$DEFAULT_URL"
+
+                # construct a string to use to find old entry
+                RECORD_OLD="$GROUP\.$NAME="
+
+                # for now, consider it an error to try to add to default.properties
+                [[ $ACTION = "add" ]] && BailOut "Should we be adding to default.properties?"
+
+                # for now, consider it an error to try to remove from default.properties
+                [[ $ACTION = "delete" ]] && BailOut "We don't have a good way to delete from default.properties"
+
+                # for now, consider it an error if we try to update a non-existent record
+                if [[ $ACTION = "update" ]]
+                then
+                    EXISTING=$(grep -i "$RECORD_OLD" $DEFAULT)
+                    [[ -z $EXISTING ]] && BailOut "No existing setting for $GROUP.$NAME - can't update non-existent setting"
+                fi
+
+                # dig up the last commit, just for funsies
+                COMMIT=$(svn blame $DEFAULT | grep "$RECORD_OLD" | awk '{ print $1 }' )
+                [[ -n $COMMIT ]] && svn log $DEFAULT -r $COMMIT
+
+                # delete record
+                cat $DEFAULT | grep -vi "$RECORD_OLD" > $MOD 
+                mv $MOD $DEFAULT
+                ret=$?
+                [ $ret -ne 0 ] && BailOut "Something went wrong with the default update"
+
+                # add record if $ACTION dictates
+                if echo "$ACTION" | egrep -iq "add|update" 
+                then
+                    echo "$ACTION" | egrep -iq "add|update" && echo "$GROUP.$NAME=$VALUE" >> $DEFAULT
+                    ret=$?
+                fi
+            fi
+        done
+        [[ -z $POM ]] && echo ">>> $BRAND $ENV does not appear to be a legitimate config (POM not found)"
+    done
+}
+
+# 
+echo "... $(basename $0)@$(hostname) ..."
+
+# parse arguments
+while [ $# -gt 0 ]
+do
+        case $1 in
+                -b|--brand|--brands )
+                        $(echo "$2" | grep -q -- "^-") || { BRAND_LIST="$2"; }
+                        shift;;
+                -e|--environment|--envs )
+                        $(echo "$2" | grep -q -- "^-") || { ENV_LIST="$2"; }
+                        shift ;;
+                -s|--setting )
+                        $(echo "$2" | grep -q -- "^-") || { SETTING="$2"; }
+                        shift;;
+                -v|--value )
+                        $(echo "$2" | grep -q -- "^-") || { VALUE="$2"; }
+                        shift;;
+                -t|--ticket )
+                        $(echo "$2" | grep -q -- "^-") || { TICKET="$2"; }
+                        shift;;
+                -d|--datatype )
+                        $(echo "$2" | grep -q -- "^-") || { DATATYPE="$2"; }
+                        shift;;
+                -a|--action )
+                        $(echo "$2" | grep -q -- "^-") || { ACTION="$2"; }
+                        shift;;
+                -i|--immediate )
+                        $(echo "$2" | grep -q -- "^-") || { IMMEDIATE="$2"; }
+                        shift;;
+                -f|--force|--restart )
+                        $(echo "$2" | grep -q -- "^-") || { RESTART="$2"; }
+                        shift;;
+                -c|--comments )
+                        $(echo "$2" | grep -q -- "^-") || { COMMENTS="$2"; }
+                        shift;;
+
+                # these are for adhoc-appsettings-prd
+                -g|--market )
+                        $(echo "$2" | grep -q -- "^-") || { MARKET="$2"; }
+                        shift ;;
+                -k|--coast )
+                        $(echo "$2" | grep -q -- "^-") || { COAST="$2"; }
+                        shift ;;
+                -r|--realm )
+                        $(echo "$2" | grep -q -- "^-") || { REALM="$2"; }
+                        shift ;;
+                -l|--limit )
+                        $(echo "$2" | grep -q -- "^-") || { SCOPE="$2"; }
+                        shift ;;
+                -m|--email )
+                        $(echo "$2" | grep -q -- "^-") || { EMAIL="$2"; }
+                        shift ;;
+                * ) shift ;;
+        esac
+done
+
+# create Jira link
+if [[ -n $TICKET ]]
+then
+	TICKET=$(echo "$TICKET" | tr "a-z" "A-Z" | sed -e s/\"//g)
+    for jira in $(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+    do
+	    echo "Jira: https://jira.wsgc.com/browse/$jira"
+    done
+fi
+
+# create a URL to refer back to this build
+BUILD_URL="$JENKINS_URL/job/adhoc-appsetting/$BUILD_NUMBER/console"
+
+case $MARKET in
+  Domestic ) MARKET=;;
+  Canada ) MARKET=ca;;
+  *) BailOut "No idea what to do with MARKET=$MARKET";; 
+esac
+
+# create env list for prd job
+if [[ -n $REALM || -n $COAST ]]
+then 
+    echo "Parsing prd environment options"
+    ENV_LIST=
+    COAST=$(echo "$COAST" | tr "A-Z" "a-z")
+    REALM=$(echo "$REALM" | tr "A-Z" "a-z")
+    SCOPE=$(echo "$SCOPE" | tr "A-Z" "a-z")
+
+    [[ -z $SCOPE ]] && BailOut "Need SETTING_SCOPE"
+    [[ -z $REALM ]] && BailOut "Need REALM"
+    [[ -z $COAST ]] && BailOut "Need COAST"
+    [[ -z $TICKET ]] && BailOut "Ticket number is required for $REALM settings"
+
+    case $REALM in
+        prd ) 
+            echo "$COAST" | grep -iq "east" && ENV_LIST="${MARKET}prdab $ENV_LIST"
+            echo "$COAST" | grep -iq "west" && ENV_LIST="${MARKET}prdrk ${MARKET}prdsac $ENV_LIST"
+            [[ -n $REALM ]] && Warning "SETTING_SCOPE is irrelevant for $REALM"
+        ;;
+
+        preprd ) 
+            echo "$COAST" | grep -iq "east" && ENV_LIST="${MARKET}preprdab $ENV_LIST"
+            echo "$COAST" | grep -iq "west" && ENV_LIST="${MARKET}preprdrk ${MARKET}preprdsac $ENV_LIST"
+        ;;
+
+        * ) 
+            BailOut "No idea what to do with '$REALM' realm"
+        ;;
+    esac
+fi
+
+# parameter validation
+[ -z "$ACTION" ] && ACTION="update"
+#[ "$ACTION" = "add" ] && ACTION="update"
+[ -z "$BRAND_LIST" ] && BailOut "Need brand(s)"
+[ -z "$ENV_LIST" ] && BailOut "Need environment(s)"
+[ -z "$SETTING" ] && BailOut "Need setting name"
+#[ -z "$VALUE" -a "$ACTION" != "delete" ] && BailOut "Need value for $SETTING"
+[ -z "$VALUE" -a "$ACTION" != "delete" ] && echo "Value for $SETTING is empty - hope that's OK"
+[ "$BRAND_LIST" = "all" ] && BRAND_LIST="mg,pb,pk,pt,we,ws"
+
+# I *think* they're supposed to be all upper-case
+SETTING=$(echo "$SETTING" | tr "a-z" "A-Z" | sed -e s/" "//g)
+
+# validate group.name format
+GROUP=$(echo "$SETTING" | awk -F\. '{ print $1 }')
+NAME=$(echo "$SETTING" | awk -F\. '{ print $2 }')
+WHAT=$(echo "$SETTING" | awk -F\. '{ print $3 }')
+[[ -z $NAME ]] && BailOut "Setting format is 'GROUP.NAME' - missing either group or name"
+[[ -n $WHAT ]] && BailOut "Setting format is 'GROUP.NAME' - there is an extra field '$WHAT'"
+
+# Only allow letters and '.' for setting name
+if [ "$ACTION" != "delete" ]
+then
+    [[ $SETTING =~ ^[A-Za-z_0-9\.]+$ ]] || BailOut "Setting \"$SETTING\" contains invalid characters"
+fi
+
+# I *think* this is always supposed to be lower-case
+DATATYPE=$(echo "$DATATYPE" | awk '{ print $1 }' | tr "A-Z" "a-z" | sed -e s/\"//g)
+
+# sanitize input values
+BRAND_LIST=$(echo "$BRAND_LIST" | sed -es/[,.-]/" "/g -es/\"//g | tr "A-Z" "a-z" | sed -e s/[{}]//g)
+for b in $BRAND_LIST
+do
+	echo "$b" | egrep -qiw "mg|pb|pk|pt|we|ws|admin" 
+	if [ $? -eq 0 ]
+	then
+		BRANDS="$BRANDS,$b"
+	else
+		echo "Unknow brand \"$b\" - ignoring"
+	fi
+done
+BRANDS=$(echo "$BRANDS" | sed -es/",$"//g -es/"^,"//g)
+[ -z "$BRANDS" ] && BailOut "No valid brands were specified"
+
+#
+
+ENV_LIST=$(echo "$ENV_LIST" | sed -es/[,.-]/" "/g -es/\"//g | tr "A-Z" "a-z" | sed -e s/[{}]//g)
+for e in $ENV_LIST
+do
+  pe=$e
+  [[ $pe = "qa" ]] && pe=qa1
+
+	# translations, because we're not consistent
+	#[ "$e" = "qa" ] && e="qa1"
+	[ "$e" = "qa1" ] && e="qa"
+	[ "$e" = "rgs1" ] && e="rgs1"
+	[ "$e" = "regression" ] && e="rgs1"
+	[ "$e" = "regression1" ] && e="rgs1"
+	[ "$e" = "int" ] && e="int1"
+	[ "$e" = "integration" ] && e="int1"
+	[ "$e" = "integration1" ] && e="int1"
+	[ "$e" = "integration2" ] && e="int2"
+
+  # perf environment snowflakes
+  echo "$ENVS" | egrep -iq perf && e="perf"
+
+    # ECM preview environment snowflakes
+	[[ "$e" = ecmqa ]] && e="ecmqa1"
+	[[ "$e" = ecmint ]] && e="ecmprvuat"
+
+    # validate that the environment string matches one of our patterns
+	echo "$e" | egrep -qEi "^qa|^int|^rgs|^uat|^stg|^dev|^perf|^ecmqa|^ecmprd|^ecmint|^ecmuat|^ecmprv|^ecmprev|^preprdab|^preprdrk|^prdab|^prdrk|^jukebox|^ca|^bpv|^staging" 
+	if [ $? -eq 0 ]
+	then
+		ENVS="$ENVS,$e"
+	else
+		echo "Unknown/disallowed env \"$e\" - ignoring"
+	fi
+done
+ENVS=$(echo "$ENVS" | sed -es/",$"//g -es/"^,"//g)
+[ -z "$ENVS" ] && BailOut "No valid environments were specified"
+
+# figure out which setting realm we're in - mixing prd and qa is not allowed
+echo "$ENVS" | egrep -qEi "qa|int|rgs|uat|stg|dev|perf|ecmqa|ecmprd|ecmint|ecmuat|ecmprv|ecmprev|ca1|ca-|bpv|ecm.*" && REALM_QA=true
+echo "$ENVS" | egrep -qEi "preprdab|preprdrk|prdab|prdrk" && REALM_PRD=true
+
+[ -n "$REALM_PROD" -a -n "$REALM_QA" ] && BailOut "Can't mix prd/qa realms"
+# sanity check goes here
+if [ -n "$REALM_PRD" ]
+then
+    REALM=prd
+else
+    REALM=qa
+    [ "$ACTION" = "add" ] && ACTION="update"
+fi
+
+#echo "REALM: $REALM"
+FRONTEND=application/frontend-2.1/$REALM/config/app/trunk
+
+# this is a reminder to write logic to pull "frontend.installation" from the pom so see what the _real_ DB key is
+#POM=$($WSI_SETTINGS --brand $BRAND --env $ENV get pom 2>/dev/null | grep -i 'path:' | awk -F: '{ print $2 }' )
+
+echo "--- $(basename $0) ---"
+
+# check out/update the repos
+checkOut
+
+# Can't have spaces in the setting name
+SETTING=$(echo "$SETTING" | sed 's/[[:space:]]//g')
+# check to see if it matches the standard setting name pattern
+[[ $SETTING =~ ^[A-Z].*\.[A-Z].*$ ]] || Warning "$SETTING' is probably not a valid setting name"
+
+# look at other entries to see what the type should be
+getType
+
+[ -z "$DATATYPE" -a "$ACTION" != "delete" ] && BailOut "Need datatype for setting '$SETTING'"
+
+# data validation
+if [ "$DATATYPE" = "a" ] 
+then
+	# remove spaces around commas
+	VALUE=$(echo "$VALUE" | sed -e 's/,[[:space:]]\+/,/g' -e 's/[[:space:]]\+,/,/g')
+fi
+
+# basic sanity checking for booleans sometimes people mix the case, add spaces, etc
+if [ "$DATATYPE" = "b" ] 
+then
+	VALUE=$(echo "$VALUE" | awk '{ print $1 }' | tr "A-Z" "a-z" )
+	echo "$VALUE" | egrep -iq "yes" && VALUE="true"
+	echo "$VALUE" | egrep -iq "true" && VALUE="true"
+	echo "$VALUE" | egrep -iq "no" && VALUE="false"
+	echo "$VALUE" | egrep -iq "false" && VALUE="false"
+	echo "$VALUE" | egrep -iq "true|false" || Warning "'$VALUE' is probably not a valid boolean value"
+fi
+
+if [ "$DATATYPE" = "l" -o "$DATATYPE" = "i" ] 
+then
+	VALUE=$(echo "$VALUE" | awk '{ print $1 }')
+	[[ $VALUE =~ ^[0-9] ]] || Warning "'$VALUE' is probably not a valid '$DATATYPE' value"
+fi
+
+if [ "$DATATYPE" = "t" ] 
+then
+    # remove alpha characters
+	VALUE=$(echo "$VALUE" | sed -es/[a-z]//gi)
+    # convert spaces to commas
+	VALUE=$(echo "$VALUE" | sed -e 's/[[:space:]]\+/,/g')
+	# remove spaces around commas
+	#VALUE=$(echo "$VALUE" | sed -e 's/,[[:space:]]\+/,/g' -e 's/[[:space:]]\+,/,/g')
+
+	[[ $VALUE =~ ^[0-9],[0-9],[0-9],[0-9]$ ]] || Warning "'$VALUE' is probably not a valid 'time' value"
+fi
+
+if [[ $DATATYPE = "h" ]]
+then
+    if echo "$VALUE" | egrep '\[|\]|\{|\}'
+    then
+        echo "Array of strings value will be re-formatted"
+        echo ">>> Before: $VALUE"
+        VALUE=$(echo "$VALUE" | sed -es/[{}]//g -es/\[.*,\]/\|/g -es/\]\|/\],/g -es/[[:space:]]//g -es/\\[//g -es/\\]//g)
+        echo ">>> After: $VALUE"
+    else
+        echo "Array of strings value appears to be formatted correctly"
+    fi
+fi
+
+# make the change
+if [[ $REALM = "prd" ]]
+then
+    # different logic for prd
+    LOG="/apps/$(basename $0)-prd.log"
+    echo "# ---- $(date +'%Y-%m-%d %H:%M') - $BUILD_USER_ID $SETTING $BRANDS $ENVS $TICKET $MARKET $COMMENTS ----" >> $LOG
+    echo "$ENVS $BRANDS $ACTION $SETTING $DATATYPE '$VALUE' " >> $LOG
+    settingUpdate
+else
+    echo "# ---- $(date +'%Y-%m-%d %H:%M') - $BUILD_USER_ID $SETTING $BRANDS $ENVS $TICKET $COMMENTS ----" >> $LOG
+    FUNCTION=wsi_settings
+
+    # reluctantly, I'm adding another sanity check here, to avoid uglier error messages from wsi_settings
+    # some schemas do not have overrides, so if we run into one, just bail out
+    for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+    do
+        if [[ $BRAND = "admin" ]]
+        then
+            echo "*** Admin - experimental ***"
+            echo "no-op"
+            continue
+        fi
+        for ENV in $(echo "$ENVS" | sed -e s/","/" "/g)
+        do
+            pe=$ENV
+            [[ $pe = "qa" ]] && pe=qa1
+
+            OVERRIDE=$($GETURLS $BRAND $pe | grep -i "override.properties" | awk '{ print $NF }')
+            [ -z "$OVERRIDE" ] && BailOut "Can't determine non-prd override for $BRAND $ENV"
+            [ -e "$OVERRIDE" ] || BailOut "Overrides file for $BRAND $ENV not found"
+        done
+    done
+
+    case $ACTION in 
+      add | update ) 
+		  # note: there is some sleight of hand going on here so as not to alarm the user
+		  DEL="$WSI_SETTINGS --env $ENVS --brand $BRANDS delete $SETTING" 
+		  CMD="$WSI_SETTINGS --env $ENVS --brand $BRANDS $ACTION $SETTING --type $DATATYPE '$VALUE' --force" 
+
+      # first, run as normal in order to show old and new values
+	    echo "$CMD" >> $LOG
+	    eval "$CMD"
+
+	    # then, actually delete the setting - this fixes improper datatypes.  Hide the output so the user doesn't see it and get confused
+	    eval "$DEL" >/dev/null 2>&1
+
+        # special perf env snowflake
+        # need to explicitly remove all prior "perf" entries - perf1/perf2/perf3/perf - otherwise we end up with duplicates
+        if echo "$ENVS" | egrep -iq "perf"
+        then
+            TMP="/tmp/override.properties.perf.dupe"
+            for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+            do
+                OVERRIDE=$($GETURLS $BRAND perf 2>/dev/null | grep -i "override.properties" | awk '{ print $1 }')
+                [ -z "$OVERRIDE" ] && continue
+                cat "$OVERRIDE" | egrep -iv "$SETTING.perf" > $TMP && cp $TMP $OVERRIDE
+            done
+        fi
+
+		# now run the command again to put the real value in place. Hide the output so the user doesn't see it and get confused
+	    eval "$CMD" >/dev/null 2>&1
+	    ret=$?
+	;;
+
+	delete ) 
+		DEL="$WSI_SETTINGS --env $ENVS --brand $BRANDS delete $SETTING" 
+		#echo "$DEL"
+		echo "$DEL" >> $LOG
+		eval "$DEL"
+
+        # this extra delete is for cases of a duplicate property
+		eval "$DEL" >/dev/null 2>&1
+        # yes, twice, because wsi_settings doesn't handle this correctly
+		eval "$DEL" >/dev/null 2>&1
+
+		ret=$?
+	;;
+	* ) BailOut "No idea what $ACTION is " ;;
+    esac
+fi
+
+if [[ $ret != 0 ]]
+then
+	echo "$CMD"
+	BailOut "$FUNCTION returned $ret"
+fi
+
+# ecm preview snowflake
+if echo "$ENVS" | egrep -iq "ecmint|ecmqa|ecmuat|ecmprd|ecmprev|ecmprv"
+then
+    for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+    do
+    	for ENV in $(echo "$ENVS" | sed -e s/","/" "/g)
+        do
+            echo "$ENV" | egrep -iq "ecmint|ecmqa|ecmuat|ecmprd|ecmprev|ecmprv" || continue
+            OVERRIDE=$($GETURLS $BRAND $ENV 2>/dev/null | grep -i "override.properties" | awk '{ print $1 }')
+            [ -z "$OVERRIDE" ] && continue
+            [ -e "$OVERRIDE" ] || BailOut "Override for $BRAND $ENV not found"
+            echo " >>> ECM Preview snowflake! $BRAND/$ENV "
+            case $ENV in
+                #ecmint ) ECM_ENV="ecmprvint";;
+                ecmint ) ECM_ENV="ecmprvuat";;
+                ecmuat ) ECM_ENV="ecmprvuat";;
+                #ecmqa1 ) ECM_ENV="ecmprev";;
+                ecmqa1 ) ECM_ENV="ecmqa1";;
+                ecmprd1 ) ECM_ENV="ecmprvprd";;
+                * ) echo "No translation for $ENV"
+            esac
+            sed -i s/"$SETTING\.$ENV\."/"$SETTING\.$ECM_ENV\."/gi $OVERRIDE
+            echo "Diff $BRAND $ENV"
+            svn diff $OVERRIDE | egrep "^-|^\+" 
+        done
+    done
+fi
+
+# perf was a special snowflake - change perf1/perf2/perf3 to "perf"
+if echo "$ENVS" | egrep -iq perf
+then
+    echo "Snowflake: $ENVS"
+    TMP="/tmp/override.properties.perf"
+    for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+    do
+    	#for ENV in $(echo "$ENVS" | sed -e s/","/" "/g)
+    	for ENV in perf1 perf2 perf3
+        do
+            echo "$ENV" | grep -iq perf || continue
+            OVERRIDE=$($GETURLS $BRAND $ENV | grep -i "override.properties" | awk '{ print $1 }')
+            [ -z "$OVERRIDE" ] && continue
+            #[ -z "$OVERRIDE" ] || BailOut "Unable to determine perf override for $BRAND $ENV"
+            #[ -e "$OVERRIDE" ] || BailOut "Override for $BRAND $ENV not found"
+            sed -i s/"$SETTING.$ENV"/"$SETTING.perf"/gi $OVERRIDE
+            uniq $OVERRIDE > $TMP && mv $TMP $OVERRIDE
+
+            #sort -u $OVERRIDE > $TMP && mv $TMP $OVERRIDE
+            #svn diff $OVERRIDE 2>/dev/null | egrep "^-|^\+"
+        done
+    
+        #echo "Looking for $BRAND perf duplicates: $(grep $SETTING.perf $OVERRIDE | wc -l)"
+    done
+fi
+
+# commit the changes
+MESSAGE="$ACTION $SETTING $COMMENTS "
+[ -n "$TICKET" ] && MESSAGE="[$TICKET] $MESSAGE"
+[ -z "$TICKET" ] && MESSAGE="[ADHOC] $MESSAGE"
+cd $WSGC/$PROPERTIES || BailOut "Couldn't cd to properties directory"
+MESSAGE="$MESSAGE ($BUILD_USER_ID)"
+DIFF=$(svn diff | egrep "^-|^\+" | egrep -iv "properties" | egrep -i "$SETTING")
+echo "$DIFF"
+svn -q up || BailOut "Could not svn up appsettings repo just before commit"
+svn commit -q -m "$MESSAGE" 
+if [ $? -ne 0 ] 
+then
+    echo "SVN commit problem $?" >> $LOG
+    BailOut "There was an issue with the SVN commit..."
+else
+    echo "SVN Commit successful"
+fi
+
+if [ "$REALM" = "prd" ]
+then
+    [ -z "$EMAIL" ] && EMAIL=$DEFAULT_EMAIL
+
+    EMAIL="$EMAIL,${BUILD_USER_ID}@wsgc.com"
+
+    # notify appropriate PDL
+    sendEmail
+
+    # for release scope, re-gen the confluence page
+    echo "$SCOPE" | egrep -iq "release" && eval /apps/mead-tools/appsetting-upload-prd -a Update_Confluence &
+
+    #adhocStats
+    exit 0
+fi
+
+if [ -e /apps/mead-tools/appsetting-upload ]
+then
+    [ -n "$TICKET" ] && JIRA="-t $TICKET"
+    for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+    do
+        [ "$BRAND" = "admin" ] && continue
+	    for ENV in $(echo "$ENVS" | sed -e s/","/" "/g)
+	    do
+            /apps/mead-tools/appsetting-upload -v -q -b $BRAND -e $ENV -s $SETTING -a $ACTION $JIRA
+        done
+    done
+fi
+
+#if [ "$IMMEDIATE" != "true" ] 
+#then
+#    [ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): 
+#*Brands:* _${BRANDS}_ 
+#*Environments:* _${ENVS}_ 
+#*Setting:* _${SETTING}_ 
+#*DataType:* _${DATATYPE}_ 
+#*Action:* _${ACTION}_ 
+#$BUILD_URL" 
+#
+#    #adhocStats
+#    exit 0
+#fi
+
+cd /tmp
+
+JOB_LIST=""
+for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+do
+	for ENV in $(echo "$ENVS" | sed -e s/","/" "/g)
+	do
+        # temporary hack 
+		    SCHEMA=$($GETSCHEMA $BRAND $ENV | awk -F: '{ print $1 }')
+        if [ -z "$SCHEMA" ]
+        then
+            echo "Can't get schema for $BRAND $ENV"
+            continue
+        fi
+        JOB_LIST="$JOB_LIST appsettings-$SCHEMA-$BRAND"
+    done
+done
+
+# run the appsetting jobs
+#for job in $(echo "$JOB_LIST" | xargs -n1 | sort -u | xargs)
+#do
+#		echo "Triggering appsettings job ( $JENKINS_URL/job/$job/ )"
+#		eval $JENKINS build -s $job #>/dev/null 2>&1
+#done
+
+SETTING_GROUP=$(echo "$SETTING" | awk -F\. '{ print $1 }')
+SETTING_NAME=$(echo "$SETTING" | awk -F\. '{ print $2 }')
+
+# trigger JMX refresh
+for BRAND in $(echo "$BRANDS" | sed -e s/","/" "/g)
+do
+	for ENV in $(echo "$ENVS" | sed -e s/","/" "/g)
+	do
+    SOURCE="*Source:*"
+
+		# figure out on which host we will trigger the jmx refresh
+		HOST=$($GETURLS $BRAND $ENV 2>/dev/null | grep -i "host:" | awk -F: '{ print $2 }' | awk '{ print $1 }')
+    [ -z "$HOST" ] && continue
+
+#		# test to see if JMX is listening
+#		nc -w 5 -v $HOST $JMX_PORT </dev/null >/dev/null 2>&1
+#		if [ $? -eq 0 ]
+#		then
+#			# trigger a bean refresh
+#			/bin/echo -ne "Triggering JMX refresh on $HOST:$JMX_PORT ... "
+#			eval java -jar $JMX_JAR - $HOST:$JMX_PORT com.wsgc.ecommerce.$BRAND:type=QuartzIntervalTrigger,name=refreshSettingsJob >/dev/null 2>&1
+#            sleep 5
+#			eval java -jar $JMX_JAR - $HOST:$JMX_PORT com.wsgc.ecommerce.$BRAND:type=QuartzIntervalTrigger,name=refreshSettingsJob runJob #>/dev/null 2>&1
+#			[ $? -eq 0 ] && { echo "Ok!"; sleep 5; } || echo "Failed :("
+#		else
+#			echo "JMX is not listening, skipping refresh"
+#		fi
+
+    [ "$BRAND" = "admin" ] && continue
+
+        # verification
+        /bin/echo -n "--- $(basename $0):validateDP: "
+
+        # set tmp files for json output
+        JSON_LGC=/tmp/$BRAND-$ENV-lgc.json
+        JSON_CFG=/tmp/$BRAND-$ENV-cfg.json
+        JSON_OVR=/tmp/$BRAND-$ENV-ovr.json
+        JSON_FF=/tmp/$BRAND-$ENV-ff.json
+
+        # use curl to grab the json
+        curl $TIMEOUT $USER_AGENT -q -s -k https://$HOST/admin/settings/settings.json > $JSON_LGC
+        curl $TIMEOUT $USER_AGENT -q -s -k https://$HOST/admin/configuration/basic-view.json > $JSON_CFG
+        curl $TIMEOUT $USER_AGENT -q -s -k https://$HOST/admin/configuration/override-view.json > $JSON_OVR
+        curl $TIMEOUT $USER_AGENT -q -s -k https://$HOST/admin/configuration/featureflags.json > $JSON_FF
+
+        # use cq to parse out the setting
+        JSON_RES=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group,name,value} | join(",")' $JSON_LGC | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3- | sed -z 's/\n/ /g')
+        [ -z "$JSON_RES" ] && JSON_RES="<null>"
+        echo "$JSON_RES"
+
+        # try to figure out the source of the setting by parsing the JSON
+        JSON_SRC_BSC=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group, name, source} | join (",")' $JSON_CFG | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3- | sed -z 's/\n/ /g')
+        [ -n "$JSON_SRC_BSC" ] && echo "Setting Source (basic-view): $JSON_SRC_BSC"
+
+        JSON_SRC_OVR=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group, name, source} | join (",")' $JSON_OVR | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3- | sed -z 's/\n/ /g')
+        [ -n "$JSON_SRC_OVR" ] && echo "Setting Source (override-view): $JSON_SRC_OVR"
+
+        JSON_SRC_FF=$(jq -r '.settingsJson[] | .name as $group | .settings[] | { $group, name, source} | join (",")' $JSON_FF | grep -i "$SETTING_GROUP,$SETTING_NAME" | cut -d, -f 3-)
+        [ -n "$JSON_SRC_FF" ] && echo "Setting Source (feature-flags): $JSON_SRC_OVR"
+
+        # just guessing as to which should take precedence
+        [ -n "$JSON_SRC_BSC" ] && SOURCE="*Source (override-view):* _${JSON_SRC_BSC}_"
+        [ -n "$JSON_SRC_OVR" ] && SOURCE="*Source (basic-view):* _${JSON_SRC_OVR}_"
+        [ -n "$JSON_SRC_FF" ] && SOURCE="*Source (feature-flags):* _${JSON_SRC_FF}_"
+        
+        # clean up json files
+        rm -f $JSON_LGC $JSON_CFG $JSON_OVR $JSON_FF
+
+        # print settings URLS
+		echo "Legacy Settings: https://$HOST/admin/settings/#$SETTING_GROUP"
+		echo "Configuration Settings: https://$HOST/admin/configuration/#$SETTING_GROUP"
+		echo "Override View: https://$HOST/admin/configuration/override-view.html#$SETTING_GROUP"
+
+        # this should really go before the verifyDP step, but would have to wait for DB to finish starting
+        if [ "$RESTART" = "true" ] 
+        then
+            echo "Restart frontend for $BRAND $ENV"
+		        eval $JENKINS build -s frontend-restart -p Brand=$BRAND -p Environment=$ENV -p Ticket=$TICKET #>/dev/null 2>&1
+        fi
+	done
+done
+
+[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_SUCC}$(basename $0): 
+*Brands:* _${BRANDS}_ 
+*Environments:* _${ENVS}_ 
+*Setting:* _${SETTING}_ 
+*DataType:* _${DATATYPE}_ 
+*Action:* _${ACTION}_ 
+$SOURCE
+$BUILD_URL" 
+
+echo "%%% Done %%%"
+
+#adhocStats
+rm -rf $WSGC
+
+exit 0
+

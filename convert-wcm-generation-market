@@ -1,0 +1,57 @@
+#!/bin/bash
+# this script converts a WCM generation from domestic to another market
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+TMP=/tmp/$(basename $0)
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  exit 255
+}
+
+[[ $(hostname) = "artrck-vdcn002" ]] || exit 1
+
+MARKET=can
+GEN=322060317
+
+[[ -z $GEN ]] && BailOut "Need generation"
+[[ -z $MARKET ]] && BailOut "Need market"
+
+DIR=$(gen2dir $GEN)
+[[ -z $DIR ]] && BailOut "Can't translate $GEN to a directory"
+
+rm -rf $TMP
+mkdir -p $TMP
+
+cd /apps/buildsystem/wcmbuilds/ || BailOut "Can't cd to /apps/buildsystem/wcmbuilds"
+
+dir=$(ls -1d */${DIR}*)
+[[ -z $dir ]] && BailOut "Can't find directory for $GEN"
+brand=${dir:0:2}
+siteid_old=$(brand2site $brand)
+siteid_new=$(brand2site $brand $MARKET)
+
+cp $dir/* $TMP
+cd $TMP
+
+#mkdir assortment
+#cp  assortment-wcm*zip assortment
+#cd assortment
+#unzip  assortment-wcm*zip
+
+cd $TMP
+mkdir -p catalogdata
+cp catalogdatagenctl-wcm*zip catalogdata
+cd catalogdata
+unzip catalogdatagenctl-wcm*zip
+
+sed -es/$siteid_old,/$siteid_new,/g -i *.dat
+zip -uq ../catalogdatagenctl-wcm*zip *.dat *.ctl
+cd ..
+#rm -rf catalogdata
+
+cd /apps/buildsystem/$MARKET/wcmbuilds/ || BailOut "Unable to cd to /apps/buildsystem/$MARKET/wcmbuilds/"
+sudo rm -rf $dir
+sudo mkdir -p $dir
+sudo cp $TMP/*.* $dir
+sudo chown -R imageuser:webadmin $dir
+

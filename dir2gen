@@ -1,0 +1,17 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/opt/homebrew/bin:~/bin
+# translates cat directory to generation number
+DIR=$(echo "$1" | awk -F\. '{ print $1 }')
+
+[ -z "$DIR" ] && exit 1
+
+M=${DIR##*-}
+S=${M:0:1}
+G="${M:(-2)}"
+GEN=$DIR
+GEN=${GEN#wcm-build-20}
+GEN=${GEN%-*}
+GEN="${S}${GEN}${G}"
+
+echo "$GEN"
+

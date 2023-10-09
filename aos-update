@@ -1,0 +1,136 @@
+#!/bin/bash
+# Thom Fitzpatrick
+exit 0
+PATH=/apps:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin:/opt/oracle/product/11.2.0/client_1/bin
+export PATH
+. /apps/buildsystem/bin/env.sh
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+JOB="aos-restart"
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <brand> <aos_env>"
+	exit 1
+}
+
+BRAND=$(echo "$1" | tr 'A-Z' "a-z")
+ENV=$2
+[ -n "$3" ] && TICKET="$3"
+
+[ -z "$ENV" ] && BailOut 
+
+dbHost=webqark2p
+dbPort=3800
+#dbUser=ws_app_owner
+dbUser=ws_user
+dbPass=simple8dev
+dbTable=WW_APPLICATION_SETTINGS
+dbSID=webqa2
+
+POM_URL=$FRONTEND/qa/config/app/trunk/$BRAND/$ENV/pom.xml
+P_POM="$(dirname $(dirname $POM_URL))/pom.xml"
+DOMAIN=$(svn cat $POM_URL 2>/dev/null|egrep -i "<frontend.domain>" | grep -iv '!--' | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+[ -z "$DOMAIN" ] && DOMAIN=$(svn cat $P_POM 2>/dev/null|egrep -i "<frontend.domain>" | grep -iv '!--' | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+DOMAIN=$(echo "$DOMAIN" | sed -es/\.com//g)
+
+case $BRAND in
+    mg) SETTING='MGURL' ;;
+    pb) SETTING='PBURL' ;;
+    pk) SETTING='PBKURL' ;;
+    pt) SETTING='PTURL' ;;
+    we) SETTING='WEURL' ;;
+    ws) SETTING='WSURL' ;;
+    *) BailOut "No idea what brand we're working with ($BRAND)" ;;
+esac
+
+case $ENV in
+    uat ) 
+        ENV="uat1"
+        CN="www."
+    ;;
+    int|int1 ) 
+        ENV="int1"
+        CN=
+    ;;
+    int2|integration2 )
+        ENV="integration2"
+        CN=
+    ;;
+    rgs1 )
+        ENV="regression"
+        CN=
+    ;;
+
+    perf* )
+        ENV="perf"
+        CN="www."
+    ;;
+
+    * )
+        CN="www."
+    ;;
+esac
+
+# new URL to use for AOS landing page
+URL="https://$CN$ENV.$DOMAIN"
+
+BRAND=$(echo "$BRAND" | tr 'a-z' "A-Z")
+
+# get current setting
+FETCH="
+set recsep off;
+SET NEWPAGE 0
+SET SPACE 0
+SET LINESIZE 400
+SET PAGESIZE 0
+SET ECHO OFF
+SET FEEDBACK OFF
+SET VERIFY OFF
+SET HEADING OFF
+SET MARKUP HTML OFF SPOOL OFF
+select SETTING_VALUE from WW_SETTING_VALUES where (site=605 and setting_group='AOS' and setting_NAME='BRAND_BASE_URLS');"
+CURRENT=$(echo "$FETCH" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))")
+echo "Current: $CURRENT"
+
+set -x
+echo "$CURRENT" | sed -es%"${BRAND}=.*\.com"%"${BRAND}=${URL}.com"%g
+set +x
+
+exit
+
+## update DB
+#UPDATE="update ws_app_owner.ww_application_settings set setting_value='$URL' where setting_name='$SETTING' and site=605 and setting_group='AOS';
+#commit;"
+#echo "$UPDATE"
+#echo "$UPDATE" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+QUERY="set recsep off;
+SET NEWPAGE 0
+SET SPACE 0
+SET LINESIZE 80
+SET PAGESIZE 0
+SET ECHO OFF
+SET FEEDBACK OFF
+SET VERIFY OFF
+SET HEADING OFF
+SET MARKUP HTML OFF SPOOL OFF 
+select setting_name,setting_value from ws_app_owner.ww_application_settings where setting_group='AOS' and setting_name like '%URL'
+    ;"
+
+#echo "Current AOS mappings:"
+#echo "$QUERY" | sqlplus -S ${dbUser}/${dbPass}@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${dbHost})(PORT=${dbPort}))(CONNECT_DATA=(SID=${dbSID})))" 
+
+## AOS service and app have to be re-started when you update the landing page
+#eval $JENKINS build -s $JOB -p Environment=qa -p Ticket=$TICKET
+#[ -n "$TICKET" ] && jira-comment "$TICKET" "${ICON_SUCC} AOS landing page for $BRAND set to $URL"
+
+exit 0
+

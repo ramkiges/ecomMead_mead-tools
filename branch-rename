@@ -1,0 +1,6 @@
+
+git branch -m master release
+git fetch origin
+git branch -u origin/release release
+git remote set-head origin -a
+

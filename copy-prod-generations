@@ -1,0 +1,35 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin
+TMP=/tmp/$(basename $0)
+DP_LOGIN="pkqaenv:Ca8tWh33l"
+TIMEOUT="--connect-timeout 10  --max-time 20"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "Copies production generations to a non-prod environment"
+  echo "Usage: $(basename $0) <brand> <enviro> [ticket]"
+  exit 255
+}
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+ENVIRO=$2
+TICKET=$3
+[[ -z $ENVIRO ]] && BailOut
+MARKET=$(getmarket $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+
+host=$(gethost $BRAND prd $MARKET)
+[[ -z $host ]] && BailOut "Can't find a prod host for $BRAND $MARKET"
+summary="https://${host}.wsgc.com/admin/summary.html"
+
+#for subsys in $(curl $TIMEOUT -fqsk --user $DP_LOGIN $summary | egrep "id=.*ECM|id=.*CAT|id=.*HOMEPAGE|id='MISC'|id='MSG'|id='TMPL'" | awk -F '[<>]' '{ print $5 }')
+for subsys in $(curl $TIMEOUT -fqsk --user $DP_LOGIN $summary | egrep "id=.*ECM|id=.*CAT|id=.*HOMEPAGE" | awk -F '[<>]' '{ print $5 }')
+do
+  gen=$(curl $TIMEOUT -fqsk --user $DP_LOGIN $summary | grep "id='$subsys'" | awk -F '[<>]' '{ print $9 }' | awk -F\. '{ print $1 }' | egrep -iv "NO_SELECTION")
+  [[ -z $gen ]] && continue
+  echo "$subsys:$gen"
+  jenkins-jnlp build -s set-ecm-generation -p Brand=$BRAND -p Destination_Environment=$ENVIRO -p SubSystem=$subsys -p Generation=$gen -p Ticket=$TICKET
+done
+
+#jenkins-jnlp build -s sync-mfe-generations -p APP_ENVIRONMENT=$ENVIRO
+
+exit 0

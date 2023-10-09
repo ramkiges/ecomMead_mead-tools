@@ -1,0 +1,227 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+SUBJECT="CheckGoldenPaths"
+JIRA_CSV=golden-path-tickets.csv
+HIST_CSV=golden-path-history.csv
+DATE=$(date +'%Y-%m-%d %H:%M')
+GPS_REPO=git@github.wsgc.com:eCommerce-Mead/golden-path-scan.git
+GPS=$(mktemp -p /tmp -d -t tmp.$(basename $0).XXX)
+TMP=$(mktemp -t tmp.$(basename $0).XXX)
+
+# curl params
+LOGIN="-u ptqaenv:ta8PoLe"
+TIMEOUT="--retry 3 --max-time 300 --connect-timeout 45 --retry-delay 15"
+#--retry-max-time 300
+HEADERS="\
+-H 'Cache-Control: no-cache' \
+-H 'pragma: no-cache' \
+-H 'accept-language: en-US,en;q=0.8' -H 'upgrade-insecure-requests: 1' \
+-H 'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8' \
+-H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.101 Safari/537.36' "
+
+# adding these in an attempt to eliminate the false-negatives
+export no_proxy=localhost,127.0.0.1
+export http_proxy=""
+
+BailOut() {
+    { set +x; } 2>/dev/null
+    [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+    Usage
+    exit 1
+}
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  [[ -e $TMP ]] && rm -rf $TMP $GPS
+}
+trap cleanUp EXIT
+
+commitCSV() {
+  unbuffer echo "$(basename $0): $FUNCNAME"
+  [[ -e $JIRA_CSV ]] || cd $GPS
+  git stash -q >/dev/null 2>&1
+  git pull -q --rebase >/dev/null 2>&1
+  git stash pop -q >/dev/null 2>&1
+  git add $JIRA_CSV $HIST_CSV >/dev/null 2>&1
+  git commit -q -m "$TICKET $BRAND $ENVIRO" >/dev/null 2>&1
+  git push -q -f #>/dev/null 2>&1
+}
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+ICON_PLUS=" (+) "
+ICON_MINUS=" (-) "
+ICON_QUEST=" (?) "
+
+BRAND=$(echo $1 | tr '[:upper:]' '[:lower:]')
+ENVIRO=$(echo $2 | tr '[:upper:]' '[:lower:]')
+TICKET=$(tr '[:lower:]' '[:upper:]' <<< $3)
+
+Usage() {
+    echo "Usage: $(basename $0) <brand> <env> [ticket|create]"
+    exit 1
+}
+
+find /tmp -name "tmp.$(basename $0)*" -mmin +90 -delete >/dev/null 2>&1 &
+
+[[ -z $ENVIRO ]] && BailOut
+
+HOST=$(get-host $BRAND $ENVIRO 2>/dev/null)
+[[ -z $HOST ]] && BailOut "No host for $BRAND $ENVIRO"
+
+# Get the FQDN from Akamai
+AKAMAI=$(get-akamai $BRAND $ENVIRO | awk -F/ '{ print $3 }')
+
+host $AKAMAI >/dev/null 2>&1 || BailOut "Can't resolve $AKAMAI"
+
+# Products per brand
+case $BRAND in
+    mg) P="gold-handle-raffia-tray" ;;
+    pb) P="seagrass-chair" ;;
+    pk) P="elephant-critter-nursery-rocker" ;;
+    pt) P="slim-pac-man-water-bottle" ;;
+    we) P="modo-wall-shelf-and-storage-b3749" ;;
+    ws) P="breville-variable-temp-luxe-kettle" ;;
+    rj) P="skyline-flatweave-rug" ;;
+    gr) P="daisy-striped-rug" ;;
+esac
+
+# Categories per brand
+case $BRAND in
+    mg) C="personalized-home-outdoor-decor/entertaining-personalized-trays" ;;
+    pb) C="furniture/dining-chairs" ;;
+    pk) C="toys-gifts" ;;
+    pt) C="backpacks-luggage/backpack-bundle-sets" ;;
+    we) C="wall-decor-mirrors" ;;
+    ws) C="electrics/electrics-teakettles" ;;
+    #ws) C="cookware/cookware-sets" ;;
+    rj) C="skyline-flatweave-rug" ;;
+    gr) C="shopsustainably/tables" ;;
+esac
+
+# seed the temp file with the script name and date
+echo "$(basename $0) $BRAND $ENVIRO results $(date +'%Y-%m-%d %H:%M')" > $TMP
+echo "" >> $TMP
+
+# heartbeat
+HEARTBEAT="https://$(get-host $BRAND $ENVIRO | awk -F\. '{ print $1 }').wsgc.com/heartbeat.html"
+curl -fsk -o /dev/null "$HEADERS" "$HEARTBEAT" -w "%{http_code} %{url_effective}\n"  >> $TMP
+
+# origin
+ORIGIN=$(get-origin $BRAND $ENVIRO)
+curl -fsk -o /dev/null $LOGIN "$HEADERS" "$ORIGIN" -w "%{http_code} %{url_effective}\n" | sort | tail -1 >> $TMP
+
+# ADG
+ADG_URL=$(get-adg-summary $BRAND $ENVIRO)
+curl -fsk -o /dev/null "$HEADERS" "$ADG_URL" -w "%{http_code} %{url_effective}\n"  >> $TMP
+
+# List of paths to check 
+# NOTE: 000 return codes are either slower uncached pages or unresponsive pages
+#set -x
+xargs -n 1 curl -fsk -o /dev/null $LOGIN $TIMEOUT "$HEADERS" -w "%{http_code} %{url_effective}\n" >> $TMP <<EOT
+https://$AKAMAI/?cm_type=gnav
+https://$AKAMAI/shoppingcart/?cm_type=gnav&cm_sp=HeaderLinks-_-Checkout-_-MainSite
+https://$AKAMAI/shop/$C/?cm_type=gnav
+https://$AKAMAI/products/$P/?cm_type=gnav
+https://$AKAMAI/search/results.html?words=brown
+https://$AKAMAI/account/login.html
+https://$AKAMAI/customer-service/order-shipment-tracking/?cm_type=fnav
+https://$AKAMAI/favorites/?cm_sp=HeaderLinks-_-Favorites-_-MainSite 
+EOT
+{ set +x; } 2>/dev/null
+
+git clone -q --depth 1 $GPS_REPO $GPS
+cd $GPS
+
+BROKEN=$(egrep "^5|^4" $TMP)
+if [[ -z $BROKEN && -e $JIRA_CSV ]]
+then
+  # this is a hack to fix git conflicts
+  # we're using github as a db because we can't get a mysql instance
+  cat $JIRA_CSV | egrep -iv "<<<<<|>>>>>|=====" > $JIRA_CSV.new
+  mv $JIRA_CSV.new $JIRA_CSV
+
+  # find any tickets for this environment
+  for t in $(grep -i "$BRAND,$ENVIRO," $JIRA_CSV | awk -F, '{ print $4 }' | sort -u)
+  do
+    echo "$DATE,$t,$BRAND,$ENVIRO,close," >> $HIST_CSV
+    echo "* $(basename $0): close $t https://jira.wsgc.com/browse/$t"
+    jira-label $t brfx:self-healing
+    jira-close -t $t -c " $ICON_SUCC $(basename $0) - problems appear to be resolved, closing" > /dev/null 2>&1
+    grep -iv "$t" $JIRA_CSV > $JIRA_CSV.new
+    mv $JIRA_CSV.new $JIRA_CSV
+  done
+  commitCSV
+fi
+
+if [[ $TICKET = "CREATE" ]]
+then 
+  egrep -iq "^5|^4" $TMP || exit 0
+
+  cat $TMP
+
+  egrep -i "^5|^4" $TMP > $TMP.new
+  mv $TMP.new $TMP
+
+  grep -iq "$BRAND,$ENVIRO," $JIRA_CSV && exit 0
+    
+  TICKET=$(jira-create -p mead -s "$SUBJECT: $BRAND $ENVIRO" -d "Golden Path issues found")
+  echo "* $(basename $0): open $TICKET https://jira.wsgc.com/browse/$TICKET"
+  echo "$DATE,$BRAND,$ENVIRO,$TICKET" >> $JIRA_CSV
+  cat $TMP | 
+  while read line
+  do
+    echo "$DATE,$TICKET,$BRAND,$ENVIRO,open,$line" >> $HIST_CSV
+  done
+  commitCSV
+
+  jira-comment "$TICKET" "$ICON_INFO $SUBJECT $BRAND $ENVIRO
+$(cat $TMP) "
+
+  # extract test URLs from the tmpfile
+  t1=$(head -1 $TMP | tail -1 | awk '{ print $NF }' | sed -es/=/%3D/g)
+  t2=$(head -2 $TMP | tail -1 | awk '{ print $NF }' | sed -es/=/%3D/g)
+  t3=$(head -3 $TMP | tail -1 | awk '{ print $NF }' | sed -es/=/%3D/g)
+  t4=$(head -4 $TMP | tail -1 | awk '{ print $NF }' | sed -es/=/%3D/g)
+  t5=$(head -5 $TMP | tail -1 | awk '{ print $NF }' | sed -es/=/%3D/g)
+  # hack logic to eliminate dupes
+  [[ $t5 = "$t4" ]] && t5=
+  [[ $t4 = "$t3" ]] && t4=
+  [[ $t3 = "$t2" ]] && t3=
+  [[ $t2 = "$t1" ]] && t2=
+
+  jenkins-jnlp build -s checkenv \
+    -p Brand=$BRAND \
+    -p Environment=$ENVIRO \
+    -p Ticket=$TICKET \
+    -p Options=Clear-Logs \
+    -p Options=Deploy-War \
+    -p Options=Deploy-MFE \
+    -p TestURL1=\"$t1\" \
+    -p TestURL2=\"$t2\" \
+    -p TestURL3=\"$t3\" \
+    -p TestURL4=\"$t4\" \
+    -p TestURL5=\"$t5\" \
+    -p RunBy=CheckGoldenPaths > /dev/null 2>&1 &
+  { set +x; } 2>/dev/null
+
+#    -p Options=Rebuild-Config \
+#    -p Options=Deploy-Content \
+
+  exit 0
+else
+  cat $TMP
+fi
+
+if [[ -n $TICKET ]]
+then
+  BROKEN=$(sed '/.*https/ s/./ * &/' <<< $BROKEN)
+  jira-comment "$TICKET" "$ICON_INFO $SUBJECT $BRAND $ENVIRO
+$(cat $TMP) "
+fi
+
+exit 0

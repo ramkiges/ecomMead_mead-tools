@@ -1,0 +1,23 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <brand> <env> <auth|pub> [ticket]"
+	echo
+	exit 1
+}
+
+BRAND=$1
+ENVIRO=$2
+MODE=$3
+TICKET=$(echo $4 |  tr '[:lower:]' '[:upper:]')
+
+[[ -z $MODE ]] && BailOut
+
+[[ $MODE =~ pub ]] && MODE=publish
+[[ $MODE =~ auth ]] && MODE=author
+[[ $ENVIRO = "qa" ]] && ENVIRO=qa1
+
+eval jenkins-jnlp build deploy-ecm-nonprod -p Brand=$BRAND -p Environment=$ENVIRO -p RunMode=$MODE -p Ticket=$TICKET
+

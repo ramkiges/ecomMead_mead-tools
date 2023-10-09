@@ -1,0 +1,190 @@
+#!/bin/sh
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:~/bin:/wsgc/bin
+
+BRAND=$1
+ENV=$2
+SRC=$3
+
+BailOut() {
+	[ -n "$1" ] && echo "$1" 
+	
+	echo "$(basename $0) <brand> <env> [source]"
+
+	exit 1
+}
+
+[ -z "$ENV" ] && BailOut
+
+GETURLS=$(which geturls 2>/dev/null)
+[ -z "$GETURLS" ] && BailOut "Can't find geturls"
+
+WSI_SETTINGS=$HOME/.wsi_settings
+[ -f "$WSI_SETTINGS" ] || BailOut "Can't find $HOME/.wsi_settings"
+
+WSI_SETTINGS_DIR=$(cat $HOME/.wsi_settings)
+[ -n "$WSI_SETTINGS_DIR" ] || BailOut "Why is $HOME/.wsi_settings empty?"
+
+POM=$(getpom $BRAND $ENV)
+[ -z "$POM" ] && BailOut "we have a blank pom file name"
+
+HOST=$($GETURLS $BRAND $ENV|grep -i "host:" | awk -F: '{ print $2 }' | awk '{ print $1 }')
+[ -z "$HOST" ] && HOST="@NODENAME@"
+[ -z "$HOST" ] && BailOut "we have a blank hostname "
+
+#SCHEMA=$(getschema $BRAND $ENV | awk -F: '{ print $1 }')
+#[ -z "$HOST" ] && BailOut "we have a blank schema "
+
+# this needs work
+if [ -z "$SRC" ] 
+then
+	SRC="qa"
+fi
+
+cd $WSI_SETTINGS_DIR || BailOut "Could not cd to $WSI_SETTINGS_DIR" 
+cd $(dirname $POM) || BailOut "Could not cd to pom directory $(dirname $POM)"
+pwd
+svn up || svn cleanup || BailOut "Can't update svn"
+
+#
+DEPLOYMENTS="https://repos.wsgc.com/svn/deployments/content/trunk/deploy/properties/${ENV}/${BRAND}$(getmarket $BRAND $ENV | tr '[:upper:]' '[:lower:]').properties"
+
+# get the domain
+DOMAIN=$(getdomain $BRAND $ENV)
+
+case $ENV in
+    uat ) 
+        ENV="uat1"
+        CN="www."
+    ;;
+    int|int1 ) 
+        ENV="integration"
+        CN=
+    ;;
+    int2|integration2 )
+        ENV="integration2"
+        CN=
+    ;;
+    rgs1 )
+        ENV="regression"
+        CN=
+    ;;
+
+    perf* )
+        ENV="perf"
+        CN="www."
+    ;;
+
+    * )
+        CN="www."
+    ;;
+esac
+
+WWW="$CN$ENV.\${frontend.domain}"
+#WWW="$CN\${frontend.installation}.\${frontend.domain}"
+
+echo "$BRAND:$ENV $HOST $POM"
+
+#REMOTE_IMGHOST="img-qa-rk1v.wsgc.com"
+#IMGHOST="img-qa-rk1v.wsgc.com"
+#IMGPROXY="img-qa-rk1v.wsgc.com"
+
+
+# basic settings for any environment
+#propset -f $POM -p frontend.environment			-v "$ENV"
+#propset -f $POM -p frontend.installation		-v "\${frontend.environment}"
+#propset -f $POM -p frontend.overrideScope 		-v "\${frontend.environment},default"
+
+propset -f $POM -p frontend.remoteContentArchiveUrlBases -v "http://${REMOTE_IMGHOST}:49190/tmpl/,http://${REMOTE_IMGHOST}:49190/tmpl2/,http://invadj-qa1-rk1v.wsgc.com/odis-display-season-artifacts/"
+
+[ "$BRAND" = "pt" ] && propset -f $POM -p frontend.crossdomainList -v '*.${frontend.domain},*.ptimgs.com,*.pbteen.com,.*potterybarnteen.com'
+
+#http://@NODENAME@/==https://@NODENAME@/,http://@NODENAME@.wsgc.com/==https://@NODENAME@.wsgc.com/,http://origin-www.qa10.${frontend.domain}/==https://origin-www.qa10.${frontend.domain}/
+#propset -f $POM -p frontend.urlMappings 		-v "http://$HOST/==https://$HOST/,http://$HOST.wsgc.com/==https://$HOST.wsgc.com/,http://$WWW/==https://$WWW/"
+#propset -f $POM -p frontend.urlMappings         -v "http://$HOST/==https://$HOST/,http://$HOST.wsgc.com/==https://$HOST.wsgc.com/,http://origin-www.\${frontend.installation}.\${frontend.domain}/==https://origin-www.\${frontend.installation}.\${frontend.domain}/,http://www.\${frontend.installation}.\${frontend.domain}/==https://www.\${frontend.installation}.\${frontend.domain}/"
+#propset -f $POM -p frontend.urlMappings         -v "http://$HOST/==https://$HOST/,http://$HOST.wsgc.com/==https://$HOST.wsgc.com/,http://origin-$CN$ENV.$DOMAIN/==https://origin-$CN$ENV.$DOMAIN/,http://$CN$ENV.$DOMAIN/==https://$CN$ENV.$DOMAIN/"
+
+propset -f $POM -p frontend.urlMappings         -v "http://@NODENAME@/==https://@NODENAME@/,http://@NODENAME@.wsgc.com/==https://@NODENAME@.wsgc.com/,http://origin-$CN$ENV.\${frontend.domain}/==https://origin-$CN$ENV.\${frontend.domain}/,http://$CN$ENV.\${frontend.domain}/==https://$CN$ENV.\${frontend.domain}/"
+
+svn diff | egrep "^-|^\+"
+
+# test for redirection
+#propset -f $POM -p frontend.urlMappings         -v "http://origin-$CN$ENV.\${frontend.domain}/==https://origin-$CN$ENV.\${frontend.domain}/,http://@NODENAME@.wsgc.com/==https://@NODENAME@.wsgc.com/,http://@NODENAME@/==https://@NODENAME@/"
+
+propset -f $POM -p frontend.appBase			-v "https://$WWW/"
+propset -f $POM -p frontend.secureAppBase	-v "https://$WWW/"
+
+case $SRC in 
+	prod | prd ) 
+        echo "Mimic Prod"
+        IMGHOST="imgproc-prd-rk1v.wsgc.com"
+        
+		propset -f $POM -p frontend.scriptSubPath 		-v "${BRAND}imgs/qark/images/"
+
+		propset -f $POM -p frontend.docImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/"
+		propset -f $POM -p frontend.secureDocImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/"
+
+		propset -f $POM -p frontend.remoteProxyImageBase 	-v "https://${IMGPROXY}/${BRAND}imgs/qark/images/"
+		propset -f $POM -p frontend.secureRemoteProxyImageBase 	-v "https://${IMGPROXY}/${BRAND}imgs/qark/images/"
+
+		propset -f $POM -p frontend.catImageBase 		-v "https://${IMGHOST}/pubimagesuat/${BRAND}/images/"
+		propset -f $POM -p frontend.secureCatImageBase 		-v "https://${IMGHOST}/pubimagesuat/${BRAND}/images/"
+	;;
+
+    uat* )
+        echo "Mimic UAT"
+        IMGHOST="img-qa1-rk1v.wsgc.com"
+
+		propset -f $POM -p frontend.scriptSubPath 		-v "${BRAND}imgs/qark/images/"
+
+		propset -f $POM -p frontend.remoteProxyImageBase 	-v "https://${IMGPROXY}/${BRAND}imgs/qark/images/"
+		propset -f $POM -p frontend.secureRemoteProxyImageBase 	-v "https://${IMGPROXY}/${BRAND}imgs/qark/images/"
+
+	    propset -f $POM -p frontend.docImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/"
+	    propset -f $POM -p frontend.secureDocImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/"
+
+        propset -f $POM -p frontend.contentImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/dp/"
+        propset -f $POM -p frontend.secureContentImageBase 	-v "https://$WWW/${BRAND}imgs/qark/images/dp/"
+
+        if [ "$BRAND" = "we" ]
+        then
+		    propset -f $POM -p frontend.catImageBase                -v "https://$WWW/${BRAND}imgs/qark/images/wcm/"
+		    propset -f $POM -p frontend.secureCatImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/wcm/"
+        else
+		    propset -f $POM -p frontend.catImageBase                -v "https://$WWW/${BRAND}imgs/qark/images/dp/"
+		    propset -f $POM -p frontend.secureCatImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/dp/"
+        fi
+    ;;      
+	
+	* )
+        echo "Mimic QA/anything else"
+        IMGHOST="img-qa1-rk1v.wsgc.com"
+
+		propset -f $POM -p frontend.scriptSubPath 		-v "${BRAND}imgs/qark/images/uat1/"
+
+        propset -f $POM -p frontend.remoteProxyImageBase    -v "https://${IMGPROXY}/${BRAND}imgs/qark/images/uat1/"
+        propset -f $POM -p frontend.secureRemoteProxyImageBase -v "https://${IMGPROXY}/${BRAND}imgs/qark/images/uat1/"
+
+		propset -f $POM -p frontend.docImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/uat1/"
+		propset -f $POM -p frontend.secureDocImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/uat1/"
+
+        propset -f $POM -p frontend.contentImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/dp/"
+        propset -f $POM -p frontend.secureContentImageBase 	-v "https://$WWW/${BRAND}imgs/qark/images/dp/"
+
+        if [ "$BRAND" = "we" ]
+        then
+            #propset -f $POM -p frontend.catImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/wcm/"
+            #propset -f $POM -p frontend.secureCatImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/wcm/"
+            propset -f $POM -p frontend.catImageBase 		-v "https://imgproc-prd-rk1v.wsgc.com/pubimagesuat/${BRAND}/images/"
+            propset -f $POM -p frontend.secureCatImageBase 		-v "https://imgproc-prd-rk1v.wsgc.com/pubimagesuat/${BRAND}/images/"
+        else
+            #propset -f $POM -p frontend.catImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/dp/"
+            #propset -f $POM -p frontend.secureCatImageBase 		-v "https://$WWW/${BRAND}imgs/qark/images/dp/"
+            propset -f $POM -p frontend.catImageBase 		-v "https://imgproc-prd-rk1v.wsgc.com/pubimagesuat/${BRAND}/images/"
+            propset -f $POM -p frontend.secureCatImageBase 		-v "https://imgproc-prd-rk1v.wsgc.com/pubimagesuat/${BRAND}/images/"
+        fi
+
+	;;
+esac
+
+svn diff | egrep "^-|^\+"
+
