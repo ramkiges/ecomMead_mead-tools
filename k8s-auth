@@ -1,0 +1,28 @@
+#!/bin/bash
+# https://confluence.wsgc.com/display/TDSI/Enrolling+user+account+for+access+to+the+platform
+#curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/darwin/amd64/kubectl"
+
+if [[ $1 =~ clea ]]
+then
+  mv ~/.kube/config ~/.kube/config.old
+  cat ~/.kube/config.old | egrep -vi "access-token:|refresh-token:" > ~/.kube/config
+fi
+
+export USERNAME=$LOGNAME
+export CONTROL_PLANE_ENDPOINT_IP="container-api02.nonprod.wsgc.com"
+export CLUSTER_NAME="ts-sharedplatform-rck-nonprod"
+#kubectl config set-credentials $USERNAME@wsgc.com \
+#    --auth-provider=azure \
+#    --auth-provider-arg=environment=AzurePublicCloud \
+#    --auth-provider-arg=client-id=9d0cf4db-edb3-49ae-9461-418c0bf5fc1d \
+#    --auth-provider-arg=tenant-id=a1bc65b9-d590-4816-bc3f-257fce558750 \
+#    --auth-provider-arg=apiserver-id=a796ae56-3118-48d8-8e19-17ace0d14f29
+kubectl config set-cluster $CLUSTER_NAME \
+    --server=https://$CONTROL_PLANE_ENDPOINT_IP:6443 \
+    --insecure-skip-tls-verify=true
+kubectl config set-context "$CLUSTER_NAME"_"$USERNAME"@wsgc.com \
+    --cluster=$CLUSTER_NAME \
+    --user=$USERNAME@wsgc.com
+kubectl config use-context "$CLUSTER_NAME"_"$USERNAME"@wsgc.com
+
+kubectl api-resources

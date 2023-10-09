@@ -1,0 +1,28 @@
+#!/bin/bash
+PATH=/opt/homebrew.bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:$HOME/bin
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+NS="pom=http://maven.apache.org/POM/4.0.0"
+
+BailOut() {
+	[ -n "$1" ] && echo "$(basename $0): $*" >&2
+  echo "Usage: $(basename $0) <brand> [env]" >&2
+  exit 1
+}
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $2)
+[[ -z $BRAND ]] && BailOut 
+
+if [[ -n $ENVIRO ]] 
+then
+  POM=$FRONTEND/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+  P_POM="$(dirname $(dirname $POM))/pom.xml"
+else
+  POM=$FRONTEND/qa/config/app/trunk/$BRAND/pom.xml
+fi
+
+DOMAIN=$(svn --non-interactive cat $POM 2>/dev/null | xmlstarlet sel -N $NS -t -v /pom:project/pom:properties/pom:frontend.domain 2>/dev/null | tr -d "[:space:]" | egrep -vi "^$")
+[[ -z $DOMAIN ]] && DOMAIN=$(svn --non-interactive cat $P_POM 2>/dev/null | xmlstarlet sel -N $NS -t -v /pom:project/pom:properties/pom:frontend.domain 2>/dev/null | tr -d "[:space:]" | egrep -vi "^$")
+[[ -n $DOMAIN ]] && echo "$DOMAIN"
+
+exit 0

@@ -1,0 +1,53 @@
+#!/bin/bash
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+LOGDIR=/var/log/weblogs
+FILE_LIST="application.log catalina.out promo.log syncStatus.log promouse.log manager.*.log host-manager.*.log localhost.*.log catalina.*.log jobs.log security.log buildsystem.log auth-search.log  auth-cq-error.log auth-access.log auth-request.log history.log *ssl_request*log *ssl_error*log access_log error_log *-access.log *-error.log loyalty-*.log contentprocessor.out* stdout.log error.log stderr.log "
+DATE=$(date +'%Y-%m-%d_%H%M')
+DAYS=3
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$*" 
+    exit 1
+}
+
+cd $LOGDIR || BailOut "Can't cd to $LOGDIR"
+
+APPLIST="$*"
+[ -z "$APPLIST" ] && APPLIST=$(find . -maxdepth 1 -type d 2>/dev/null | egrep -iv "lost\+found|^\.$|verify-config-pkg" )
+
+#[ -f /etc/logrotate.d/catalogdata ] && sudo logrotate -f /etc/logrotate.d/catalogdata &
+
+sudo chmod 755 $LOGDIR
+
+for dir in $APPLIST
+do
+    cd $LOGDIR || BailOut "Can't cd to $LOGDIR"
+    dir=$(basename $dir)
+    [ -d "$dir" ] || continue
+    sudo chmod 755 $dir
+    ls -ld $dir
+    cd $dir 2>/dev/null || continue
+
+    echo "dir: $dir"
+    SERVICE=$(chkconfig --list 2>/dev/null | grep -i "$dir" | awk '{ print $1 }')
+    [ "$dir" = "httpd" ] && SERVICE=httpd
+    [ -n "$SERVICE" ] && sudo /sbin/service $SERVICE stop
+
+    for file in $FILE_LIST
+    do
+        #echo "> $file"
+        find . -type f -name "$file*" -mtime +$DAYS -exec sudo rm -f {} \; 
+        [ -f "$file" ] || continue
+        #ls -lh "$file"
+        owner=$(ls -l "$file" | awk '{ print $3 }')
+        group=$(ls -l "$file" | awk '{ print $4 }')
+        sudo mv "$file" "$file.$DATE"
+        sudo touch "$file"
+        sudo chown $owner:$group "$file"
+        sudo chmod 664 "$file"
+    done
+
+    [ -n "$SERVICE" ] && { sleep 15; sudo /sbin/service $SERVICE start; }
+done
+

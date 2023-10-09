@@ -1,0 +1,29 @@
+#!/bin/bash
+# returns the env (eg 'installation' or 'scope') used in the DB
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+
+BailOut() {
+  [ -n "$1" ] && echo "$(basename $0): $*" >&2
+  exit 1
+}
+
+OG_ENV=$1
+[[ -z $OG_ENV ]] && BailOut "Need enviroment"
+
+# translate to the DB env
+case $OG_ENV in
+  cadev   )     DB_ENV="cadev1" ;;
+  uat   )       DB_ENV="uat1" ;;
+  int   )       DB_ENV="integration" ;;
+  int2  )       DB_ENV="integration2" ;;
+  rgs1  )       DB_ENV="regression" ;;
+  rgs   )       DB_ENV="regression" ;;
+  rgs2  )       DB_ENV="rgs2" ;;
+  regression )  DB_ENV="regression" ;;
+  regression2 ) DB_ENV="rgs2" ;;
+  * )           DB_ENV=$OG_ENV ;;
+esac
+
+echo $DB_ENV
+
+exit 0

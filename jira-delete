@@ -1,0 +1,50 @@
+#!/bin/bash
+# adds comments to a Jira ticket
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/apps/java/bin:~/bin
+export PATH
+
+# Jira ticket defaults
+TYPE="Task"
+PROJECT="MEAD"
+
+# misc variables
+TIMEOUT="--connect-timeout 30 --max-time 60"
+umask 000
+
+BailOut() {
+	[ -n "$1" ] && echo "$(basename $0)/${LOGNAME}@$(hostname --short): $*" >&2
+	echo "Usage: $(basename $0) -t <ticket> " >&2
+	exit 1
+}
+
+# validate Jira creds
+[[ -e $HOME/.jira ]] && JIRA_CRED=$HOME/.jira
+[[ -e $HOME/.credentials.d/jira-cli-user ]] && JIRA_CRED=$HOME/.credentials.d/jira-cli-user
+[[ -z "$JIRA_CRED" ]] && BailOut "Jira cred file variable undefined (JIRA_CRED)"
+[[ -f "$JIRA_CRED" ]] || BailOut "Can't find Jira cred file ($JIRA_CRED)"
+source $JIRA_CRED
+[[ -z $JIRA_USER ]] && JIRA_USER=$USERNAME
+[[ -z $JIRA_PASS ]] && JIRA_PASS=$PASSWORD
+[[ -z "$JIRA_USER" ]] && BailOut "Can't parse Jira user from $JIRA_CRED"
+[[ -z "$JIRA_PASS" ]] && BailOut "Can't parse Jira pass from $JIRA_CRED"
+
+## argument assignment
+while getopts "ht:" opt 
+do
+    case ${opt} in
+        h) BailOut ;;            
+        t) TICKET=$OPTARG ;;
+    esac
+done
+
+[ -z "$TICKET" ] && BailOut "Need ticket"
+JIRA_URL="https://jira.wsgc.com/rest/api/2/issue/$TICKET"
+
+JQ=$(which jq)
+[ -z "$JQ" ] && echo "You will probably want to install jq" >&2
+
+curl $TIMEOUT -sk -u $JIRA_USER:$JIRA_PASS --url $JIRA_URL --request DELETE
+
+ret=$?
+
+exit $ret

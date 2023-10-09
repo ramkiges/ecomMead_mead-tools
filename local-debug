@@ -1,0 +1,173 @@
+#!/bin/bash
+# sets jmx bean values
+PATH=/apps:/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin:/apps/jdk8/bin:/apps/java/bin:/apps:$PATH
+export PATH
+
+clear-logs
+
+DEFAULT_LEVEL="makeLevelDebug"
+JMX_PORT="39667"
+DATE=$(date +'%Y-%m-%d')
+COMMENT="# Enhanced debug levels - $(basename $0) - $DATE"
+
+DEFAULT_LIST=" \
+com.wsgc.ecommerce.mvc.dispatcher \
+com.wsgc.ecommerce.banner.service \
+com.wsgc.ecommerce.ui.interceptors.ApplicationDeliveryInterceptor.java \
+com.wsgc.ecommerce.ordermanagement.service.pricing.impl \
+com.wsgc.ecommerce.ui.interceptors \
+com.wsgc.ecommerce.profile.mashery \
+com.wsgc.biggreenbutton \
+com.wsgc.ecommerce.ui.interceptors \
+com.wsgc.ecommerce.profile.mashery \
+com.wsgc.ecommerce.artifact \
+com.wsgc.ecommerce.freemarker.service \
+com.wsgc.ecommerce.avs \
+com.wsgc.ecommerce.cart \
+com.wsgc.ecommerce.mg \
+com.wsgc.ecommerce.pb \
+com.wsgc.ecommerce.pk \
+com.wsgc.ecommerce.pt \
+com.wsgc.ecommerce.we \
+com.wsgc.ecommerce.ws \
+com.wsgc.ecommerce.mvc \
+com.wsgc.ecommerce.checkout \
+com.wsgc.ecommerce.payment \
+com.wsgc.ecommerce.ec \
+com.wsgc.ecommerce.loyalty \
+com.wsgc.ecommerce.registryclient \
+com.wsgc.ecommerce.customerservice \
+com.wsgc.ecommerce.wishlist \
+com.wsgc.ecommerce.jms \
+com.wsgc.payment.client \
+com.wsgc.loyalty.client \
+com.wsgc.ecommerce.loyalty \
+com.wsgc.ecommerce.promotion \
+com.wsgc.ecommerce.admin \
+com.wsgc.ecommerce.targeting \
+com.wsgc.ecommerce.eventnotification.impl \
+com.wsgc.inventory.reservation.service \
+com.wsgc.inventory.service.consumer \
+com.wsgc.ecommerce.favorites \
+"
+#com.wsgc.ecommerce.ui.controllers \
+
+# auto-add these beans because we probably don't care about them:
+IGNORE_LIST="\
+com.wsgc.ecommerce.catalogdata.assortment.impl.UnknownObjectDeserializer \
+com.wsgc.ecommerce.promotion.service.StandardPromotionConfigService \
+com.wsgc.ecommerce.mg.controllers.PromoController \
+com.wsgc.ecommerce.pb.controllers.PromoController \
+com.wsgc.ecommerce.pk.controllers.PromoController \
+com.wsgc.ecommerce.pt.controllers.PromoController \
+com.wsgc.ecommerce.we.controllers.PromoController \
+com.wsgc.ecommerce.ws.controllers.PromoController \
+com.wsgc.ecommerce.shop.navigation.activity.StandardGlobalNavigationActivity \
+com.wsgc.ecommerce.product.caching.PipDataFactory \
+com.wsgc.ecommerce.customerservice.dao.StandardReviewsDAO \
+com.wsgc.ecommerce.scheduling \
+com.wsgc.inventory.service.impl.InventoryStateEntryRowMapper \
+com.wsgc.ecommerce.flags \
+com.wsgc.ecommerce.configuration \
+com.wsgc.ecommerce.caching \
+com.wsgc.ecommerce.mvc \
+com.wsgc.ecommerce.banner \
+com.wsgc.ecommerce.geolocation \
+com.wsgc.ecommerce.scheduling \
+com.wsgc.ecommerce.utilities \
+com.wsgc.ecommerce.content \
+com.wsgc.ecommerce.endeca \
+com.wsgc.ecommerce.session \
+com.wsgc.ecommerce.common \
+com.wsgc.ecommerce.catalogdata \
+com.wsgc.ecommerce.productcatalog \
+com.wsgc.ecommerce.http \
+com.wsgc.ecommerce.address \
+com.wsgc.ecommerce.ui \
+com.wsgc.ecommerce.security \
+com.wsgc.ecommerce.shop.category.activity \
+com.wsgc.ecommerce.bloomreach \
+com.wsgc.ecommerce.bloomreach.service.impl
+com.wsgc.ecommerce.specification \
+com.wsgc.ecommerce.freemarker \
+com.wsgc.ecommerce.context \
+com.wsgc.ecommerce.geolocation \
+com.wsgc.ecommerce.context.cookies \
+com.wsgc.ecommerce.ordermanagement.service.impl \
+com.wsgc.ecommerce.context.cookies.manager.DummyCookieManager \
+"
+
+if [ "$1" = "clear" ] 
+then
+	LOG_LEVEL="clear" 
+  shift
+else
+	LOG_LEVEL="DEBUG"
+fi
+
+# add in any extra beans from the command line
+if [[ -n $1 ]]
+then
+  IGNORE_LIST=
+  DEFAULT_LIST=
+  for x in $*
+  do
+    DEFAULT_LIST="$x $DEFAULT_LIST"
+  done
+fi
+
+# set the log4j level directly on a server
+for propfile in $(find /apps -name log4j.properties 2>/dev/null)
+do
+  APPNAME=$(echo $propfile | awk -F/ '{ print $3 }')
+  LOGDIR=$APPNAME
+  [[ $APPNAME = "tomcat" ]] && LOGDIR=wsgc-tomcat-frontend
+  sudo ln -sf $propfile /var/log/weblogs/$LOGDIR/log4j.properties 
+
+	echo "Set log level in $propfile to $LOG_LEVEL for $APPNAME"
+	if [ "$LOG_LEVEL" = "clear" ]
+	then
+		[ -f $propfile.$DATE ] && sudo -u tomcat cp $propfile.$DATE $propfile 
+		continue
+	else
+		[ -f $propfile.$DATE ] || sudo -u tomcat cp $propfile $propfile.$DATE 
+	fi
+
+	sudo -u tomcat chmod 666 $propfile
+	sudo -u tomcat chown tomcat:webadmin $propfile.* 
+
+	grep -q "$COMMENT" $propfile || echo "$COMMENT" >> $propfile
+  echo "# DEFAULT_LIST " >> $propfile
+  for bean in $DEFAULT_LIST
+  do		
+	  grep -qi "log4j.category.$bean=$LOG_LEVEL,stdout" $propfile || echo "log4j.category.$bean=$LOG_LEVEL,stdout" >> $propfile
+  done
+
+  echo "# IGNORE_LIST" >> $propfile
+  for bean in $IGNORE_LIST
+  do		
+	  grep -qi "log4j.category.$bean=INFO,stdout" $propfile || echo "log4j.category.$bean=INFO,stdout" >> $propfile
+  done
+
+	#grep -q "log4j.category.com.wsgc=$LOG_LEVEL,stdout" $propfile || echo "log4j.category.com.wsgc=$LOG_LEVEL,stdout" >> $propfile
+	#grep -q "log4j.category.com.wsgc.ecommerce=$LOG_LEVEL,stdout" $propfile || echo "log4j.category.com.wsgc.ecommerce=$LOG_LEVEL,stdout" >> $propfile
+
+	#grep -q "log4j.category.com.wsgc.ecommerce.context.cookies=DEBUG,stdout" $propfile || echo "log4j.category.com.wsgc.ecommerce.context.cookies=DEBUG,stdout" >> $propfile
+#   com.wsgc.ecommerce.eventnotification.impl
+#com.wsgc.inventory.reservation.service
+#com.wsgc.inventory.service.consumer
+done
+
+SERVICE_LIST=$(chkconfig --list|grep -i tomcat | awk '{ print $1 }')
+if [ -z "$SERVICE_LIST" ]
+then
+	echo "Can't find services to restart"
+	exit 0	
+fi
+
+for service in $SERVICE_LIST
+do
+	echo "Re-start $service"
+	sudo service $service restart
+done
+

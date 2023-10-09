@@ -1,0 +1,95 @@
+#!/bin/bash
+# calls the jenkins python script to do various jenkins-ey stuff.
+# the official jenkins CLI broken when we upgraded, so this is a workaround
+PATH=/apps/mead-tools:/apps/jdk8/bin:/apps/java/bin:/apps/jdk7/bin:/apps/python3/bin:/apps/scm-tools:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps:$HOME/wsgc/svn/scm-tools 
+export PATH
+export SSHOPTS="-q -o StrictHostKeyChecking=no -o ServerAliveInterval=60"
+
+RUNNING_URL='https://ecombuild.wsgc.com/jenkins/computer/api/json?tree=computer[executors[currentExecutable[url]],oneOffExecutors[currentExecutable[url]]]&xpath=//url&wrapper=builds'
+
+# if we're not on a linux box, ssh to jenkins master and run
+[[ $(uname) = Linux ]] || { ssh $SSHOPTS ecombuild "/apps/mead-tools/$(basename $0) $*" </dev/null; exit $?; }
+
+# some jobs have parameters but we just take the defaults
+# the problem is runJenkinsJob will fail if said parameters are not passed
+# this is a list of jobs for which we need to dummy-up parameters
+BWP="deploy.*war|deploy.*content|appsettings-"
+
+# the underlying runJenkinsJob looks for 'jenkins' in ~/.credentials
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0)/$(hostname): $*"
+	echo "$(basename $0) - runs a jenkins job using the JNLP connection protocol"
+	echo "Usage: $(basename $0) <job>"
+  echo "debug: $(hostname) $0"
+	echo
+	exit 1
+}
+
+#[[ $(uname) = "Darwin" ]] && { ssh $SSHOPTS ecombuild "jenkins-jnlp $*"; exit $?; }
+
+RUNJENKINSJOB=$(which runJenkinsJob 2>/dev/null)
+[[ -z $RUNJENKINSJOB ]] && BailOut "Can't find runJenkinsJob
+PATH=$PATH"
+
+# this is dumb, but sometimes we get 'no route to host' unless we do this first
+#host $JENKINS_HOST >/dev/null 2>&1
+#ping -c 5 $JENKINS_HOST >/dev/null 2>&1
+
+echo "$*" | egrep -iq -- "-f |-v " && FOLLOW="--console"
+echo "$*" | egrep -iq -- "-s " && FOLLOW="--wait"
+
+if echo "$*" | egrep -iq "running" 
+then
+  curl -fsqk -g $RUNNING_URL | jq . | grep "url" | awk '{ print $NF }' | sed -es/\"//g
+  exit 0
+fi
+
+if echo "$*" | egrep -iq "list-jobs" 
+then
+    cd /apps/scm-tools
+    eval ./listJenkinsJobs 
+    exit $?
+fi
+
+if [[ $1 =~ delete ]]
+then
+    shift
+    cd /apps/scm-tools
+    eval ./deleteJenkinsJobs --force --verbose "$@"
+    exit $?
+fi
+
+if [[ "$1" =~ create ]]
+then
+    shift
+    cd /apps/scm-tools
+    eval ./uploadJenkinsJobs "$@"
+    exit $?
+fi
+
+for a in $*
+do
+    # remove the old '-p' arguments
+    [ "$a" = "-f" ] && continue
+    [ "$a" = "-v" ] && continue
+    [ "$a" = "-s" ] && continue
+    [ "$a" = "-p" ] && continue
+    [ "$a" = "build" ] && continue
+    CMD="$CMD $a"
+done
+
+# this nonsense is to get past the null argument error
+echo "$CMD" | egrep -iq "$BWP" && CMD="$CMD foo=bar"
+
+# experimental because it wasn't working correctly on my laptop
+#cd $(dirname $RUNJENKINSJOB)
+#eval ./$(basename $RUNJENKINSJOB) "$CMD"
+
+# it appears there is some sort of rate-limiting happening so we'll do a random delay
+sleep $(shuf -i1-15 -n1 2>/dev/null)
+
+#eval stdbuf -i0 -o0 -e0 $RUNJENKINSJOB "$FOLLOW $CMD"
+eval $RUNJENKINSJOB "$FOLLOW $CMD"
+
+exit $?

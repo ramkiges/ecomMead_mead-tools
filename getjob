@@ -1,0 +1,71 @@
+#!/bin/bash
+# For this to work, you will need to upload your public key to https://ecombuild.wsgc.com/jenkins/me/configure
+
+OPTS="-noCertificateCheck "
+JENKINS="https://ecombuild.wsgc.com"
+WSGC_JENKINS_URL="https://ecombuild.wsgc.com/jenkins"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+	echo "Copies a jenkins job xml from the jenkins server to your local machine; default [destination] is /tmp"
+	echo "Usage: $(basename $0) <job_name> [destination]"
+  exit 1
+}
+
+CLI_URL=$JENKINS/jenkins/jnlpJars/jenkins-cli.jar
+CLI_JAR=$HOME/bin/$(basename $CLI_URL)
+JOB=$(basename $1 2>/dev/null | sed -es/\.xml//g)
+DST=$2
+[ -z "$DST" ] && DST=/tmp
+
+# get creds
+AUTH_USER="svcaecjnk"
+AUTH_FILE=~/.credentials.d/jenkins-$AUTH_USER-user
+[ -e $AUTH_FILE ] || BailOut "Auth file ($AUTH_FILE) not found"
+AUTH_USER=$( (source "$AUTH_FILE"; echo "$USERNAME") )
+AUTH_PASS=$( (source "$AUTH_FILE"; echo "$PASSWORD") )
+LOGIN="$AUTH_USER:$AUTH_PASS"
+
+[[ -z "$JOB" ]] && BailOut
+
+if [ ! -f $CLI_JAR ]
+then
+	cd /tmp
+	mkdir -p $(dirname $CLI_JAR)
+	curl -s --insecure -O $CLI_URL 
+	mv $(basename $CLI_URL) $CLI_JAR
+fi
+
+DST_JOB=$(echo "$JOB" | sed -e s/\.xml//g)
+DST_JOB=$(echo "$JOB" | sed -e s=/$==g)
+
+if [ -n "$DST" ]
+then
+	if [ -d "$DST" ] 
+	then
+		DST_DIR=$DST
+	else
+		DST_DIR=.
+		DST_JOB=$DST
+	fi
+else
+	DST_DIR=/tmp
+fi
+
+DST=$DST_DIR/$DST_JOB.xml
+SRC="https://ecombuild.wsgc.com/jenkins/job/$JOB/config.xml"
+
+#java -jar $CLI_JAR $OPTS -s $WSGC_JENKINS_URL get-job $JOB | egrep -iv "not secure" > $DST
+curl -s -q --user $LOGIN "$SRC" -o "$DST"
+
+if [ $? -eq 0 ] 
+then
+	echo "Job $JOB copied to $DST"
+	#ls -l $DST
+	exit 0
+else
+	echo "Unable to download $DST_JOB"
+	exit 1
+fi
+
+

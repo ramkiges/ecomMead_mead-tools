@@ -1,0 +1,110 @@
+#!/bin/bash
+# git@github.wsgc.com:ecommerce-Mead/mead-tools.git
+PATH=usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/release-tools:/apps/scm-tools:$HOME/bin:$PATH
+
+FILES="generate-deployment-matrix-data.sh get-env-team path2mfe cleanup-mead-tools dp-prod-sync take-note get-catalog* jenkins-job-properties.txt setenv-mead bulk-appsetting etcdctl scan-ecm ecm2gen delphix-* test-svn-access refresh-mead-tools jenkins-jnlp update-dp-release-deployers propset propget propcopy geturls checksvc chksvc checkenv checkenv.tests getpom getdb get-db getschema get-schema get-host gethost jmxclient.jar SSLPoke.class adhoc-appsetting default-log-parsing.rules brand2site site2brand custom-frontend-deployer jira-* deploy-pricing-stack perf-env-config perf-env-deploy set-adg-content-paths update-content-paths .credentials schema-switch getbrand getdomain get-domain update-apple-dev-cert update-apple-site-assoc wsi_settings wsi_settings.sh reconcile-svc-versions reconcile-svc-baselogic update-aes-package getversion artifact-upload getsiteid get-siteid get-site-id gmtp-switch-schema chkcontent site2market market2label label2market slack-comment create-gmtp-properties update-mfe-config  getsvcversion yq get-market getmarket set-backend*  getdbenv  clean-jenkins commit-check commit-clear captcha jenkins-restart restart-jenkins get-svc-endpoint run-mfe-config generation-check generation-clear generation-check-group getbrandlist copy-prod-generations getoverride get-override-url getoauthhost update-etcd-bootstrap-records set-oauth get-brand-list get-buildsystem-host get-buildsystem-url get-deployment-properties setup-devscripts validate-content-generations get-akamai get-origin get-mfe-generations get-dp-generations get-dp-setting *mfe-config-template* get-mfe-log parse-log get-installation rebuild-etcd get-env-list chkjob wipe-workspace get-catalog-archives clone-appsettings validate-appsettings get-cmx-* get-wcm-generation get-cat-generation checkcontent install-mfe-build get-manifest deploy-mfe etcd-bootstrap-all get-oauth-host get-overridescope get-appsetting-job adhoc-manifest get-dp-schema chkschema  get-etcd-* get-ecm-* get-adg-* get-xcadm-info get-bgb-* jenkins-node-compare fix-content *-manifest-property chk-golden-paths get-backend sync-fork appsetting-blame appsetting-source get-job-history"
+
+echo "$(hostname)" | egrep -iq "jnkrck|ecbuild-agent" || exit 1
+
+#BRANCH=$(git branch | grep '\*' | awk '{ print $NF }')
+#[[ -n $1 ]] && INSTALL=$1 || INSTALL=master
+#git checkout -q $INSTALL || exit 1
+
+umask 000
+
+# these are from the mfe-matrix repo - adding them to this install so any node can run the MFE stats
+cp generate-mfe.env generate-config-build-matrix.sh mfe-build-history.sh /apps/mead-tools
+
+sudo mkdir -p /apps/mead-tools
+sudo chgrp webadmin /apps/mead-tools
+sudo chmod 775 /apps/mead-tools 
+
+# cleanup obsolete stuff
+sudo rm -f /apps/mead-tools/get*akamai
+
+sudo chmod 777 /tmp/wsi_settings.tmp /tmp/set-backend/ >/dev/null 2>&1
+
+sudo mkdir -p /apps/mead-tools
+sudo chmod 775 /apps/mead-tools
+sudo chown jenkins:webadmin /apps/mead-tools
+sudo touch /apps/bulk-appsetting.log
+sudo chown jenkins:webadmin /apps/bulk-appsetting.log
+sudo chmod 664 /apps/bulk-appsetting.log
+
+[[ -d $HOME/.credentials.d ]] || mkdir -p -d $HOME/.credentials.d
+#[[ -e $HOME/.credentials.d ]] && cp venafi.properties $HOME/.credentials.d
+
+sudo cp mead-creds.tar /var/lib/jenkins
+sudo mkdir -p /var/lib/jenkins/.credentials.d
+
+sudo cp -r testssl /apps/mead-tools
+
+#[ -L /tmp/propset ] || ln -s /tmp/propget /tmp/propset
+#[ -d /apps/scripts/env_summary ] && sudo -u jenkins cp /tmp/generate-deployment-matrix.sh /apps/scripts/env_summary
+
+for file in $FILES
+do
+  f=$(basename $file)
+	#echo "$file" | egrep -iq "generate-|txt$" && continue
+
+  # this is for when the symlinks get buggered up
+  sudo rm -f /apps/mead-tools/$f; sudo cp -d $file /apps/mead-tools
+
+  [[ -e /apps/mead-tools/$f ]] && sudo mv /apps/mead-tools/$f /apps/mead-tools/.$f
+	sudo cp -d $file /apps/mead-tools
+done
+sudo chmod -R 775 /apps/mead-tools &
+sudo chown -R jenkins:webadmin /apps/mead-tools &
+
+sudo mkdir -p /home/jenkins
+sudo chmod 775 /home/jenkins
+sudo chown jenkins:jenkins /home/jenkins
+
+sudo bash -c "grep -q jenkins /etc/at.allow || echo jenkins >> /etc/at.allow"
+sudo bash -c "grep -q jenkins /etc/cron.allow || echo jenkins >> /etc/cron.allow"
+sudo bash -c "grep -q imageuser /etc/at.allow || echo imageuser >> /etc/at.allow"
+sudo bash -c "grep -q imageuser /etc/cron.allow || echo imageuser >> /etc/cron.allow"
+
+# install credentials
+sudo su - jenkins bash -c "cd /var/lib/jenkins; tar xf mead-creds.tar"
+sudo chown -R jenkins:jenkins /var/lib/jenkins/.credentials.d
+sudo chmod 775 /var/lib/jenkins/.credentials.d >/dev/null 2>&1
+sudo chmod 600 /var/lib/jenkins/.credentials.d/* >/dev/null 2>&1
+
+[[ -e /usr/local/bin/yq ]] || sudo cp yq /usr/local/bin
+
+#sudo /usr/bin/yum -y '--disablerepo=*' '--enablerepo=wsgc-*' update wsgc-jdk8-202 -d1
+#sudo /usr/bin/yum -y '--disablerepo=*' '--enablerepo=wsgc-*' update wsgc-jdk11 -d1
+for util in time dos2unix hub jq at datamash shellcheck wsgc-devops-toolchain-scm-tools
+do
+  rpm -qa | grep -iq "^$util" || sudo yum -y install $uril -d0
+done
+#rpm -qa | grep -iq "^at-" || sudo yum -y install pcre2 pcre2-tools -d0
+#rpm -qa |grep -iq wsgc-devops-toolchain-scm-tools || sudo /usr/bin/yum -y --disablerepo=\* --enablerepo=wsgc-\* -d0 install wsgc-devops-toolchain-scm-tools-1.0 
+
+sudo systemctl enable --now atd
+
+exit 0
+
+#if [ ! -f /home/imageuser/.credentials ]
+#then
+#    cp .credentials /home/imageuser
+#	chown imageuser:webadmin /home/imageuser/.credentials
+#	chmod 600 /home/imageuser/.credentials
+#fi
+
+#cp /tmp/default-log-parsing.rules /var/lib/jenkins
+#chown jenkins:jenkins /var/lib/jenkins/default-log-parsing.rules
+
+if [ ! -f /usr/bin/at ]
+then
+    yum -y install at 
+    service atd start
+fi
+cd /tmp
+rm -f $LIST
+
+#sudo /usr/bin/yum -y --disablerepo=\* --enablerepo=base --enablerepo=wsgc-\* update wsgc-devops-toolchain-scm-tools-1.0 -d0
+#sudo /usr/bin/yum -y --disablerepo=\* --enablerepo=base --enablerepo=wsgc-\* update wsgc-devops-rerun-module-wsgc-jenkins -d0
+
+exit 0

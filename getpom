@@ -1,0 +1,33 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+#PATH=~/py3/bin:/wsgc/bin:$HOME/.pyenv/shims:$PATH
+
+WSI_SETTINGS=$(which wsi_settings 2>/dev/null)
+#[ -z "$WSI_SETTINGS" ] && exit 1
+
+GETURLS=$(which geturls 2>/dev/null)
+[ -z "$GETURLS" ] && BailOut "Can't find geturls"
+
+DEVOPS=$(cat ~/.wsi_settings)
+[ -z "$DEVOPS" ] && exit 1
+[ -d $DEVOPS ] || exit 1
+
+BRAND=$1
+ENV=$2
+
+POM=$(geturls $BRAND $ENV | grep -i pom.xml)
+[ -z "$POM" ] && POM=$($WSI_SETTINGS --brand $BRAND --env $ENV get pom 2>/dev/null | grep -i 'path:' | awk -F: '{ print $2 }' )
+
+# snowflake!
+if [ "$BRAND" = "xcadm" -o "$BRAND" = "admin" ]
+then
+    case $ENV in 
+        prd*) POM="$DEVOPS/application/xcadm/prd/config/trunk/$ENV/pom.xml" ;;
+        dev*) POM="$DEVOPS/application/xcadm/dev/config/trunk/$ENV/pom.xml" ;;
+        qa*) POM="$DEVOPS/application/xcadm/qa/config/trunk/$ENV/pom.xml" ;;
+    esac
+fi
+
+[ -n "$POM" ] && echo $POM
+
+exit 0

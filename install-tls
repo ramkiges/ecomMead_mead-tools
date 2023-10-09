@@ -1,0 +1,33 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:$HOME/bin:$PATH
+
+[ $(hostname) = "tlsrck-vdcn005.wsgc.com" ] 
+
+BRANCH=$(git branch | grep '\*' | awk '{ print $NF }')
+[[ -n $1 ]] && INSTALL=$1 || INSTALL=master
+git checkout $INSTALL || exit 1
+
+sudo rm -f /apps/mead-tools/get-adg-delivery
+
+FILES="get-env-team cleanup-mead-tools jenkins-job-properties.txt take-note get-catalog* setenv-mead ecm2gen test-svn-access propget propset jenkins-jnlp geturls getdb get-db getschema jira-* getversion update-config-package getsiteid get-siteid get-site-id site2market market2label label2market slack-comment get-market getmarket yq  getdbenv  captcha getakamai getbrandlist copy-prod-generations getoverride get-override-url getoauthhost update-etcd-bootstrap-records set-oauth get-brand-list get-buildsystem-host get-buildsystem-url get-deployment-properties setup-devscripts get-svc-endpoint get-akamai get-origin get-mfe-generations get-dp-generations parse-log get-installation get-env-list getenvlist get-manifest get-oauth-host get-overridescope get-appsetting-job getdomain get-domain get-dp-schema chkschema get-etcd-* get-ecm-* get-bgb-* get-adg-* get-host gethost get-backend sync-fork get-job-history"
+
+cp $FILES /tmp
+[ -e /tmp/propset ] || ln -s /tmp/propget /tmp/propset
+
+sudo cp mead-creds.tar /home/mavenbuild
+sudo su - mavenbuild bash -c "cd /home/mavenbuild; tar xf mead-creds.tar"
+
+sudo cp mead-creds.tar /home/imageuser
+sudo su - imageuser bash -c "cd /home/imageuser; tar xf mead-creds.tar"
+
+cd /tmp
+
+sudo cp $FILES /apps/mead-tools
+
+[[ -e /usr/local/bin/yq ]] || sudo cp yq /usr/local/bin
+
+rpm -qa | grep -iq jq || sudo yum -y install jq -d0
+rpm -qa | grep -iq hub || sudo yum -y install hub -d0
+rpm -qa | grep -iq dos2unix || sudo yum -y install dos2unix -d0
+
+exit 0

@@ -1,0 +1,948 @@
+#!/bin/bash 
+export PATH=$JAVA_HOME/bin:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/apps/mead-tools:/home/jenkins/node_modules/.bin
+
+export IMAGE_TAG=3.29.0
+export JAVA_HOME=/apps/jdk11
+export KUBE_USER="svcak8sci"
+export APP_CLUSTER=ts-sharedplatform-rck-nonprod
+export ETCD_CLUSTER=etcd-0
+export LOCAL_KUBECONFIG="/var/lib/jenkins/.kube/${KUBE_USER}/$APP_CLUSTER"
+export KUBE_CONTEXT="${KUBE_CLUSTER}_${KUBE_USER}@wsgc.com"
+# how much disk space is required before we can start
+FREE_NEED=20
+umask 000
+STATUS=
+#renice -n +20 $$ > /dev/null 2>&1 
+
+JENKINS=$(which jenkins-jnlp 2>/dev/null)
+
+HINTS_ADG="error:"
+HINTS_ADG_EXCLUDE="Header: X|Defaulted container|Header: PAW-Context|Header: Accept|PAW-Caching-Mode|PAW-Template-Expected|Header: Vary:|Header: Content-Type:|Header: .*-Control:|Header: Expires:"
+
+SYNC_GEN_EXCLUDE="creating: helm-config|gpg:|etcd-config-tool/config/|Deploying Helm"
+
+# exlude these strings to reduce the wall-of-text in the job output
+ETCD_EXCLUDE="inflating|creating|Updating|Status progress|Successfully got an update|TEST SUITE|NOTES|kubedog|Kubernetes|Digest:|Status:Revision:|Application URL|Job deployment|repositories|helm|unzip|Deploy Project|DEPLOYED:|REVISION:|Status:|Import GPG|skipping|Deploying to|Pulling from|Waiting for:|gpg --import"
+
+# these are hints to look for in the log file
+HINTS="unzip: short read|update.*lock file|Invalid:|does not satisfy|backoff limit|Error:|\"message\":|\"file\":|\"line\":|\"column\":|\"formatted\":|error killing pod:|Unsupported market|Cannot connect to the Docker daemon|No space left on device|Execution fail|Connection refused|not accessible from|npm ERR\!|Unable to authenticate,|Error installing dependencies|SyntaxError|Error rendering|Error Plugin|UNAVAILABLE:|MalformedJsonException|Error:.*Error:|503.*Unavailable|StatusRuntimeException|applications.app.k8s.io.*forbidden|cannot list resource|Multiple input configuration|ERROR: Cannot find a definition for application|Multiple input configuration file provided|fatal:|Network closed|Error: No configuration files|not found in upstream origin|Error requesting access token"
+
+EXCLUDE="A complete log of this run|/apps/npm/jenkins-npm-cache/_logs|Closing main etcd client|BackoffLimitExceeded|NODE_TLS_REJECT_UNAUTHORIZED|statusCode=200"
+
+NOISE="DEPRECATION WARNING|warnings omitted:|Recommendation:|automated migrator:|NODE_TLS_REJECT_UNAUTHORIZED|caniuse-lite is outdated|npx update-browserslist-db@latest"
+
+ERROR=
+export CLEAN_DATE='s/[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} //; s/\[[^][]*\] //'
+export CLEAN_LOG='s/\(node:[0-9]{5}\) //'
+
+which get-manifest >/dev/null 2>&1 || BailOut "Can't find get-manifest"
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_FLAG=" (flag) "
+ICON_INFO=" (i) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+
+cleanUp() {
+  { set +x; } 2>/dev/null
+  echo "@@@ $FUNCNAME @@@"
+  cd /tmp
+  [[ -n $TMP ]] && rm -rf $TMP
+
+  if [[ -n $port_forward_pid ]]
+  then
+      unbuffer echo ">>> Kill port-forward PID $port_forward_pid" 
+      kill -9 $(ps -ax -o pid=,args= | grep port-forward | grep -iw "$ETCD_PREFIX" | awk '{ print $1 }') >/dev/null 2>&1    
+  fi
+
+  set -x
+  if [[ -n $WORK_DIR && -e $WORK_DIR ]] 
+  then
+    [[ $DEBUG = "true" ]] || rm -rf $WORK_DIR 
+  fi
+  { set +x; } 2>/dev/null
+}
+trap cleanUp EXIT
+
+scriptError() {
+  echo "@@@ $FUNCNAME @@@"
+  echo "$(caller)"
+}
+#trap scriptError ERR
+
+BailOut() { 
+    { set +x; } 2>/dev/null
+   
+    [[ -n $1 ]] && echo "
+/////
+$(basename $0): $* 
+/////"
+
+    printRepos
+
+    if [[ -n $TICKET ]]
+    then
+      jira-comment "$TICKET" "${ICON_FAIL} config-$ETCD_PREFIX-mfe failed $BUILD_URL
+CONCEPT_LIST: $CONCEPT_LIST
+FEATURE_LIST: $MFE_FEATURE_LIST 
+Jenkins Agent: $(hostname)
+{noformat}$*{noformat}"
+
+      jira-comment "$TICKET" "${ICON_FAIL} {noformat:title=MFE Config Information}$(printRepos){noformat}"
+
+      #jira-label "$TICKET" "mfe-config-failure"
+    fi
+
+    ## this is experimental to try to find out why some of these are getting stuck 
+    others=$(ps -ef|egrep -i "vmodule=.*qa|vmodule=.*uat|vmodule.*rgs" | egrep -iv "grep|$$" | awk '{for(i=8; i<=NF; ++i) printf "%s ", $i; print ""}' | sort)
+    [[ -n $others && $DEBUG =~ true ]] && echo "--- 
+$others
+---"
+
+    unbuffer echo "
+*** ADG logs ***"
+    ADG_ENV=$(get-adg-env $ETCD_PREFIX)
+    ADG_NS=ecommerce-delivery-gateway-$ADG_ENV
+    ADG_POD=$(kubectl --kubeconfig=$LOCAL_KUBECONFIG get pods -n $ADG_NS | egrep -vi "^NAME" | awk '{ print $1 }' | grep "delivery-gateway-$ETCD_PREFIX-")
+    /apps/mead-tools/get-mfe-log $ADG_NS $ADG_POD 2>/dev/null | egrep -i -B+1 -A+2 "$HINTS_ADG|/$ETCD_PREFIX/" | egrep -iv "$HINTS_ADG_EXCLUDE" | tail -5
+    unbuffer echo
+      
+    unbuffer echo "
+*** etcd records ***"
+    kubectl --kubeconfig=$LOCAL_KUBECONFIG exec $ETCD_CLUSTER -n $ETCD_ENV -- etcdctl get --prefix $ETCD_PREFIX/app 2>&1 | egrep -iv "log\.go" | tail -1
+    unbuffer echo
+
+    unbuffer echo "
+*** etcd-$ETCD_PREFIX  logs ***"
+    /apps/mead-tools/get-mfe-log ecommerce-etcd-$ETCD_PREFIX | egrep -iv "log\.go" | tail -5
+    unbuffer echo
+
+    unbuffer echo "
+*** etcd-syncappconfig-$ETCD_PREFIX logs ***"
+    /apps/mead-tools/get-mfe-log ecommerce-etcd-syncappconfig-$ETCD_PREFIX | egrep -iv "log\.go" | tail -5
+    unbuffer echo
+
+    unbuffer echo "
+*** port-forward log ***"
+    tail -10 port-forward.log 
+
+    #commitCheck clear
+
+    cd /tmp
+
+    [[ -n $EMAIL ]] && echo "$BUILD_URL" mailx -s "MFE Config Build Failed: $ENVIRO" $EMAIL $BUILD_USER_EMAIL
+
+    [[ -z $STATUS ]] && STATUS=255
+
+    printStats
+  
+    exit $STATUS
+}
+
+# Start port-forwarding etcd
+portForward() {
+  if [[ -n $port_forward_pid ]]
+  then
+    unbuffer echo ">>> Kill port-forward PID $port_forward_pid" 
+    kill -9 $(ps -ax -o pid=,args= | grep port-forward | grep -iw "$ETCD_PREFIX" | awk '{ print $1 }') >/dev/null 2>&1    
+  fi
+
+  x=$(ps -ef|grep -i forward | awk '{ print $NF }' | grep "[0-9]" | awk -F: '{ print $1 }' | grep "$ETCD_PORT" | egrep -v "grep")
+  if [[ -n $x ]]
+  then
+    echo "*** Found an etcd running on $ETCD_PORT"
+    ps -ef | grep "forward" | grep "$ETCD_PORT" | egrep -iv "grep|$$"
+  
+    # in case of a conflict, we have the option of aborting, or trying to assign a new port.
+    #BailOut "ETCD conflict"
+    ETCD_PORT=$(/apps/mead-tools/get-etcd-port)
+    echo "*** New etcd port: $ETCD_PORT"
+  fi
+
+  kubectl --kubeconfig=$LOCAL_KUBECONFIG -n $ETCD_ENV --vmodule=$ETCD_PREFIX=0 port-forward $ETCD_CLUSTER $ETCD_PORT:2379 > port-forward.log 2>&1 &
+  port_forward_pid=$!
+  [[ -z $port_forward_pid ]] && BailOut "Why is port_forward_pid empty?"
+
+  # check to see if port forward is still running
+  pid=$(ps -ef | grep -w "$port_forward_pid" | egrep -iv "grep")
+  [[ -z $pid ]] && BailOut "Port forward to $ETCD_PORT (PID=$port_forward_pid) seems to have died"
+}
+
+printRepos() {
+  cat $REPO_LIST
+}
+
+printStats() {
+  echo "@@@ $FUNCNAME @@@"
+
+  [[ -z $SAR_END ]] && SAR_END=$(date +'%H:%M:%S')
+
+  SAR_FILE=/var/log/sa/sa$(date +'%d')
+  [[ -e $SAR_FILE ]] || echo "Where is our sar file? ($SAR_FILE)"
+
+  TIME=$(echo $(date -d "$SAR_END" +%s) $(date -d "$SAR_BEG" +%s) | awk '{ print ($1 - $2)}')
+  TIME=$(date -u -d @${TIME} +"%T")
+  echo "Elapsed time: $TIME"
+  echo
+
+set -x
+  sar -u -s $SAR_BEG -e $SAR_END -f $SAR_FILE
+  echo
+  sar -r -s $SAR_BEG -e $SAR_END -f $SAR_FILE
+{ set +x; } 2>/dev/null
+  echo
+
+#set -x
+#  ps -p $$ -o %cpu,%mem,cmd
+#{ set +x; } 2>/dev/null
+
+#  sar -r | head -3 | tail -1
+#  sar -r | tail -1
+#  echo
+#  sar -u | head -3 | tail -1
+#  sar -u | tail -1
+
+  echo
+}
+
+commitCheck() {
+  echo "@@@ $FUNCNAME @@@"
+
+  RUN_BUILD=true
+  ACTION=$1
+ 
+  [[ $ACTION =~ check && $FORCE_RUN =~ true ]] && return
+
+  check=0
+  for brand in $(echo $CONCEPT_LIST | sed -es/','/' '/g -es/'\.'/' '/g)
+  do
+    #[[ $ACTION =~ check ]] && set -x
+    commit-$ACTION TAG=$ETCD_PREFIX $APP_CONFIG_ORG/ecom-app-config-${brand}/$APP_CONFIG_BRANCH
+    { ret=$? set +x; } 2>/dev/null
+    check=$(expr $check + $ret)
+
+    #[[ $ACTION =~ check ]] && set -x
+    commit-$ACTION TAG=$ETCD_PREFIX $APP_SCHEDULE_ORG/ecom-app-schedule-${brand}/$APP_SCHEDULE_BRANCH
+    { ret=$? set +x; } 2>/dev/null
+    check=$(expr $check + $ret)
+  done
+
+  #[[ $ACTION =~ check ]] && set -x
+  commit-$ACTION TAG=$ETCD_PREFIX $APP_SCHEDULE_ORG/ecom-app-schedule-apps/$APP_SCHEDULE_BRANCH
+  { ret=$? set +x; } 2>/dev/null
+  check=$(expr $check + $ret)
+
+  for feature in $MFE_FEATURE_LIST 
+  do
+    VERSION=$(get-manifest -k app_version -e $ETCD_PREFIX -s ecom-app-$feature)
+    [[ -n $VERSION ]] && continue
+
+    MANIFEST=$(get-manifest -k app_branch -e $ETCD_PREFIX -s ecom-app-$feature)
+    [[ -z $MANIFEST && -z $VERSION ]] && echo "$(basename $0): could not find 'app_branch' or 'app_version' in manifest for $ETCD_PREFIX ecom-app-$feature"
+
+    ORG=$(awk -F/ '{ print $1 }' <<< $MANIFEST)
+    [[ -z $ORG ]] && ORG=eCommerce-Bedrock
+    [[ $ORG =~ ^[0-9]+\.[0-9]+ ]] && continue
+    BRANCH=$(awk -F/ '{ print $3 }' <<< $MANIFEST)
+    [[ -z $BRANCH ]] && BRANCH=release
+
+    #[[ $ACTION =~ check ]] && set -x
+    commit-$ACTION TAG=$ETCD_PREFIX $ORG/ecom-app-$feature/$BRANCH 
+    check=$(expr $check + $ret)
+  done
+  [[ $check != 0 ]] && RUN_BUILD=true || RUN_BUILD=false
+}
+
+updateHistory() {
+  [[ -e /apps/mead-tools/mfe-build-history.sh ]] || return
+#set -x
+  echo "@@@ $FUNCNAME @@@"
+  at now + 1 min >/dev/null 2>&1 << EOF
+  DEPTH=3 /apps/mead-tools/mfe-build-history.sh $ENVIRO
+EOF
+{ set +x; } 2>/dev/null
+}
+trap updateHistory EXIT
+
+checkSpace(){
+  echo "@@@ $FUNCNAME @@@"
+  for space in /tmp $WORK_DIR 
+  do
+    FREE_TMP=$(expr $(df -Pk $space | awk '{ print $4 }' | tail -1) / 1048576)
+    echo "+++ $space - free: ${FREE_TMP}Gb need: ${FREE_NEED}Gb"
+
+    if [[ $FREE_TMP -lt $FREE_NEED ]]
+    then
+      BailOut "Not enough free space in $space [$FREE_NEED/$FREE_TMP]
+$(df -kh $space)
+$(df -khi $space)
+$(free -h) "
+    fi
+done
+}
+
+# begin!
+echo "$(basename $0) begin $(date +'%Y-%m-%d %H:%M')"
+
+test-svn-access || BailOut "SVN failed"
+
+# safety dance
+[[ -z $ETCD_PREFIX ]] && BailOut "ETCD_PREFIX is null"
+[[ -z $ETCD_PORT ]] && ETCD_PORT=$(/apps/mead-tools/get-etcd-port)
+[[ -z $ETCD_PORT ]] && BailOut "ETCD_PORT is null"
+ETCD_PREFIX=$(tr '[:upper:]' '[:lower:]' <<< $ETCD_PREFIX)
+
+# override the etcd env passed in from jenkins
+ETCD=$(get-etcd-env $ETCD_PREFIX)
+if [[ -z $ETCD ]]
+then
+  set -x
+  ETCD=$(get-etcd-env $ETCD_PREFIX)
+  { set +x; } 2>/dev/null
+fi
+[[ -z $ETCD ]] && BailOut "ETCD is null for $ETCD_PREFIX"
+ETCD_ENV="ecommerce-etcd-$ETCD"
+
+# get build tool version
+P_JSON=/usr/lib/node_modules/@mfe-build/mfe-build/package.json
+MFE_BUILD_VERSION=$(jq -M ._requested.raw $P_JSON | sed -es/\"//g | awk -F\@ '{ print $NF }' | egrep -iv "null")
+
+# normalize CONCEPT_LIST
+[[ -z $CONCEPT_LIST ]] && CONCEPT_LIST=$(get-brand-list $ETCD_PREFIX -d,)
+[[ -z $CONCEPT_LIST ]] && BailOut "CONCEPT_LIST is empty!"
+CONCEPT_LIST=$(tr '[:lower:]' '[:upper:]' <<< $CONCEPT_LIST)
+#CONCEPT_LIST=$(sed -es/' '/','/g <<< $CONCEPT_LIST)
+CONCEPT_LIST=$(echo "$CONCEPT_LIST" | sed -es/','/' '/g | xargs -n1 | sort -u | tr '\n' ',' )
+CONCEPT_LIST=$(sed -es/',$'//g <<< $CONCEPT_LIST)
+
+mkdir -p /apps/tmp/devops-mfe
+chmod 775 /apps/tmp/devops-mfe
+
+# get a count of brands in the concept list
+CC=$(sed -es/','/' '/g <<< $CONCEPT_LIST | wc -w)
+
+# this runs a 'master' job and starts a separate job for each brand
+if [[ $PARALLEL =~ true && $CC -gt 1 ]]
+then
+  # check to see if any are already running
+  PEERS=$(jenkins-jnlp list-running | grep -i "config-$ETCD_PREFIX-mfe" | egrep -iv "/$BUILD_ID/" | sort -u)
+  if [[ -n $PEERS ]]
+  then
+    echo "*** Other MFE builds in progress:"
+    for j in $PEERS
+    do
+      build=$(awk -F/ '{ print $(NF-1) }' <<< $j) 
+      URL="https://ecombuild.wsgc.com/jenkins/job/config-$ETCD_PREFIX-mfe/$build/api/json?tree=actions[parameters[name,value]]" 
+      BRAND=$(curl -fsqkg "$URL" | jq -M ".actions[].parameters[]? | select(.name == \"CONCEPT_LIST\") | .value" 2>/dev/null | egrep -iv "null" | sed -es/\"//g | tr ',' ' ')
+      echo "$BRAND = $j"
+    done
+  fi
+
+  # if we only want to run the brands spec'd in the config-mfe job, use this
+  BL=$(sed -es/','/' '/g <<< $CONCEPT_LIST)
+
+  # if we want to always check all brands, use this
+  #BL=$(get-brand-list $ETCD_PREFIX)
+
+  export TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+
+  # pre-clean Jenkins
+  #  echo "
+  #*** run clean-jenkins ***"
+  #/apps/mead-tools/clean-jenkins
+
+  if [[ $REBUILD_ETCD =~ true ]]
+  then 
+    echo "
+*** Run rebuild-etcd ***"
+    echo jenkins-jnlp build -f rebuild-etcd -p ETCD_NAMESPACE=$ETCD_PREFIX -p RunBy=$(basename $0)
+  fi
+
+  echo "
+*** Run cleanup-etcd on $ETCD_PREFIX (output is filtered) ***"
+  jenkins-jnlp build -f cleanup-etcd -p Environment=$ETCD_PREFIX -p RunBy=$(basename $0) | egrep -vi "$ETCD_EXCLUDE"
+
+  echo "
+*** Run sync-mfe-generations ***"
+  jenkins-jnlp build -s sync-mfe-generations -p APP_ENVIRONMENT=$ETCD_PREFIX -p UpdateData=false -p RunBy=$(basename $0) #| egrep -vi "$SYNC_GEN_EXCLUDE"
+
+  echo "
+*** Queueing parallel jobs ($BL) ***"
+  t=2
+  for b in $BL
+  do
+    CMD="/apps/mead-tools/run-mfe-config -s $ETCD_PREFIX $b debug"
+    unbuffer echo " + $CMD" | tee /apps/tmp/devops-mfe/mfe-config-$ETCD_PREFIX-$b.out 
+
+    # we push the job into the future to make sure etcd cleanup and restart is complete
+    at now + $t min >/dev/null 2>&1 << EOF
+    $CMD >> /apps/tmp/devops-mfe/mfe-config-$ETCD_PREFIX-$b.out 2>&1 
+EOF
+    t=$(expr $t + 1)
+  done
+  echo "
+/// 
+Exiting with code 128 which will show as 'Unstable' in Jenkins - this is not an error.
+This is so we can visually pick out the parent jobs of parallel builds, as each brand is now running in a separate job.
+///
+"
+  exit 128
+fi
+
+# check to see if any are already running for _this_ brand
+PEERS=$(jenkins-jnlp list-running | grep -i "config-$ETCD_PREFIX-mfe" | egrep -iv "/$BUILD_ID/" | sort -u)
+if [[ -n $PEERS ]]
+then
+  for j in $PEERS
+  do
+    build=$(awk -F/ '{ print $(NF-1) }' <<< $j) 
+    URL="https://ecombuild.wsgc.com/jenkins/job/config-$ETCD_PREFIX-mfe/$build/api/json?tree=actions[parameters[name,value]]" 
+    BRAND=$(curl -fsqkg "$URL" | jq -M ".actions[].parameters[]? | select(.name == \"CONCEPT_LIST\") | .value" 2>/dev/null | egrep -iv "null" | sed -es/\"//g)
+    #echo "$BRAND = $j"
+    if [[ $CONCEPT_LIST = "$BRAND" ]]
+    then
+      echo "
+***
+An MFE config build is already running for $BRAND $ETCD_PREFIX - quitting as 'unstable' so as not to taint the metrics
+$j
+***
+"
+      exit 128
+    fi
+  done
+fi
+
+# if we're running in parallel mode, generate a new etcd port number
+[[ $CC -eq 1 ]] && ETCD_PORT=$(expr $ETCD_PORT + 2000 + $(getsiteid $CONCEPT_LIST $ETCD_PREFIX) + $(shuf -i1-99 -n1))
+
+echo "Debug:          $DEBUG"
+#echo "BUILD_URL:      $BUILD_URL"
+echo "Jenkins host:   $(hostname)"
+echo "Script          $(basename $0)"
+echo "ETCD_PREFIX:    $ETCD_PREFIX"
+echo "ETCD_PORT:      $ETCD_PORT"
+echo "CONCEPT_LIST:   $CONCEPT_LIST"
+echo "FEATURE_LIST:   $MFE_FEATURE_LIST"
+echo "MFE Build:      $MFE_BUILD_VERSION"
+echo "Node version:   $(which node) $(node -v)"
+echo "npm version:    $(npm --version)"
+
+[[ $DEBUG =~ true ]] && NOISE="nothing-will-be-filtered"
+
+# npm tuning
+export npm_config_loglevel=silent
+#set -x
+npm set loglevel silent
+npm set fetch-retries 8
+npm set timeout 9000000
+npm set fetch-retry-mintimeout 400000
+npm set fetch-retry-maxtimeout 900000
+npm set cache-min 3600
+#{ set +x; } 2>/dev/null
+npm set tmp /apps/tmp
+npm set always-auth false
+npm set strict-ssl false
+npm set cache /apps/npmcache
+npm set color false
+npm set registry https://snapshotrepo.wsgc.com/artifactory/api/npm/wsgc-npm/
+npm set sass_binary-site https://snapshotrepo.wsgc.com/artifactory/wsgc-raw-local
+npm set _auth 'Y2ktbnBtLXB1Ymxpc2g6QVA5RlcxM3ZMQkQzanhMMTZKR2FEQ2h5aG0='
+npm set email ciuser@wsgc.com
+
+# print the Jira link
+if [[ -n $TICKET ]] 
+then
+  TICKET=$(echo "$TICKET" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g)
+  export TICKET
+  for jira in $TICKET
+  do
+    echo "Jira:         https://jira.wsgc.com/browse/$jira"
+  done
+fi
+
+[[ -d /apps/tmp ]] && WORK_DIR=/apps/tmp/devops-mfe/mfe-config-$ETCD_PREFIX-$$ || WORK_DIR=/tmp/devops-mfe/mfe-config-$ETCD_PREFIX-$$
+mkdir -p $WORK_DIR
+cd $(dirname $WORK_DIR)
+
+checkSpace
+
+REPO_LIST=$WORK_DIR/repolist.txt
+
+## this is experimental to try to find out why some of these are getting stuck 
+others=$(ps -ef|egrep -i "vmodule=.*qa|vmodule=.*uat|vmodule.*rgs" | egrep -iv "grep|$$" | awk '{for(i=8; i<=NF; ++i) printf "%s ", $i; print ""}' | sort)
+[[ -n $others && $DEBUG =~ true ]] && echo "--- 
+$others
+---"
+
+# new ENV_CONFIG 
+[[ -z $ENV_CONFIG ]] && ENV_CONFIG="eCommerce-Bedrock/release"
+ENV_CONFIG_ORG=$(awk -F/ '{ print $1 }' <<< $ENV_CONFIG) 
+ENV_CONFIG_BRANCH=$(awk -F/ '{ print $NF }' <<< $ENV_CONFIG) 
+
+# grunt work to extract branch/org from fields - there's a better way to do this - someday... 
+BUILD_TOOL_ORG=$(awk -F/ '{ print $1 }' <<< $BUILD_TOOL) 
+BUILD_TOOL_BRANCH=$(awk -F/ '{ print $NF }' <<< $BUILD_TOOL) 
+
+# new MFEs will need to be added here
+APP_SCHEDULE_ORG=$(awk -F/ '{ print $1 }' <<< $APP_SCHEDULE) 
+[[ -z $APP_SCHEDULE_ORG ]] && APP_SCHEDULE_ORG=eCommerce-Tahoe
+APP_SCHEDULE_BRANCH=$(awk -F/ '{ print $NF }' <<< $APP_SCHEDULE) 
+[[ -z $APP_SCHEDULE_BRANCH ]] && APP_SCHEDULE_BRANCH=tah-3524
+
+APP_CONFIG_ORG=$(awk -F/ '{ print $1 }' <<< $APP_CONFIG)
+[[ -z $APP_CONFIG_ORG ]] && APP_CONFIG_ORG=eCommerce-Bedrock
+APP_CONFIG_BRANCH=$(awk -F/ '{ print $NF }' <<< $APP_CONFIG)
+[[ -z $APP_CONFIG_BRANCH ]] && APP_CONFIG_BRANCH=release
+[[ $APP_CONFIG_ORG =~ ^[0-9]+\.[0-9]+ ]] && { APP_CONFIG_BRANCH=$APP_CONFIG_ORG; APP_CONFIG_ORG=eCommerce-Bedrock; }
+
+# make the determination if we need to actually run or not by running commit-check against all the repos
+#commitCheck check
+
+#echo "*** RUN_BUILD: $RUN_BUILD ***"
+[[ $RUN_BUILD =~ false ]] && exit 0
+
+rm -rf $WORK_DIR
+mkdir -p \
+  $WORK_DIR/apps \
+  $WORK_DIR/configs \
+  $WORK_DIR/schedules \
+    || BailOut "Can't create working directories under $WORK_DIR"
+cd $WORK_DIR || BailOut "Unable to cd to $WORK_DIR"
+
+# populate the repo list
+cat > $REPO_LIST << EOF
+
+Jenkins Node: $NODE_NAME
+etcd: $ETCD_ENV
+Node version: $(which node) $(node -v)
+MFE Build: $MFE_BUILD_VERSION ($(hostname --short):package.json)
+ENV_CONFIG: $ENV_CONFIG_ORG/$ENV_CONFIG_BRANCH (Jenkins)
+BUILD_TOOL: $BUILD_TOOL (Jenkins)
+
+Repositories used for this job:
+EOF
+
+if [[ -n $SYNCAPPCONFIG ]]
+then 
+  FLAG="(Jenkins)" 
+else
+  SYNCAPPCONFIG=$(get-manifest -k pkg_branch -e $ETCD_PREFIX -s etcd-syncapp-config)
+  if [[ -n $SYNCAPPCONFIG ]]
+  then 
+    FLAG="(Manifest)"
+  else
+    FLAG="(Default)"
+    echo "*** SYNCAPPCONFIG not found in manifest" | tee -a $REPO_LIST
+    SYNCAPPCONFIG=eCommerce-Tahoe/all-nonprod-session
+  fi
+fi
+SYNCAPPCONFIG_ORG=$(awk -F/ '{ print $1 }' <<< $SYNCAPPCONFIG) 
+SYNCAPPCONFIG_BRANCH=$(awk -F/ '{ print $NF }' <<< $SYNCAPPCONFIG) 
+[[ $SYNCAPPCONFIG_ORG =~ ^[0-9]+\.[0-9]+ ]] && { SYNCAPPCONFIG_VERSION=$SYNCAPPCONFIG_ORG; SYNCAPPCONFIG_ORG=; SYNCAPPCONFIG_BRANCH=; }
+# validate that SYNCAPPCONFIG_VERSION is in actual version format
+[[ -z $SYNCAPPCONFIG_VERSION || $SYNCAPPCONFIG_VERSION =~ ^[0-9]+\.[0-9]+ ]] || BailOut "SYNCAPPCONFIG_VERSION is not in version format (x.y.z)"
+[[ -n $SYNCAPPCONFIG_VERSION ]] && echo "etcd-syncapp-config: $SYNCAPPCONFIG_VERSION $FLAG" >> $REPO_LIST || echo "etcd-syncapp-config: $SYNCAPPCONFIG_ORG/$SYNCAPPCONFIG_BRANCH $FLAG" >> $REPO_LIST
+
+FLAG="(Jenkins)"
+echo "*** Clone ecom-app-schedule-apps $APP_SCHEDULE_ORG/$APP_SCHEDULE_BRANCH"
+git clone -q -b $APP_SCHEDULE_BRANCH git@github.wsgc.com:$APP_SCHEDULE_ORG/ecom-app-schedule-apps.git app-schedules || BailOut "Git app schedule clone failed"
+echo "ecom-app-schedule: $APP_SCHEDULE_ORG/$APP_SCHEDULE_BRANCH $FLAG" >> $REPO_LIST
+
+echo "ecom-app-config: $APP_CONFIG_ORG/$APP_CONFIG_BRANCH $FLAG" >> $REPO_LIST
+for brand in $(echo $CONCEPT_LIST | sed -es/','/' '/g)
+do
+  echo "*** Clone ecom-app-config-${brand} $APP_CONFIG_ORG/$APP_CONFIG_BRANCH"
+  git clone -q -b $APP_CONFIG_BRANCH git@github.wsgc.com:$APP_CONFIG_ORG/ecom-app-config-${brand}.git configs/${brand} || BailOut "app-config git clone failed $APP_CONFIG_ORG/$APP_CONFIG_BRANCH ($brand)"
+  #echo "ecom-app-config-${brand}: $APP_CONFIG_ORG/$APP_CONFIG_BRANCH $FLAG" >> $REPO_LIST
+
+  echo "*** Clone ecom-app-schedule-${brand} $APP_SCHEDULE_ORG/$APP_SCHEDULE_BRANCH"
+  git clone -q -b $APP_SCHEDULE_BRANCH git@github.wsgc.com:$APP_SCHEDULE_ORG/ecom-app-schedule-${brand}.git schedules/${brand} || BailOut "app-schedule git clone failed $APP_CONFIG_ORG/$APP_CONFIG_BRANCH ($brand)"
+  #echo "ecom-app-schedule-${brand}: $APP_SCHEDULE_ORG/$APP_SCHEDULE_BRANCH $FLAG" >> $REPO_LIST
+done
+
+# checkout repos for each requested "feature" (aka app)
+for feature in $MFE_FEATURE_LIST
+do
+  # flag to track which came from the manifest and what was defaulted
+  FLAG=
+  MANIFEST=
+
+  # Sanitize feature to match envar style
+  ENV_FEATURE=$(echo $feature | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+  THIS_APP_BRANCH="APP_${ENV_FEATURE}_BRANCH"
+  THIS_APP_ORG="APP_${ENV_FEATURE}_ORG"
+
+  VERSION=$(get-manifest -k app_version -e $ETCD_PREFIX -s ecom-app-$feature)
+  if [[ -n $VERSION ]]
+  then
+    ORG=eCommerce-Bedrock
+    BRANCH=release
+    MANIFEST=true
+  else
+    MANIFEST=$(get-manifest -k app_branch -e $ETCD_PREFIX -s ecom-app-$feature)
+    ORG=$(awk -F/ '{ print $1 }' <<< $MANIFEST)
+    BRANCH=$(awk -F/ '{ print $NF }' <<< $MANIFEST)
+  fi
+
+  [[ -z $ORG ]] && ORG=eCommerce-Bedrock
+  [[ -z $BRANCH ]] && BRANCH=release
+  [[ -n $MANIFEST ]] && FLAG="(Manifest)" || FLAG="(Default)"
+
+  git ls-remote git@github.wsgc.com:${ORG}/ecom-app-${feature}.git refs/head/${BRANCH} >/dev/null 2>&1
+  if [[ $? -ne 0 ]]
+  then
+    echo "*** $ORG/ecom-app-${feature}/$BRANCH not found in GHE - Setting $ENV_FEATURE org/branch to eCommerce-Bedrock/release"
+    ORG=eCommerce-Bedrock
+    BRANCH=release
+  fi
+
+  [[ -n $VERSION ]] && echo "*** Clone ecom-app-${feature} tag $VERSION" || echo "*** Clone ecom-app-${feature} $ORG/$BRANCH"
+  git clone -q -b $BRANCH git@github.wsgc.com:${ORG}/ecom-app-${feature} apps/${feature} || BailOut "Unable to clone $ORG/$BRANCH"
+  if [[ -n $VERSION ]]
+  then
+    #echo "~~~ Checkout tag $VERSION"
+    git -C apps/${feature} fetch --all --tags -q
+    git -C apps/${feature} checkout tags/$VERSION -q
+    echo "ecom-app-${feature}: $VERSION $FLAG" >> $REPO_LIST
+  else
+    echo "ecom-app-${feature}: $ORG/$BRANCH $FLAG" >> $REPO_LIST
+  fi
+done
+
+MBCB_GIT_BRANCH="release"
+USE_FIXED=${USE_FIXED:-false}
+if [[ $USE_FIXED = "true" ]]
+then
+  CURRENT_VERSION=$(curl -fsqk 'https://ecom-webhooks.wsgc.com/hooks/get-recent-app-vers?repo=mfe-interim-build-tool&versionsCount=1' | cut -d'"' -f2 | cut -d'-' -f2)
+  [[ -z $CURRENT_VERSION ]] && BailOut "USE_FIXED is true, but CURRENT_VERSION is blank"
+  ZIP=https://artifactory.wsgc.com/artifactory/wsgc-releases/com/wsgc/ecommerce/tools/mfe-interim-build-tool/$CURRENT_VERSION/mfe-interim-build-tool-${CURRENT_VERSION}-distribution.zip 
+  MBCB_GIT_BRANCH="release-$CURRENT_VERSION"
+  echo "*** mfe-interim-build-tool: Version \"$CURRENT_VERSION\"" | tee -a $REPO_LIST
+else
+  #CURRENT_VERSION=$(curl -fsqk 'https://snapshotrepo.wsgc.com/artifactory/snapshotrepo/com/wsgc/ecommerce/tools/mfe-interim-build-tool/1.0-SNAPSHOT/maven-metadata.xml' | grep '\<value' | cut -d '>' -f2 | cut -d '<' -f1 | head -1)
+  CURRENT_VERSION=$(curl -fsqk 'https://snapshotrepo.wsgc.com/artifactory/snapshotrepo/com/wsgc/ecommerce/tools/mfe-interim-build-tool/1.0-SNAPSHOT/maven-metadata.xml' |  grep '<value>' | awk -F '[<>]' '{ print $3 }' | sort -uV | head -1)
+  ZIP=https://snapshotrepo.wsgc.com/artifactory/snapshotrepo/com/wsgc/ecommerce/tools/mfe-interim-build-tool/1.0-SNAPSHOT/mfe-interim-build-tool-${CURRENT_VERSION}-distribution.zip
+  echo "*** mfe-interim-build-tool: Branch \"$MBCB_GIT_BRANCH\"" | tee -a $REPO_LIST
+fi
+[[ $DEBUG =~ true ]] && echo "mfe-interim-build-tool ZIP: $ZIP"
+
+# close out the repo list
+echo >> $REPO_LIST
+
+echo "*** Clone mfe-interim-build-tool ($MBCB_GIT_BRANCH)"
+# TODO: Add mfe-build-config-build.sh to the main assembly zip and remove this git clone
+git clone -q --depth 1 -n -b $MBCB_GIT_BRANCH git@github.wsgc.com:eCommerce-Bedrock/mfe-interim-build-tool.git
+cd mfe-interim-build-tool
+git checkout HEAD mfe-build-config-build.sh
+
+echo "*** Download $(basename $ZIP)"
+for try in {1..5}
+do
+  curl -sqk -O $ZIP && break
+  sleep 15
+done
+[[ -e $ZIP ]] && BailOut "Unable to download $(basename $ZIP)"
+echo "*** Extract $(basename $ZIP)"
+unzip -qt $(basename $ZIP) || BailOut "zip file appears to be corrupt"
+
+mkdir build-cache extract-cache || BailOut "Unable to make $WORK_DIR/mfe-interim-build-tool directories"
+
+## $MFE_FEATURE_LIST
+export MFE_FEATURE_LIST=$(echo $MFE_FEATURE_LIST | xargs -n1 | sort -u | tr '\n' ' ')
+echo "/// Building Features: $MFE_FEATURE_LIST"
+
+# Create config.txt
+rm -f config.txt
+echo "# config.txt for $ETCD_PREFIX" >> config.txt
+echo >> config.txt
+
+# create config entries for each app
+for feature in $MFE_FEATURE_LIST
+do
+  echo "application $feature  ../apps/$feature  ../app-schedules" >> config.txt
+done
+
+echo "# Applications" >> config.txt
+
+echo "# Builds" >> config.txt
+
+# create config entries for each brand
+for brand in $(echo $CONCEPT_LIST | tr 'a-z' 'A-Z' | sed -es/','/' '/g)
+do
+  echo "build $(/apps/mead-tools/get-market ${brand} $ETCD_PREFIX) ${brand} ../configs/${brand} ../schedules/${brand}" >> config.txt
+done
+
+echo "# end config.txt" >> config.txt
+
+if [[ $DEBUG = "true" ]]
+then
+  echo "--- config.txt ---"
+  cat config.txt
+  echo "---"
+fi
+
+cat <<EOF > etcd-config.properties
+etcd.server.endpoints=http://localhost:$ETCD_PORT
+etcd.configPrefix=$ETCD_PREFIX/featureconfig/
+etcd.trackExpires=true
+EOF
+
+if [[ $DEBUG = "true" ]]
+then
+  echo "--- etcd-config.properties ---"
+  cat etcd-config.properties
+  echo "---"
+fi
+
+OAUTH_ENV="qa"
+CLIENT_ENV="QA"
+CLIENT_ID="platform/${CLIENT_ENV}"
+CLIENT_SECRET="PBecom123"
+PCS_ADMIN_ENV="qa"
+if [[ $ETCD_PREFIX =~ uat || $ETCD_PREFIX =~ bpv ]]
+then
+  OAUTH_ENV="uat"
+  CLIENT_ENV="UAT"
+  CLIENT_ID="mfe_build_tool/UAT"
+  CLIENT_SECRET="r0aXC12XL5XHW8z9"
+  PCS_ADMIN_ENV="uat1"
+fi 
+
+[[ $ETCD_PREFIX =~ perf ]] && PCS_ADMIN_ENV="perf"
+echo "*** Oauth: $OAUTH_ENV"
+
+cat << EOF > config-admin-service.properties
+config.trackExpires=false
+wsgc.config.admin.service.url=https://edap-platform-svc-config-admin-${PCS_ADMIN_ENV}.services.west.nonprod.wsgc.com/config-admin/v2
+wsgc.oauth.client.id=${CLIENT_ID}
+wsgc.oauth.client.secret=${CLIENT_SECRET}
+wsgc.oauth.tokenEndpoint=https://webauth-${OAUTH_ENV}-rk01v.wsgc.com/oauth/token
+wsgc.config.admin.service.feature_config.environment=$ETCD_PREFIX
+EOF
+
+if [[ $DEBUG = "true" ]]
+then
+  echo "--- config-admin-service.properties ---"
+  cat config-admin-service.properties
+  echo "---"
+fi
+
+#set -x
+# dynamically acquire the etcd cluster
+ETCD_CLUSTER=$(kubectl --kubeconfig=$LOCAL_KUBECONFIG -n $ETCD_ENV get pods | grep -i "1/1.*running" | awk '{ print $1 }' | head -1)
+{ set +x; } 2>/dev/null
+[[ -z $ETCD_CLUSTER ]] && echo "Unable to find a good pod in $ETCD_ENV"
+[[ -z $ETCD_CLUSTER ]] && ETCD_CLUSTER=etcd-0
+
+# Start port-forwarding etcd
+portForward
+
+echo "ETCD_CLUSTER: $ETCD_CLUSTER"
+echo "ETCD_ENV:     $ETCD_ENV"
+echo "ETCD_PORT:    $ETCD_PORT"
+
+# Find and run the executable (paraprhased from `runtool`)
+echo "*** unpack buildtool ***"
+zipFile=$(ls ./*-distribution.zip 2>/dev/null)
+[[ -z $zipFile ]] && BailOut "Can't find zipFile (*-distribution.zip)"
+unpackDir="${zipFile}-unpacked"
+mkdir -p "$unpackDir" || BailOut "Unable to mkdir $unpackDir"
+unzip -q "$zipFile" -d "$unpackDir/" || BailOut "Unable to unzip $zipFile"
+scriptName=$(basename "$zipFile" | cut -d'-' -f1,3 --output-delimiter='')
+[[ $DEBUG = "true" ]] && MFE_DEBUG="--debug"
+
+for try in {1..1}
+do
+  echo "--- test etcd ---"
+  for try_etcd in {1..3}
+  do
+    #set -x
+    kubectl --kubeconfig=$LOCAL_KUBECONFIG exec $ETCD_CLUSTER -n $ETCD_ENV -- etcdctl get --prefix $ETCD_PREFIX/app 2>&1 | egrep -iv "log\.go" | tail -1 
+    { ret=${PIPESTATUS[0]}; set +x; } 2>/dev/null
+    [[ $ret -eq 0 ]] && break
+    echo "!!! etcd not yet ready=$ret !!! ($try_etcd)"
+    portForward
+    sleep 30
+  done
+  [[ $ret != 0 ]] && echo "etcd not available? (we're going to try anyway)"
+
+  echo "
+*** 
+run buildtool (attempt $try) 
+***
+"
+  echo "+++ build log: $(pwd)/build.log"
+
+if [[ $ETCD_PREFIX =~ uat3 || $ETCD_PREFIX =~ rgs1 ]]
+then
+  ETCD_CONFIG_ARG=""
+  echo "+++ Found migrated environment, omitting etcd config argument"
+else
+  ETCD_CONFIG_ARG="  --etcd-config ./etcd-config.properties"
+fi 
+
+# capture the exact time the build tool started
+SAR_BEG=$(date +'%H:%M:%S')
+
+set -x
+"$unpackDir/bin/$scriptName" prepare-all config.txt $MFE_DEBUG \
+  --schedule-prior-hours $PRIOR_HOURS \
+  --content-prior-hours $PRIOR_HOURS \
+  --concept $CONCEPT_LIST \
+  $ETCD_CONFIG_ARG \
+  --build-command ./mfe-build-config-build.sh \
+  --config-admin-service ./config-admin-service.properties \
+  --source-mode any \
+  --asset-expiration-days 1 \
+  --environment dev |& tee build.log | egrep -iv "$NOISE" | sed -r ':a; /^\s*$/ {N;ba}; s/( *\n *){2,}/\n/'
+{ ret=${PIPESTATUS[0]}; set +x; } 2>/dev/null
+
+  [[ $ret -eq 0 ]] && break
+  echo "!!! buildtool failed=$ret (attempt #$try)"
+  #sleep 300
+done
+
+# capture the exact time the build tool ended
+SAR_END=$(date +'%H:%M:%S')
+
+# strip out special characters
+#sed -es/'✓'/' '/g -i build.log 
+sed -es/\"//g -es/\'//g -i build.log 
+#iconv -c -f utf-8 -t build.log
+
+# grab the feature being built, so we know which one errored out
+FEATURE=$(grep -i "Installing dependencies for" build.log | grep -iv "error" | tail -1 | awk '{ print $NF }')
+
+if [[ $ret -ne 0 ]]
+then
+  [[ -n $FEATURE ]] && msg="ERROR: feature $FEATURE build failed" || echo "ERROR: config build failed"
+  
+  echo "
+*** 
+$msg [ $(hostname --fqdn):$(pwd)/build.log ]
+***
+"
+
+  #[[ $DEBUG = "true" ]] && { echo "%%% build.log"; cat build.log; }
+
+  ERROR=$(egrep -i -A+1 -B+2 "$HINTS" build.log | egrep -iv "$EXCLUDE" | sed -r "$CLEAN_DATE" | sed -r "$CLEAN_LOG" | uniq)
+  [[ -z $ERROR ]] && ERROR=$(tail -10 build.log | egrep -iv "$EXCLUDE" | sed -r "$CLEAN_DATE" | sed -r "$CLEAN_LOG" | uniq)
+
+  BailOut "$unpackDir/bin/$scriptName failed
+$ERROR
+$REPO"
+fi
+
+cd $WORK_DIR/mfe-interim-build-tool || BailOut "Unable to cd to $WORK_DIR/mfe-interim-build-tool"
+
+SCHEDULES_FILE=$(find schedules*.json)
+if [[ -n $SCHEDULES_FILE ]] 
+then
+  echo "Found schedules file: $SCHEDULES_FILE"
+
+  if [[ $DEBUG = "true" ]]
+  then
+    echo "--- schedules file $SCHEDULES_FILE ---"
+    cat $SCHEDULES_FILE
+    echo "---"
+  fi
+
+  if [[ $FORCE_SCHEDULE = "true" ]] 
+  then
+    echo "Forcing schedules file to use current time"
+    NOW=$(date -u --date "+2 minutes" '+%Y-%m-%dT%H:%M:%SZ'); sed 's/startTime":.*"/startTime":\ "'$NOW'"/g' $SCHEDULES_FILE >schedules-override.json
+    SCHEDULES_FILE="schedules-override.json"
+    echo "Using updated schedules file: $SCHEDULES_FILE"
+  fi
+  
+  KUBECONFIG_PATH="/var/lib/jenkins/.kube"
+  KUBE_CLUSTER="$APP_CLUSTER"
+  DEPLOYER_KUBE_CONTEXT="${KUBE_CLUSTER}_${KUBE_USER}@wsgc.com"
+  KUBECONFIG="${KUBECONFIG_PATH}/${KUBE_USER}/${KUBE_CLUSTER}"
+
+  set -x
+  kubectl --kubeconfig=$LOCAL_KUBECONFIG \
+    -n ecommerce-etcd-syncappconfig-$ETCD_PREFIX create configmap schedules \
+    --from-file=schedules.json=$SCHEDULES_FILE \
+    -o yaml \
+    --validate=false \
+    --dry-run | \
+      kubectl --kubeconfig=$LOCAL_KUBECONFIG \
+        -n ecommerce-etcd-syncappconfig-$ETCD_PREFIX apply \
+          --validate=false -f - \
+            || BailOut "kubectl create configmap schedules failed"
+  { set +x; } 2>/dev/null
+
+  docker pull container-registry01.nonprod.wsgc.com/ecom/deployer:${IMAGE_TAG} || BailOut "Docker pull failed"
+
+  echo ">>> Deploying to cluster $KUBE_CLUSTER"
+  echo ">>> Kubernetes config file is $KUBECONFIG"
+  echo ">>> Kubernetes context is $DEPLOYER_KUBE_CONTEXT"
+
+  if [[ -n $SYNCAPPCONFIG_VERSION ]]
+  then
+    # validate that it's in actual version format
+    [[ $SYNCAPPCONFIG_VERSION =~ ^[0-9]+\.[0-9]+ ]] || BailOut "SYNCAPPCONFIG_VERSION is not in version format (x.y.z)"
+
+    echo "+++ Using released syncappconfig version $SYNCAPPCONFIG_VERSION from Artifactory"
+    HELM_CONFIG_URL=http://artifactory.wsgc.com/artifactory/helm-configs/etcd-syncappconfig-$SYNCAPPCONFIG_VERSION.zip
+  else
+    echo "+++ Using snapshot syncappconfig repo $SYNCAPPCONFIG_ORG/$SYNCAPPCONFIG_BRANCH from Jenkins"
+    HELM_CONFIG_URL=https://ecombuild.wsgc.com/jenkins/job/$SYNCAPPCONFIG_ORG/job/etcd-syncappconfig-helm-config/job/$SYNCAPPCONFIG_BRANCH/lastSuccessfulBuild/artifact/archived-helm-project.zip 
+  fi
+
+  set -x
+  docker run -i --rm \
+    -v "$HOME/.kube:$KUBECONFIG_PATH:ro" \
+    -v "$HOME/helm-keys:/keys:ro" \
+    -e KUBECONFIG="$KUBECONFIG" \
+    -e HELM_PROJECT_URL="$HELM_CONFIG_URL" \
+    -e NAMESPACE=ecommerce-etcd-syncappconfig-$ETCD_PREFIX \
+    -e HELM_PROJECT_ENV=$ETCD_PREFIX \
+    -e KUBE_CONTEXT="$DEPLOYER_KUBE_CONTEXT" \
+    -e INGRESS_PREFIX=services.nonprod.wsgc.com \
+    -e IMAGE_REGISTRY=container-registry01.nonprod.wsgc.com \
+    -e ATOMIC=false \
+    --entrypoint "/usr/local/bin/helm-project-deploy" \
+    container-registry01.nonprod.wsgc.com/ecom/deployer:${IMAGE_TAG} |& tee docker.log
+  { ret=${PIPESTATUS[0]} set +x; } 2>/dev/null
+
+  # xlate certain characters to make mechanical parsing easier
+  sed -es/\"//g -es/\'//g -i docker.log 
+
+  if [[ $ret -ne 0 ]]
+  then 
+    echo "*** ERROR: Need to look in docker.log to see why [ $(hostname --fqdn):$(pwd)/docker.log ]"
+    ERROR=$(egrep -i -B+2 -A+1 "$HINTS" $(pwd)/docker.log | egrep -iv "$EXCLUDE" | sed -r "$CLEAN_DATE" | sed -r "$CLEAN_LOG" | uniq)
+    [[ -z $ERROR ]] && ERROR=$(tail -10 $(pwd)/docker.log | egrep -iv "$EXCLUDE" | sed -r "$CLEAN_DATE" | sed -r "$CLEAN_LOG" | uniq)
+    [[ $DEBUG = "true" ]] && { echo "%%% docker.log"; cat docker.log; }
+    BailOut "Docker call failed
+$ERROR"
+  fi
+else
+  echo "*** No new schedules file found, skipping ***"
+fi
+
+# print a list of the repos used
+printRepos
+
+printStats
+
+if [[ -n $TICKET ]]
+then
+#  set -x
+  jira-comment "$TICKET" "${ICON_SUCC} config-$ETCD_PREFIX-mfe complete $BUILD_URL
+CONCEPT_LIST: $CONCEPT_LIST
+FEATURE_LIST: $MFE_FEATURE_LIST
+MFE_BUILD_VERSION: $MFE_BUILD_VERSION
+Jenkins Agent: $(hostname)"
+
+  jira-comment "$TICKET" "${ICON_SUCC}" "{noformat:title=MFE Config Information}$(printRepos){noformat}"
+  { set +x; } 2>/dev/null
+
+  #jira-label "$TICKET" "config-environment-mfe"
+  [[ $AUTO_CLOSE = "true" ]] && jira-close "$TICKET" "${ICON_SUCC}$(basename $0) auto-close"
+fi
+
+exit 0

@@ -1,0 +1,41 @@
+#!/bin/bash
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+export PATH
+DEFAULT_JDK="1.8"
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$1" 
+
+	echo "Usage: $(basename $0) <job> [new-jdk]"
+	echo "Example: $(basename $0) deploy-foobar.xml 1.8"
+	echo "Default JDK is $DEFAULT_JDK"
+	exit 1
+}
+
+
+
+JOB=$1
+NEW_JDK=$2
+
+[ -z "$JOB" ] && BailOut
+
+[ -z "$NEW_JDK" ] && NEW_JDK=$DEFAULT_JDK
+[ ! -f "$JOB" ] && JOB="$JOB.xml"
+[ ! -f "$JOB" ] && BailOut "Can't find $JOB"
+
+git pull
+
+OLD_JDK=$(grep -i "<jdk>" $JOB | awk -F '[<>]' '{ print $3 }' )
+[ -z "$OLD_JDK" ] && BailOut "I don't see an exisiting '<jdk>' parameter"
+NEW_JDK=$(echo "$NEW_JDK" | tr "a-z" "A-Z" | sed -e s/jdk//g)
+NEW_JDK="JDK$NEW_JDK"
+
+cat $JOB | sed -e s/$OLD_JDK/$NEW_JDK/g > /tmp/$JOB.new && cp /tmp/$JOB.new $JOB
+
+git add $JOB && git commit -m "[DEVOPS] set JDK to $NEW_JDK" && git push
+
+[ $? -eq 0 ] && echo "Success! $OLD_JDK -> $NEW_JDK"
+
+#runjob build JenkinsJobMgr
+

@@ -1,0 +1,43 @@
+#!/bin/bash
+# basic script to upload node packages to npmrepo
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+TMP=/tmp/npm-publish
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+  echo "Usage: $(basename $0) -s <source_file> -d <destination_directory> [-t target_filename] [-p (update prod)]"
+	echo
+	exit 1
+}
+
+while getopts "phs:d:t:" opt 
+do
+    case ${opt} in
+        h) BailOut ;;            
+        s) SRC_FILE=$OPTARG ;;
+        d) DST_DIR=$OPTARG ;;
+        t) DST_FILE=$OPTARG ;;
+        p) PROD=true ;;
+    esac
+done
+
+[[ -z $SRC_FILE ]] && BailOut "Need file"
+[[ -z $DST_FILE ]] && DST_FILE=$SRC_FILE
+
+# .npmrepo is where the creds would be kept
+NPM_CRED=$HOME/.npmrepo
+source $NPM_CRED
+[ -z "$NPM_USER" ] && BailOut "Can't parse NPM user from $NPM_CRED"
+[ -z "$NPM_PASS" ] && BailOut "Can't parse NPM pass from $NPM_CRED"
+LOGIN="$NPM_USER:$NPM_PASS"
+
+# this is the command to get logged in, if you aren't already - need to figure out a way to test this
+#npm login --registry=https://npmrepo.wsgc.com/repository/wsgc-npm-local/
+
+[[ -e $SRC_FILE ]] || BailOut "File: ($SRC_FILE) not found"
+
+echo "Upload $SRC_FILE -> $DST_DIR/$DST_FILE"
+
+curl -u $LOGIN --insecure --upload-file $SRC_FILE https://npmrepo-dev.wsgc.com/repository/wsgc-raw-local/$DST_DIR/$DST_FILE
+[[ $PROD = "true" ]] && curl -u $LOGIN --insecure --upload-file $SRC_FILE https://npmrepo.wsgc.com/repository/wsgc-raw-local/$DST_DIR/$DST_FILE
+

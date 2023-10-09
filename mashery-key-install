@@ -1,0 +1,112 @@
+#!/bin/bash
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/apps:~/bin
+# https://confluence.wsgc.com/display/PS/Howto%3A+Create+Mashery+Encrypted+Keys
+
+ENV=int2
+
+ECDEPLOY="ecdeployrk1v"
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+OLD_SECRET=$(svn cat $FRONTEND/qa/config/app/trunk/pom.xml | grep -i "frontend.proxySecret" | awk -F "[<>]" '{ print $2 }' | tail -1 | sed -e s/frontend.proxySecret//g)
+NEW_SECRET=$(expr $OLD_SECRET + 1)
+MASHERY_RANDOM=/tmp/mashery-random
+MASHERY_RESOURCE=/tmp/mashery-resource.txt
+MASHERY_INSTALL=/tmp/mashery-install.sh
+MASHERY_KEY="X7YNpdUiRUaqki1SbyePpQaWi/R+FY6OL6FtRCRVjkU="
+MASHERY_POM="/tmp/mashery.pom"
+
+# create JNDI value
+cat > $MASHERY_RANDOM.exp << EOF
+#!/usr/bin/expect -f
+# created by $(basename $0) $(date +'%Y-%m-%m')
+set timeout 300
+match_max 7500
+set expect_out(buffer) {}
+send "cd /apps/staging/Mashery\r"
+spawn java -jar /apps/staging/Mashery/randomgenerator-1.0.2-jar-with-dependencies.jar
+expect "hoice"
+send "1\r"
+expect "ProxySecret"
+send "$NEW_SECRET\r"
+expect "placeholder"
+EOF
+
+chmod 755 $MASHERY_RANDOM.exp
+if [ ! -f $MASHERY_RANDOM.txt ]
+then
+	scp -q $MASHERY_RANDOM.exp $ECDEPLOY:/tmp
+	ssh -q $ECDEPLOY eval $MASHERY_RANDOM.exp | grep -i JNDI | tail -2  | dos2unix > $MASHERY_RANDOM.txt
+fi
+
+host=$(geturls ws $ENV | grep -i "host:" | awk '{ print $NF}')
+KEY=$(ssh -q $host "cat /apps/tomcat/conf/config.key | grep 'key=' | egrep -vi '#' | sed -e s/'key='//g")
+
+JNDI_NAME=$(grep -i "jndi name" $MASHERY_RANDOM.txt | awk '{ print $NF }')
+JNDI_VALUE=$(grep -i "jndi value" $MASHERY_RANDOM.txt | awk '{ print $NF }')
+CMD="cd /apps/tomcat/conf; /apps/java/bin/java -jar /apps/tomcat/lib/tomcat-crypto-factory-2.0.2.jar encrypt \"$KEY\" \"$JNDI_VALUE\" "
+echo "JNDI_NAME: $JNDI_NAME"
+echo "JNDI_VALUE: $JNDI_VALUE"
+echo 
+
+# create ENC value
+MASHERY_ENC=$(ssh -q $host "$CMD" | awk '{ print $NF }')
+RESOURCE="    <Resource name=\"$JNDI_NAME\" type=\"java.lang.String\" factory=\"com.wsgc.tomcat.CryptoFactory\" factoryx=\"com.wsgc.tomcat.StringFactory\" value=\"$MASHERY_ENC\"/>"
+POM="<frontend.$JNDI_NAME>$MASHERY_ENC</frontend.$JNDI_NAME>"
+
+#echo "New Resource: $RESOURCE"
+echo "POM: 
+$POM"
+echo "$RESOURCE" > $MASHERY_RESOURCE
+echo "$POM" > $MASHERY_POM
+
+# for the purposes of just generating a new API key, this step isn't necessary - update the pom and re-deploy instead
+# copy new value to hosts
+#for BRAND in mg pb pk pt we ws
+#for BRAND in ws
+#do
+#	echo
+#	host=$(geturls $BRAND $ENV | grep -i "host:" | awk '{ print $NF}')
+#	#echo "$BRAND/$ENV: $host"
+#	scp -q $MASHERY_RESOURCE $host:/tmp
+#
+#	ROOT=$(ssh -q $host "find /apps -type f -name ROOT.xml 2>/dev/null |egrep -i 'tomcat' " )
+#	cat > $MASHERY_INSTALL << EOF
+##!/bin/bash
+#ROOT="$ROOT"
+#TMP="/tmp/\$(basename \$ROOT).new"
+#RESOURCE="$MASHERY_RESOURCE"
+#API_SECRET=/tmp/api-secret.txt
+#DATE=\$(date +'%Y%m%d')
+#
+#[ -f \$ROOT.\$DATE ] || cp \$ROOT \$ROOT.\$DATE 
+#
+#grep -i "MasheryAPISecret" $ROOT > \$API_SECRET
+#cat \$ROOT | egrep -vi "</Context>|MasheryAPISecret1" > \$TMP
+#
+#cat \$RESOURCE >> \$TMP
+#echo  >> \$TMP
+#cat \$API_SECRET >> \$TMP
+#echo  >> \$TMP
+#echo "</Context>" >> \$TMP
+#cp \$TMP \$ROOT
+#
+#service wsgc-tomcat-frontend  restart
+#
+#EOF
+#	chmod 755 $MASHERY_INSTALL
+#	scp -q $MASHERY_INSTALL $host:/tmp
+#done
+
+# create mashery API endpoint key
+MACID=$(echo "$JNDI_VALUE" | awk -F, '{ print $1 }')
+JNDI=$(echo "$JNDI_VALUE" | awk -F, '{ print $2 }')
+CMD="java -jar /apps/staging/Mashery/encrypt.jar $JNDI $MASHERY_KEY"
+API_KEY=$(ssh -q $ECDEPLOY "$CMD")
+
+echo "
+Mashery info (add this using the Mashery web site)
+mac_id:$MACID 
+encrypted_secret:$API_KEY 
+"
+
+
+

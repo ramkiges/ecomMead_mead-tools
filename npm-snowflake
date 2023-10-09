@@ -1,0 +1,27 @@
+#!/bin/bash
+#https://confluence.wsgc.com/display/ES/Publishing+NPM+artifacts
+SCM=git@github.wsgc.com:eCommerce-Bedrock/web-component-ecom-product.git
+RELEASE=2.16.4
+#COMMIT_LEVEL=patch
+COMMIT_LEVEL=minor
+
+NAME=$(basename $SCM | sed -e s/\.git//g)
+TMP=/tmp/npm-snowflake
+rm -rf $TMP
+mkdir -p $TMP
+cd $TMP
+
+git clone $SCM
+cd $NAME
+git remote add upstream $SCM
+git fetch --all
+[ -n "$RELEASE" ] && git checkout -b release-$RELEASE
+lerna publish -m "[RELEASE] %s" --ignore-scripts --force-publish=* --yes --cd-version=$COMMIT_LEVEL
+if [ -n "$RELEASE" ] 
+then
+	git push --set-upstream origin release-$RELEASE
+else
+	git push 
+fi
+
+

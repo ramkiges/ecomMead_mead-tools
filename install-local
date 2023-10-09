@@ -1,0 +1,139 @@
+#!/bin/bash
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin:$PATH:$HOME/bin
+export PATH
+
+SCRIPTS="get-env-team path2mfe cleanup-mead-tools take-note run-mfe-config get-catalog* setenv-mead get-rundeck-hosts ecm2gen test-svn-access chk-golden-paths refresh-mead-tools geturls propdiff pomdiff chksvc $(which settingDiff.sh) dir2gen gen2dir getjob wsikey chkakamai brand2site site2brand brand2name site2name get-schema getschema getcat chkschema create-dp-release-artifacts jmxclient.jar mead-functions copy-ecm-gen getdb get-db create-release-artifact jobjdk svn-text fix-content roll2support npm-publish build-full jenkins-jnlp setjmx SSLPoke.class propget jobtools getpom srvdiff set-apmagent de-akamai set-content-paths wsi_settings.sh gethost get-host chkenv chksettings get-ip set-endeca set-pricing local-debug getrpm restart-ecmq jira-* set-svn-textprop set-svn-binprop checkenv checkenv.list whodunnit update-frontend-deployer-single custom-frontend-deployer imgqa-fix imgqa-test get-settings release-settings clear-logs clean-jenkins propfix update-apm-nonprd appd-refresh set-pom-versions getdomain get-domain getbrand getpod chkcert showcert wsi_settings chkmfe chkmfe.data jenkins-cache-clean k8s-* jenkins-rest rundeck-cli* node-upload-pkg chkadmin wcm/wcm-nfs-copy getversion getsiteid get-siteid get-site-id schema-switch expose-conf site2market market2label label2market slack-comment get-market getmarket set-backend-* fix-rpmdb  getdbenv fix-content get-svc-endpoint chkwcm chkecm getakamai getbrandlist copy-prod-generations getoverride get-override-url getoauthhost update-etcd-bootstrap-records set-oauth get-brand-list get-buildsystem-host get-buildsystem-url get-deployment-properties setup-devscripts get-akamai get-origin get-mfe-generations get-dp-generations validate-content-generations get-dp-setting  parse-log get-installation get-env-list chkjob wipe-workspace deploy-mfe get-cmx-* get-wcm-generation get-cat-generation get-manifest set-filebeat get-oauth-host get-overridescope get-appsetting-job get-dp-schema get-etcd-* get-ecm-* set-CORS get-adg-* get-bgb-* get-xcadm-info jenkins-node-compare get-backend get-manifest-property set-manifest-property sync-fork artifact-upload set-opentelemetry appsetting-blame appsetting-source get-job-history"
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$1" 
+
+	exit 1
+}
+
+sudo rm -f $(which get-adg-delivery)
+
+[ $(uname) = "Darwin" ] || BailOut "Can't install in $(uname)"
+
+BRANCH=$(git branch | grep '\*' | awk '{ print $NF }')
+[[ -n $1 ]] && INSTALL=$1 || INSTALL=master
+git checkout $INSTALL || exit 1
+
+git pull -q --rebase --autostash
+
+[[ -d $HOME/.credentials.d ]] || mkdir -p -d $HOME/.credentials.d
+
+SSHPEXEC=$(which sshpass 2>/dev/null)
+#[ -z "$SSHPEXEC" ] && brew install https://raw.githubusercontent.com/kadwanev/bigboybrew/master/Library/Formula/sshpass.rb
+#SSHPEXEC=$(which sshpass 2>/dev/null)
+[ -z "$SSHPEXEC" ] && echo "You should really install sshpass"
+
+UNIX2DOS=$(which unix2dos 2>/dev/null)
+[ -z "$UNIX2DOS" ] && brew install unix2dos
+UNIX2DOS=$(which unix2dos 2>/dev/null)
+[ -z "$UNIX2DOS" ] && echo "Can't find unix2dos"
+
+brew install grep >/dev/null 2>&1
+
+which xmlstarlet >/dev/null 2>&1 || brew install xmlstarlet
+
+WSI_SETTINGS=$HOME/.wsi_settings
+[ -f "$WSI_SETTINGS" ] || echo "Set up $HOME/.wsi_settings"
+
+WSI_SETTINGS_DIR=$(cat $HOME/.wsi_settings)
+[ -n "$WSI_SETTINGS_DIR" ] || echo "Why is $HOME/.wsi_settings empty?"
+
+#cp profile.centos ~/ 
+#[ -d ~/wsgc ] && cp profile.centos ~/wsgc
+
+# save meadtools git dir (this for release-settings)
+pwd > $HOME/.meadtools
+
+git pull >/dev/null 2>&1
+
+mkdir -p $HOME/bin
+
+cp mead-creds.tar /tmp
+for pdir in ~ ~/wsgc /wsgc
+do
+	[ -d $pdir ] || continue
+	mkdir -p $pdir/bin
+	cp $SCRIPTS $pdir/bin 2>/dev/null
+
+	cd $pdir/bin || exit 1
+	rm -f appset-refresh get-logs get-urls set-pass check-pass checkpass checkec getec appset jobdir pomdir prodir disable-job enable-job chksrv re-akamai
+	[ -L appset-refresh ] || ln -s appset appset-refresh
+	[ -L get-logs ] || ln -s getlogs get-logs
+	[ -L get-urls ] || ln -s geturls get-urls
+	[ -L set-pass ] || ln -s setpass set-pass
+	[ -L check-pass ] || ln -s chkpass check-pass
+	[ -L checkpass ] || ln -s chkpass checkpass
+	[ -L checkec ] || ln -s chkec checkec
+	[ -L chksrv ] || ln -s chksvc chksrv
+	[ -L checksvc ] || ln -s chksvc checksvc
+	[ -L getec ] || ln -s chkec getec
+	[ -L getversions ] || ln -s getversion getversions
+	[ -L appset ] || ln -s update appset
+	[ -L runjob ] || ln -s jenkins runjob
+
+	[ -L set-jmx ] || ln -s setjmx set-jmx
+
+	[ -L set-trace ] || ln -s setjmx set-trace
+	[ -L settrace ] || ln -s setjmx settrace
+
+	[ -L set-debug ] || ln -s setjmx set-debug
+	[ -L setdebug ] || ln -s setjmx setdebug
+
+	[ -L set-info ] || ln -s setjmx set-info
+	[ -L setinfo ] || ln -s setjmx setinfo
+
+	[ -L setwarn ] || ln -s setjmx setwarn
+	[ -L set-warn ] || ln -s setjmx set-warn
+
+	[ -L set-error ] || ln -s setjmx set-error
+	[ -L seterror ] || ln -s setjmx seterror
+
+	[ -L clear-jmx ] || ln -s setjmx clear-jmx
+	[ -L clear-debug ] || ln -s setjmx clear-debug
+	[ -L clear-trace ] || ln -s setjmx clear-trace
+	[ -L cleardebug ] || ln -s setjmx cleardebug
+	[ -L cleartrace ] || ln -s setjmx cleartrace
+
+	[ -L propset ] || ln -s propget propset
+	[ -L propcopy ] || ln -s propget propcopy
+
+	[ -L job-slack ] || ln -s jobtools job-slack
+	[ -L job-enable ] || ln -s jobtools job-enable
+	[ -L job-disable ] || ln -s jobtools job-disable
+	[ -L job-sched ] || ln -s jobtools job-sched
+	[ -L job-no-sched ] || ln -s jobtools job-no-sched
+	[ -L job-nosched ] || ln -s jobtools job-nosched
+	[ -L job-nochild ] || ln -s jobtools job-nochild
+	[ -L job-no-autodeploy ] || ln -s jobtools job-no-autodeploy
+done
+
+# this section needs work
+cd $(cat $WSI_SETTINGS) || BailOut "Can't cd to $(cat $WSI_SETTINGS) as specified in $WSI_SETTINGS" 
+#[ -d application ] || svn co https://repos.wsgc.com/svn/devops/application
+#[ -d packaging ] || svn co https://repos.wsgc.com/svn/devops/packaging/
+#svn up >/dev/null 2>&1 &
+
+echo "Done!"
+
+#for RC in ~/.profile ~/.bash_profile ~/.zshrc ~/.kshrc
+#do
+#	[ -f "$RC" ] || continue
+#	grep -q "mead-functions" $RC || echo ". $HOME/bin/mead-functions" >> $RC
+#done
+
+cd $HOME
+tar xf /tmp/mead-creds.tar
+rm /tmp/mead-creds.tar
+
+for util in jq yq 
+do
+  which $util >/dev/null 2>&1 || brew install -q $util
+done
+
+exit 0
+

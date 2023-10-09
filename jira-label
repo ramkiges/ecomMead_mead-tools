@@ -1,0 +1,122 @@
+#!/bin/bash
+# adds label to a Jira ticket
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/apps/java/bin:~/bin
+export PATH
+
+# see https://confluence.wsgc.com/display/ES/MEAD+Resolution+Labels 
+ALLOWED_LABELS="\
+enh: \
+brfx: \
+ops: \
+dev: \
+CheckGoldenPaths \
+Fix-Content \
+Update-CMX-generation \
+Deploy-MFE \
+Rejected \
+Delphix-Refresh \
+Self-Service \
+Proactive-Monitoring \
+SSL-Certificate \
+Auto-Healing \
+APP_CODE \
+CONFIG_DRIFT \
+MFE_CONFIG \
+MFE_APP \
+RESOURCES \
+DEPLOYMENT \
+WCM \
+ECM \
+CMX \
+LINUX \
+PERFORMANCE \
+ETCD_DB \
+ETCD_SYNC_APP \
+FIREWALL \
+NETWORK \
+JENKINS \
+Jenkins \
+RUNDECK \
+GITHUB \
+ORACLE_DB \
+ADD_USER \
+DATA \
+CMX-MisMatch \
+AdHoc-Appsetting \
+Update-ECM-generation \
+Update-CAT-generation \
+Update-ECM-generation \
+Clone-AppSettings \
+Deploy-Content \
+Deploy-War \
+Deploy-MFE \
+schema-switch \
+Update-Content-Paths \
+config-environment-mfe \
+create-release-branch \
+build-branch \
+mfe-config-failure"
+
+JIRA_URL="https://jira.wsgc.com/rest/api/2"
+TIMEOUT="--connect-timeout 30  --max-time 60"
+JIRA_FAIL="AUTHENTICATED_FAILED"
+JIRA_TMP="/tmp/$(basename $0)-$$.txt"
+
+orig_nocasematch=$(shopt -p nocasematch; true)
+shopt -s nocasematch
+
+BailOut() {
+  [[ -n $JIRA_TMP ]] && rm -f $JIRA_TMP
+
+  [[ -n $1 ]] && { echo "$(hostname --short)-$(basename $0): $*" >&2; exit 2; }
+	echo "Usage: $(basename $0) <ticket> <label>
+Allowed labels: https://confluence.wsgc.com/display/ES/MEAD+Resolution+Labels 
+$ALLOWED_LABELS " >&2
+
+	exit 1
+}
+
+# validate Jira creds
+[[ -e $HOME/.jira ]] && JIRA_CRED=$HOME/.jira
+[[ -e $HOME/.credentials.d/jira-cli-user ]] && JIRA_CRED=$HOME/.credentials.d/jira-cli-user
+[[ -z "$JIRA_CRED" ]] && BailOut "Jira cred file variable undefined (JIRA_CRED)"
+[[ -f "$JIRA_CRED" ]] || BailOut "Can't find Jira cred file ($JIRA_CRED)"
+source $JIRA_CRED
+[[ -z $JIRA_USER ]] && JIRA_USER=$USERNAME
+[[ -z $JIRA_PASS ]] && JIRA_PASS=$PASSWORD
+[[ -z "$JIRA_USER" ]] && BailOut "Can't parse Jira user from $JIRA_CRED"
+[[ -z "$JIRA_PASS" ]] && BailOut "Can't parse Jira pass from $JIRA_CRED"
+
+# todo - add logic to strip URL https://jira.wsgc.com/browse/MEAD-7193
+TICKETS=$(echo "$1" | tr '[:lower:]' '[:upper:]' | sed -es/,/' '/g -es/\\[//g -e s/\\]//g -es/_/-/g )
+TICKET=$(echo "$TICKETS" | sed -es/HTTPS://g -es/JIRA.WSGC.COM//g -es/BROWSE//g -es%/%' '%g)
+shift
+[[ -z $1 ]] && BailOut 
+
+orig_nocasematch=$(shopt -p nocasematch; true)
+shopt -s nocasematch
+for LABEL in $(echo "$*" | sed ':a;N;$!ba;s/\n/\\n/g' | tr -cd "[:print:]")
+do
+  ALLOWED=
+
+  [[ $LABEL =~ ^enh || $LABEL =~ ^brfx || $LABEL =~ ^ops || $LABEL =~ dev ]] && { ALLOWED=true; LABEL=$(tr '[:upper:]' '[:lower:]' <<< $LABEL); }
+  [[ $ALLOWED_LABELS =~ $LABEL ]] && ALLOWED=true
+  [[ $ALLOWED =~ true ]] || { echo "$(basename $0): label \"$LABEL\" not in allowed list"; continue; }
+
+  for jira in $TICKETS
+  do
+    [ $jira = "DEVOPS" ] && continue
+    ISSUE="$JIRA_URL/issue/$jira/"
+
+    DATA="{\"update\": {\"labels\": [ {\"add\":\"$LABEL\"} ] } }"
+
+    touch $JIRA_TMP
+    curl $TIMEOUT -sk -u $JIRA_USER:$JIRA_PASS -X PUT --data "$DATA" -H "Content-Type: application/json" $ISSUE > $JIRA_TMP 2>&1
+    [ $? -ne 0 ] && { rm -f $JIRA_TMP; continue; }
+    FAIL=$(egrep -i "$JIRA_FAIL" $JIRA_TMP | awk -F '[<>]' '{ print $3 }')
+    rm -f $JIRA_TMP
+    [ -n "$FAIL" ] && continue
+  done
+done
+
+exit 0

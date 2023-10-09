@@ -1,0 +1,92 @@
+#!/bin/bash
+# create jira ticket
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/apps/java/bin:~/bin
+export PATH
+
+# Jira ticket defaults
+TYPE="Task"
+PROJECT="Mead"
+
+# misc variables
+TIMEOUT="--connect-timeout 30 --max-time 60"
+JIRA_URL="https://jira.wsgc.com/rest/api/2/issue/"
+JIRA_DATA=/tmp/$(basename $0)-$$.json
+JIRA_FAIL="AUTHENTICATED_FAILED"
+JIRA_TMP="/tmp/$(basename $0)-$$.txt"
+umask 000
+
+BailOut() {
+	[ -n "$1" ] && echo "$(basename $0)/${LOGNAME}@$(hostname --short): $*" >&2
+	echo "Usage: $(basename $0) -p <project> -s <summary> -d <description> [-l <label>] " >&2
+	exit 1
+}
+
+# validate Jira creds
+[[ -e $HOME/.jira ]] && JIRA_CRED=$HOME/.jira
+[[ -e $HOME/.credentials.d/jira-cli-user ]] && JIRA_CRED=$HOME/.credentials.d/jira-cli-user
+[[ -z "$JIRA_CRED" ]] && BailOut "Jira cred file variable undefined (JIRA_CRED)"
+[[ -f "$JIRA_CRED" ]] || BailOut "Can't find Jira cred file ($JIRA_CRED)"
+source $JIRA_CRED
+[[ -z $JIRA_USER ]] && JIRA_USER=$USERNAME
+[[ -z $JIRA_PASS ]] && JIRA_PASS=$PASSWORD
+[[ -z "$JIRA_USER" ]] && BailOut "Can't parse Jira user from $JIRA_CRED"
+[[ -z "$JIRA_PASS" ]] && BailOut "Can't parse Jira pass from $JIRA_CRED"
+[[ -z "$JIRA_URL" ]] && BailOut "Why is JIRA_URL blank?"
+
+## argument assignment
+while getopts "hp:s:d:l:t:" opt 
+do
+    case ${opt} in
+        h) BailOut ;;            
+        p) PROJECT=$(echo $OPTARG | tr "a-z" "A-Z") ;;
+        s) SUMMARY=$OPTARG ;;
+        d) DESCRIPTION=$OPTARG ;;
+        l) LABEL=$OPTARG ;;
+        t) L_TICKET=$(echo $OPTARG | tr "a-z" "A-Z") ;;
+    esac
+done
+
+[[ -z $PROJECT ]] && BailOut "Need project"
+[[ -z $SUMMARY ]] && BailOut "Need summary"
+[[ -z $DESCRIPTION ]] && BailOut "Need description"
+
+which jq >/dev/null 2>&1 || echo "You will probably want to install jq" >&2
+
+# this will have to be tweaked according to your team's forms
+cat > $JIRA_DATA << EOF
+{ 
+    "fields": {
+       "project": {
+          "key": "$PROJECT"
+       },
+       "summary": "$SUMMARY",
+       "description": "$DESCRIPTION",
+       "labels": ["$LABEL"],
+       "issuetype": {
+          "name": "$TYPE"
+       },
+       "customfield_15793": { 
+           "value": "Mead" 
+       }
+   }
+}
+EOF
+
+curl $TIMEOUT -sk -u $JIRA_USER:$JIRA_PASS -X POST -d @$JIRA_DATA -H "Content-Type: application/json" $JIRA_URL > $JIRA_TMP 2>&1
+FAIL=$(egrep -i "$JIRA_FAIL" $JIRA_TMP | awk -F '[<>]' '{ print $3 }')
+[[ -n $FAIL ]] && BailOut "Fail - $FAIL"
+TICKET=$(cat $JIRA_TMP | jq .key | sed -es/\"//g)
+ret=$?
+
+if [[ -n "$TICKET" ]]
+then
+    echo $TICKET
+else
+    BailOut "Unable to create ticket: $(cat $JIRA_DATA)" 
+fi
+
+[[ -n $L_TICKET ]] && jira-comment "$L_TICKET $TICKET" "$TICKET linked to $L_TICKET"
+
+rm -f $JIRA_DATA $JIRA_TMP
+
+exit $ret

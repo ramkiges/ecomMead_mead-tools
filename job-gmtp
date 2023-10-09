@@ -1,0 +1,22 @@
+#!/bin/bash
+PATH=~/bin:/bin:/sbin:/usr/bin:/usr/sbin
+
+env=$(basename $(pwd) | awk -F- '{ print $2 }')
+
+git pull
+
+# disable mg and pt jobs
+echo "$env" | egrep -q "^ca|qa54" && job-disable *mg*CONTENT* *mg*WAR* 2>/dev/null
+
+# de-couple CONTENT from WAR job
+job-nochild *CONTENT* 2>/dev/null
+
+# update slack info
+#job-slack *WAR* *CONTENT* 2>/dev/null
+
+# set schedules
+job-sched *WAR* 2>/dev/null
+
+job-disable trigger-all*
+
+exit 0

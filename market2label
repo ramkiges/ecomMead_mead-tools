@@ -1,0 +1,49 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/apps:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/opt/homebrew/bin:~/bin
+
+MODE=$(basename $0 | tr '[:upper:]' '[:lower:]')
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$*" >&2
+  [[ $MODE = "market2label" ]] && echo "Usage: $(basename $0) <market>" >&2
+  [[ $MODE = "label2market" ]] && echo "Usage: $(basename $0) <label>" >&2
+  exit 1
+}
+
+if [[ $MODE = "market2label" ]]
+then
+  MARKET=$1
+  [[ -z $MARKET ]] && BailOut "Need market"
+
+  MARKET=$(echo "$MARKET" | tr '[:upper:]' '[:lower:]')
+
+  case $MARKET in
+    ca* ) export LABEL="Canada" ;;
+    us | usa | domestic | "united state*" ) export LABEL="USA" ;;
+  esac
+
+  [[ -n $LABEL ]] && { echo $LABEL; exit 0; }
+
+  exit 1
+fi
+
+if [[ $MODE = "label2market" ]]
+then
+  LABEL=$1
+  [[ -z $LABEL ]] && BailOut "Need label"
+
+  LABEL=$(echo "$LABEL" | tr '[:upper:]' '[:lower:]')
+
+  case $LABEL in
+    can* ) export MARKET="ca" ;;
+    us | usa | domestic | "united state*") export MARKET="usa" ;;
+  esac
+
+  [[ -n $MARKET ]] && { echo $MARKET; exit 0; }
+
+  exit 1
+fi
+
+exit 1
+

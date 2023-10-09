@@ -1,0 +1,67 @@
+#!/bin/bash
+# generates a list of brands by looking for the frontend poms
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+
+# pattern to match for prd
+REALM_PRD=".*prd|.*preprd"
+#caprdab|caprdsac|capreprdab|capreprdsac|prdab|prdrk|prdsac|preprdab|preprdrk
+
+ENV_LIST=
+REVERSE=r
+REALM=qa
+
+# these brands are not yet ready for some automation tasks
+INACTIVE=
+# these brands are excluded from prod until they're ready for prime time
+EXCLUDE_PROD="$INACTIVE"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*" >&2
+
+  exit 255
+}
+
+Usage() {
+  echo "$(basename $0): [-h] [-d delimiter] [-b brand] [-e pattern]
+    -d  - output delimiter (eg -d,)
+    -e  - limit to environments matching this pattern
+    -b  - brand - narrow down the list to a specific brand (eg rj) " >&2
+  exit 0
+}
+
+# argument assignment
+while getopts "hb:r:d:e:" opt 
+do
+    case ${opt} in
+        h) Usage ;;            
+        b) BRAND=$OPTARG ;;
+        r) REALM=$OPTARG ;;
+        d) DELIM=$OPTARG ;;
+        e) ENVIRO=$OPTARG ;;
+    esac
+done
+
+[[ -n $1 && -z $BRAND && -z $REALM && -z $ENVIRO && -z $DELIM ]] && Usage
+
+[[ -z $DELIM ]] && DELIM=' '
+[[ -z $REALM ]] && REALM=qa
+FRONTEND=https://repos.wsgc.com/svn/devops/application/frontend-2.1/$REALM/config/app/trunk
+svn ls --non-interactive $FRONTEND/ >/dev/null 2>&1 || BailOut "Unable to svn ls $FRONTEND"
+
+[[ -z $BRAND ]] && BRAND=$(getbrandlist)
+
+for brand in $BRAND
+do
+  svn ls --non-interactive $FRONTEND/$brand/ >/dev/null 2>&1 || BailOut "Unable to svn ls $FRONTEND/$brand"
+  if [[ -n $ENVIRO ]]
+  then
+    LIST="$(svn ls --non-interactive $FRONTEND/$brand/ | grep "/$" | egrep -i "$ENVIRO") $LIST"
+  else
+    LIST="$(svn ls --non-interactive $FRONTEND/$brand/ | grep "/$") $LIST"
+  fi
+done
+
+LIST=$(echo "$LIST" | sed -es%/%%g | egrep -iv "src" | xargs -n1 | sort -u | tr '\n' "$DELIM")
+echo "$LIST"
+
+exit 0

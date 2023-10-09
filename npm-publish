@@ -1,0 +1,49 @@
+#!/bin/bash
+# basic script to run an npm publish
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+TMP=/tmp/npm-publish
+
+BailOut() {
+	[ -n "$1" ] && echo "$*"
+	echo "Usage: $(basename $0) <repo> [build]"
+	echo
+	exit 1
+}
+
+SCM=$1
+
+[ -z "$SCM" ] && BailOut "need repo"
+[ "$2" = "build" ] && BUILD=yes
+
+# this is the command to get logged in, if you aren't already - need to figure out a way to test this
+#npm login --registry=https://npmrepo.wsgc.com/repository/wsgc-npm-local/
+mkdir -p $TMP
+cd $TMP || BailOut "Can't cd to $TMP"
+
+DIR=$(basename $SCM | sed -e s/\.git//g)
+[ -z "$DIR" ] && BailOut "Can't figure out directory name"
+
+# clean out any existing
+rm -rf $TMP/$DIR
+git clone $SCM || BailOut "Can't checkout $SCM"
+
+cd $TMP/$DIR
+git pull || BailOut "Can't pull $SCM"
+
+for sub in $(find . -type d -maxdepth 1 | egrep -vi ".git|^.$" | sed -e s=./==g)
+do
+	echo
+	echo "$(basename $0): $sub"
+	cd $sub
+	if [ -n "$BUILD" ] 
+	then
+		npm install 
+		npm run build 
+	fi
+	npm publish --registry=https://npmrepo.wsgc.com/repository/wsgc-npm-local/ --ignore-scripts
+	cd $TMP/$DIR
+done
+
+cd /tmp
+rm -rf $TMP/$DIR
+

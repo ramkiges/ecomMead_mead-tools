@@ -1,0 +1,3 @@
+#!/bin/bash
+
+host $(geturls $* 2>/dev/null | grep -i host: | awk '{ print $NF }') | tail -1 | awk '{ print $NF }'

@@ -1,0 +1,201 @@
+#!/bin/bash
+PATH=$HOME/.rd/bin:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:$HOME/bin:$PATH
+# get events
+# get all
+#alias ‘kcn’=‘kc config use-context ucp_container-api01.nonprod.wsgc.com:6443_sbasrur’
+#alias ‘kcw’=‘kc config use-context ucp_container-api02.wsgc.com:6443_sbasrur’
+#alias ‘kce’=‘kc config use-context ucp_container-api03.wsgc.com:6443_sbasrur’
+#kubectl config unset ts-sharedplatform-rck-nonprod_tfitzpatrick@wsgc.com
+
+# convert epocseconds to date:
+#date -r 1651069653 +'%Y-%m-%d %H:%M:%S'
+
+KUBE_CLUSTER=ts-sharedplatform-rck-nonprod
+KUBE_CONTEXT="${KUBE_CLUSTER}_${LOGNAME}@wsgc.com"
+
+TASK=$(basename $0)
+
+BailOut() {
+    [ -n "$1" ] && echo "$TASK: $*" >&2
+    exit 1
+}
+
+listNameSpaces() {
+    #kubectl get namespace 2>/dev/null | sort | more
+    for keyword in ecom edap plat 
+    do
+        kubectl get namespace 2>/dev/null | grep -i "^$keyword"
+    done
+}
+
+#echo "kubectl=$(which kubectl)"
+export KUBECTL=$(which kubectl)
+$KUBECTL config use-context $KUBE_CONTEXT >/dev/null 2>&1 
+ret=$?
+[[ $ret != 0 ]] && BailOut "Unable to set context [$ret] 
+$(kubectl config use-context $KUBE_CONTEXT) "
+
+[[ -z $TASK ]] && BailOut "How did TASK end up blank?"
+
+if [[ $TASK = k8s-utils ]]
+then
+  echo "
+Usage: $TASK
+  k8s-list-ns [pattern] - list available k8s namespaces
+  k8s-pods <namespace> - list pods for <namespace>
+  k8s-logs <namespace> <pod> - dump logs for <pod> in <namespace>
+"
+  exit 0
+fi
+
+if [[ $TASK =~ ingress ]]
+then
+  NS=$1
+  #kubectl get ingress -n $NS #2>/dev/null 
+  kubectl describe ingress -n $NS #2>/dev/null 
+  exit 0
+fi
+
+if echo "$TASK" | egrep -iq "k8s-list-app|k8s-list-name|k8s-list-ns|k8s-list"
+then
+  APP=$1
+  if [ -z "$APP" ]
+  then 
+    listNameSpaces 
+  else
+    listNameSpaces | egrep -i "$APP"
+  fi
+  exit 0
+fi
+
+if [[ $TASK = k8s-pods ]]
+then
+  NS=$1
+  [[ -z $NS ]] && BailOut "Usage: $TASK <namespace>"
+
+  kubectl get pods -n $NS 2>/dev/null | egrep -iv "^NAME" | awk '{ print $1 }'
+  exit 0
+fi
+
+if echo "$TASK" | egrep -iq "k8s.*pod.*del"
+then
+  NS=$1
+  POD=$2
+  [ -z "$POD" ] && BailOut "Usage: $TASK <namespace> <pod>"
+  kubectl delete pods $POD -n $NS
+  exit 0
+fi
+
+if echo "$TASK" | egrep -iq "k8s.*log"
+then
+  NS=$1
+  PODS=$2
+  KEYWORD=$3
+  [[ -z $NS ]] && BailOut "Usage: $TASK <namespace> <pod>"
+  [[ -z $PODS ]] && PODS=$(k8s-pods $NS)
+  [[ -z $PODS ]] && BailOut "Usage: $TASK <namespace> <pod>"
+  for pod in $PODS
+  do
+    if [[ -n $KEYWORD ]]
+    then
+      set -x
+      kubectl logs $pod -n $NS --since=2h 2>/dev/null | sed -es'/\\n//g' -es'/\\t//g'
+      { set +x; } 2>/dev/null
+    else
+      set -x
+      kubectl logs $pod -n $NS --since=2h 2>/dev/null | sed -es'/\\n//g' -es'/\\t//g' | egrep -i "$KEYWORD"
+      { set +x; } 2>/dev/null
+    fi
+  done
+  exit 0
+fi
+
+if [[ $TASK = "k8s-metrics" ]]
+then
+  [[ -z $1 ]] && BailOut "Need namespace"
+  NS=$1
+  #helm ls -n $NS 2>/dev/null
+  for pod in $(kubectl get pods -n $NS 2>/dev/null | egrep -iv "^NAME" | awk '{ print $1 }')
+  do
+set -x
+    kubectl -n $NS describe PodMetrics $pod
+{ set +x; } 2>/dev/null
+  done
+  exit 0
+fi 
+
+if [[ $TASK = "k8s-status" ]]
+then
+  [[ -z $1 ]] && BailOut "Need namespace"
+  NS=$1
+  helm ls -n $NS 2>/dev/null
+  kubectl get deploy -n $NS 2>/dev/null | egrep -iv "^NAME"
+  kubectl get pods -n $NS 2>/dev/null | egrep -iv "^NAME" 
+  { set +x; } 2>/dev/null
+  exit 0
+fi 
+
+if [[ $TASK = "k8s-restart" ]]
+then
+  eval k8s-stop $@    
+  eval k8s-start $@    
+  exit 0
+fi
+
+if [[ $TASK = "k8s-start" || $TASK = "k8s-stop" ]]
+then
+  NS=$1
+  [ -z "$NS" ] && BailOut "Usage: $TASK <namespace>"
+  shift
+
+  pods=$*
+  [[ -z $pods ]] && pods=$(kubectl get deploy -n $NS 2>/dev/null | awk '{ print $1 }' | egrep -iv "^name")
+  for s in $pods
+  do
+    set -x
+    kubectl scale deploy $s --replicas=0 -n $NS 2>/dev/null
+    { set +x; } 2>/dev/null
+  done
+  exit 0
+fi 
+
+if [[ $TASK = "k8s-start" ]]
+then
+  NS=$1
+  [ -z "$NS" ] && BailOut "Usage: $TASK <namespace>"
+  for s in $(kubectl get deploy -n $NS 2>/dev/null | awk '{ print $1 }' | egrep -iv "^name")
+  do
+    set -x
+    kubectl scale deploy $s --replicas=1 -n $NS 2>/dev/null
+    { set +x; } 2>/dev/null
+  done
+  exit 0
+fi 
+
+#if echo "$TASK" | egrep -iq "k8s.*uninstall"
+if [[ $TASK =~ uninstall || $TASK =~ kill ]]
+then
+  NS=$1
+  [ -z "$NS" ] && BailOut "Usage: $TASK <namespace>"
+  for s in $(kubectl get deploy -n $NS 2>/dev/null | awk '{ print $1 }' | egrep -iv "^name")
+  do
+    set -x
+    #kubectl uninstall 
+    helm uninstall $s -n $NS
+    { set +x; } 2>/dev/null
+  done
+  exit 0
+fi 
+
+if echo "$TASK" | egrep -iq "k8s.*quota"
+then
+  NS=$1
+  set -x
+  kubectl -n $NS describe quota
+  { set +x; } 2>/dev/null
+  exit 0
+fi 
+
+echo "No idea what TASK \"$TASK\" is" >&2
+
+exit 1

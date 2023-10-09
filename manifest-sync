@@ -1,0 +1,19 @@
+#!/bin/bash
+# syncs the Mead manifest repo with DevOps
+PATH=usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/release-tools:/apps/scm-tools
+TMP=$HOME/$(basename $0)
+
+#set -x
+hub clone -q git@github.wsgc.com:eCommerce-Mead/env-manifest.git $TMP
+cd $TMP || BailOut "Can't cd to $TMP"
+hub remote remove origin
+hub remote add mead git@github.wsgc.com:eCommerce-Mead/env-manifest.git
+hub remote add devops git@github.wsgc.com:eCommerce-DevOps/env-manifest.git
+hub fetch -q --all --prune >/dev/null 2>&1
+hub checkout -q release
+hub merge -q --no-edit --commit -m "[REBASE]" devops/release
+hub rebase -q devops/release
+hub push -q -f --set-upstream git@github.wsgc.com:eCommerce-Mead/env-manifest.git release >/dev/null 2>&1
+{ set +x; } 2>/dev/null
+
+exit 0

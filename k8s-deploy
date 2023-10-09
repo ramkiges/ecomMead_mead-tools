@@ -1,0 +1,255 @@
+#!/bin/bash
+# script to fix an mfe by finding and running the Jenkins jobs
+PATH=/apps/mead-tools:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:~/bin
+MATRIX=git@github.wsgc.com:eCommerce-Mead/mfe-matrix.git
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+ICON_PLUS=" (+) "
+ICON_MINUS=" (-) "
+ICON_QUEST=" (?) "
+
+HINTS_MFE_EXCLUDE="DEBUG|REQ|NODE_TLS_REJECT_UNAUTHORIZED|Failed active config schedules revision check fetch|TypeError:|sessionStorage is not defined|http-equiv|Failed active config schedules revision check fetch|^$|Header: X|Defaulted container|localStorage is not defined|500 -  ,|cache with maxAge of|cache already loaded|render.*from cache|NODE_TLS_REJECT_UNAUTHORIZED|org.springframework.web.reactive.function.client.WebClientResponseException$Unauthorized|SERVER RENDER|org.springframework.web.reactive.function.client.WebClientResponseException\$Unauthorize|brConfig cache missing|maxAge:|cache already loaded|creating new.*renderer|node --trace-warnings|RENDER\|css|/summary|analytics cannot get breadcrumb data|brConfig from cache for|loading config cache for|node --trace-warnings|cache already loaded for|proxied status code: 200|res from DP proxied server:|\|pulling config|I/O error.*request"
+
+BailOut() {
+  [ -n "$1" ] && echo "$(basename $0): $1" >&2
+	echo "Usage: $(basename $0) -m <mfe> -e <environment> -s -k -t <ticket> 
+Builds application, builds helm chart, and deploys MFE application
+  -m <mfe>          - the MFE app/svc to fix (eg ecom-svc-catalog)
+  -e <environment>  - the deployed environment (eg qa1, uat3)
+  -t <ticket>       - Jira ticket 
+  -b  - build app and helm config
+  -d  - run deployer
+  -s  - print status (does not build)
+  -k  - scale down and uninstall pods before deployment
+  -a  - Auto-Close ticket " >&2
+  exit 255
+}
+
+KILL=
+STATUS=
+VERBOSE=
+BUILD=
+DEPLOY=
+AUTO_CLOSE=
+
+ECOM=https://ecombuild.wsgc.com/jenkins/job/k8s-deployers/job/ecom/job
+EDAP=https://ecombuild.wsgc.com/jenkins/job/k8s-deployers/job/edap/job
+FLOW_PROP="/flow-definition/properties/EnvInjectJobProperty/info/propertiesContent"
+
+[[ $LOGNAME = jenkins ]] && export KUBE_USER="svcak8sci" || KUBE_USER=$LOGNAME
+
+[[ -e /var/lib/jenkins/.kube ]] && KUBE_CONFIG_PATH="/var/lib/jenkins/.kube"
+[[ -e $HOME/.kube ]] && KUBE_CONFIG_PATH="$HOME/.kube"
+
+export KUBE_CLUSTER="ts-sharedplatform-rck-nonprod"
+export KUBE_CONTEXT="${KUBE_CLUSTER}_${KUBE_USER}@wsgc.com"
+export KUBE_CONFIG="${KUBE_CONFIG_PATH}/${KUBE_USER}/${KUBE_CLUSTER}"
+
+#[[ -n $KUBE_CONFIG_PATH ]] || BailOut "KUBE_CONFIG_PATH is blank"
+#[[ -e $KUBE_CONFIG_PATH ]] || BailOut "$KUBE_CONFIG_PATH missing"
+#[[ -e $KUBE_CONFIG ]] || BailOut "$KUBE_CONFIG missing"
+#[[ -n $KUBE_CONTEXT ]] || BailOut "KUBE_CONTEXT is blank"
+
+which kubectl >/dev/null 2>&1 || BailOut "Can't find kubectl"
+#which kubelogin >/dev/null 2>&1 || BailOut "Can't find kubelogin"
+
+## argument assignment
+while getopts "am:r:e:t:hksvbd" opt 
+do
+    case ${opt} in
+        h) BailOut ;;
+        a) AUTO_CLOSE=true ;;
+        v) VERBOSE=true ;;
+        k) KILL=true ;;
+        s) STATUS=true ;;
+        b) BUILD=true ;;
+        d) DEPLOY=true ;;
+        r) RUNBY=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+        m) MFE=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+        e) ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $OPTARG) ;;
+        t) TICKET=$(tr '[:lower:]' '[:upper:]' <<< $OPTARG) ;;
+        * ) BailOut "Unknown option '${opt}' " ;;
+    esac
+done
+
+[[ $# -eq 0 ]] && BailOut
+[[ -z $RUNBY ]] && RUNBY=$LOGNAME
+[[ -z $MFE ]] && BailOut "Need mfe name"
+[[ -z $ENVIRO ]] && BailOut "Need mfe environment"
+[[ $STATUS = "true" ]] && KILL=
+[[ $KILL = "true" && -z $BUILD ]] && DEPLOY=true
+
+[[ $AUTO_CLOSE = "true" && -z $TICKET ]] && TICKET=$(jira-create -p mead -s "$(basename $0): auto-generated ticket for $MFE $ENVIRO")
+
+MSG="Begin $(basename $0) $MFE $ENVIRO"
+[[ -n $KILL ]] && MSG="$MSG KILL=$KILL"
+[[ -n $BUILD ]] && MSG="$MSG BUILD=$BUILD"
+[[ -n $DEPLOY ]] && MSG="$MSG DEPLOY=$DEPLOY"
+[[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO} $(basename $0): $MSG [$RUNBY]"
+
+NS=$(kubectl get namespace 2>/dev/null | awk '{ print $1 }' | grep -i "${MFE}-${ENVIRO}$")
+[[ -z $NS ]] && BailOut "Can't find namespace for ${MFE}-${ENVIRO}"
+kubectl config use-context $KUBE_CONTEXT
+
+# get creds
+AUTH_USER="svcaecjnk"
+AUTH_FILE=~/.credentials.d/jenkins-$AUTH_USER-user
+[ -e $AUTH_FILE ] || BailOut "Auth file ($AUTH_FILE) not found"
+AUTH_USER=$( (. "$AUTH_FILE"; echo "$USERNAME") )
+AUTH_PASS=$( (. "$AUTH_FILE"; echo "$PASSWORD") )
+[[ -z $AUTH_USER || -z $AUTH_PASS ]] && BailOut "Missing creds for $AUTH_USER"
+JENKINS_LOGIN="$AUTH_USER:$AUTH_PASS"
+
+DEPLOYER=$ECOM/$MFE/job/$ENVIRO
+# special cases for xcadmin
+[[ $MFE = "xcadmin" && $ENVIRO =~ uat ]] && DEPLOYER=$ECOM/$MFE/job/${ENVIRO}_allroles
+[[ $MFE = "xcadmin" && $ENVIRO =~ qa  ]] && DEPLOYER=$ECOM/$MFE/job/${ENVIRO}_allroles
+
+#CONFIG=$DEPLOYER/config.xml
+#curl --user "$JENKINS_LOGIN" -fsqk "$DEPLOYER" >/dev/null 2>/dev/null || DEPLOYER=$EDAP/$MFE/job/$ENVIRO
+#curl --user "$JENKINS_LOGIN" -fsqk "$DEPLOYER" >/dev/null 2>/dev/null || BailOut "Unable to find static deployer for $MFE $ENVIRO"
+#
+#HELM_PROJECT_CONFIG_JOB=$(curl --user "$JENKINS_LOGIN" -sfqk $CONFIG \
+#    | sed -es/"xml version='1.1'"/"xml version='1.0'"/g \
+#    | xmlstarlet sel -t -c "$FLOW_PROP" 2>/dev/null \
+#    | grep "HELM_PROJECT_CONFIG_JOB="  \
+#    | awk -F= '{ print $2 }' \
+#    | sed -es%'<propertiesContent>'%%g -es%'</propertiesContent>'%%g)
+#
+#HELM_PROJECT_APP_JOB=$(curl --user "$JENKINS_LOGIN" -sfqk $CONFIG \
+#    | sed -es/"xml version='1.1'"/"xml version='1.0'"/g \
+#    | xmlstarlet sel -t -c "$FLOW_PROP" 2>/dev/null \
+#    | grep "HELM_PROJECT_APP_JOB="  \
+#    | awk -F= '{ print $2 }' \
+#    | sed -es%'<propertiesContent>'%%g -es%'</propertiesContent>'%%g)
+
+PKG_BRANCH=$(get-manifest -e $ENVIRO -s $MFE -k pkg_branch)
+if [[ -n $PKG_BRANCH ]]
+then
+  ORG=$(awk -F/ '{ print $1 }' <<< $PKG_BRANCH)
+  BRANCH=$(awk -F/ '{ print $NF }' <<< $PKG_BRANCH)
+else
+  ORG=eCommerce-Kubernetes-Bedrock 
+  BRANCH=release
+fi
+
+PKG_VERSION=$(get-manifest -e $ENVIRO -s $MFE -k pkg_version)
+[[ -n $PKG_VERSION ]] && ORG="eCommerce-Kubernetes-Bedrock"
+JOB=$ORG/job/$MFE-helm-config/job/$BRANCH
+URL=https://ecombuild.wsgc.com/jenkins/job/$JOB
+
+if [[ $BUILD = true ]]
+then
+  [[ $VERBOSE = "true" ]] && echo "Build $URL"
+  jenkins-jnlp build -s $JOB
+  BUILD_RESULT=$(curl -sqk $URL/lastBuild/api/json?tree=result | jq -r .result 2>/dev/null | tr "[:upper:]" "[:lower:]")
+  [[ $BUILD_RESULT = "null" ]] && BUILD_RESULT="in-progress"
+else
+  BUILD_RESULT=success
+fi
+
+ICON=$ICON_QUEST
+[[ $BUILD_RESULT =~ succ ]] && ICON=$ICON_SUCC
+[[ $BUILD_RESULT =~ fail ]] && ICON=$ICON_FAIL
+[[ $BUILD_RESULT =~ abort ]] && ICON=$ICON_WARN
+[[ $BUILD_RESULT =~ prog ]] && ICON=$ICON_INFO
+
+[[ $STATUS = true ]] && echo "$job: $BUILD_RESULT"
+[[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON} $(basename $0): Build $BUILD_RESULT https://ecombuild.wsgc.com/jenkins/job/$o/job/$a/job/$b"
+
+if [[ $KILL = true ]]
+then
+  for s in $(kubectl get deploy -n $NS 2>/dev/null | awk '{ print $1 }' | egrep -iv "^name")
+  do
+    kubectl scale deploy $s --replicas=0 -n $NS 2>/dev/null
+    sleep 5
+    helm uninstall $s $NS 2>/dev/null
+    sleep 5
+  done
+
+  for pod in $(kubectl get pods -n $NS 2>/dev/null | egrep -iv "^NAME" | awk '{ print $1 }')
+  do
+    kubectl delete pods $pod -n $NS --grace-period=0 --force >/dev/null 2>&1 &
+    sleep 5
+  done
+  [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO} $(basename $0): Scale down/uninstall $NS"
+fi
+
+if [[ $STATUS = true ]]
+then
+  RESULT=$(curl -sqk $DEPLOYER/lastBuild/api/json?tree=result | jq -r .result 2>/dev/null | tr "[:upper:]" "[:lower:]")
+  [[ $RESULT = "null" ]] && RESULT="in-progress"
+  echo "Deploy $MFE/$ENVIRO: $RESULT"
+
+  kubectl get pods -n $NS 2>/dev/null | egrep -iv "^NAME" | awk '{ print $1 }'
+fi
+
+if [[ $DEPLOY = true ]]
+then
+  M_ENV=$(get-manifest -e $ENVIRO -s $MFE -k env)
+  [[ -z $M_ENV ]] && M_ENV=$ENVIRO
+  [[ -z $M_ENV ]] && BailOut "Could not find manifest environment"
+  jenkins-jnlp build -s manifestDriftResolve -p ENV_NAME=$M_ENV -p MANIFEST_TYPE=services-collection-manifest -p APP_NAME=$MFE -p DRY_RUN_FLAG=false
+  { ret=$?; set +x; } 2>/dev/null
+  [[ $ret -eq 0 ]] && RESULT=success || RESULT=fail
+
+  #[[ $VERBOSE = "true" ]] && echo "Deploy https://ecombuild.wsgc.com/jenkins/job/k8s-deployers/job/ecom/job/$MFE/job/$ENVIRO"
+  #jenkins-jnlp build -s k8s-deployers/job/ecom/job/$MFE/job/$ENVIRO 
+  #sleep 30
+  #RESULT=$(curl -sqk https://ecombuild.wsgc.com/jenkins/job/k8s-deployers/job/ecom/job/$MFE/job/$ENVIRO/lastBuild/api/json?tree=result | jq -r .result 2>/dev/null | tr "[:upper:]" "[:lower:]")
+  #[[ $RESULT = "null" ]] && RESULT="in-progress"
+
+  ICON=$ICON_QUEST
+  [[ $RESULT =~ succ ]] && ICON=$ICON_SUCC
+  [[ $RESULT =~ fail ]] && ICON=$ICON_FAIL
+  [[ $RESULT =~ abort ]] && ICON=$ICON_WARN
+  [[ $RESULT =~ prog ]] && ICON=$ICON_INFO
+
+  if [[ -n $TICKET ]]
+  then 
+    jira-comment "$TICKET" "${ICON} $(basename $0): Deploy $MFE $ENVIRO - $RESULT - https://ecombuild.wsgc.com/jenkins/job/k8s-deployers/job/ecom/job/$MFE/job/$ENVIRO"
+    [[ $AUTO_CLOSE = "true" && $RESULT =~ succ ]] && jira-close "$TICKET" "$ICON_INFO $(basename $0) - auto-close on successful deploy"
+  fi
+
+  take-note -f $MFE -n "$MFE - $ENVIRO - $RESULT - $TICKET"
+fi
+
+#if [[ $STATUS = "true" || $DEPLOY = "true" ]]
+#then
+#  sleep 60
+#  for pod in $(kubectl get pods -n $NS 2>/dev/null | egrep -iv "^NAME" | awk '{ print $1 }')
+#  do
+#    p=$(kubectl logs $pod -n $NS 2>/dev/null | egrep -iv "$HINTS_MFE_EXCLUDE" | uniq | tail -5)
+#    echo "$p"
+#    [[ -n $TICKET ]] && jira-comment "$TICKET" "${ICON_INFO} $(basename $0): {noformat:title=kubectl logs $pod -n $NS}$p{noformat}"
+#    echo
+#  done
+#fi
+
+# kick off a mfe data collection run
+TMP=/tmp/$(basename $0)-$MFE-$ENVIRO
+git clone -q --depth 1 $MATRIX $TMP >/dev/null 2>&1
+csv=$TMP/data/app-data_deployers.csv 
+e=$(grep $DEPLOYER $csv | awk -F, '{ print $2 }' | egrep -iv "prod|perf" | sort -u | head -1)
+if [[ -n $e ]]
+then
+  [[ $VERBOSE = "true" ]] && echo "$(basename $0): run generate-mfe-matrix-data using $e"
+  #jenkins-jnlp build generate-mfe-matrix-data -p ENV_LIST=${e} >/dev/null 2>&1 &
+else
+  [[ $VERBOSE = "true" ]] && echo "$(basename $0): can't find an enviroment using $MFE-$ENVIRO"
+fi
+
+if [[ -n $TICKET ]]
+then 
+  jira-label "$TICKET" brfx:$MFE
+  #jira-comment "$TICKET" "${ICON_INFO} $(basename $0): MFE Matrix: https://confluence.wsgc.com/display/ES/MFE+Deployment+Matrix"
+fi
+
+rm -rf $TMP
+
+exit 0

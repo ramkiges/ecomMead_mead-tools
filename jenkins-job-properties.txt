@@ -1,0 +1,32 @@
+# this is a comprehensive list of all available environments
+environments=select,qa1,qa2,qa3,qa4,qa5,qa6,qa7,qa8,qa9,qa10,qa11,qa12,qa13,qa14,qa15,qa16,qa17,qa18,qa19,qa20,qa21,qa22,qa23,qa24,qa25,qa26,qa27,qa28,qa29,qa30,qa31,qa32,qa33,qa34,qa35,qa36,qa37,qa38,qa39,qa40,qa41,qa42,qa43,qa44,qa45,qa46,qa47,qa49,qa51,qa52,qa53,qa54,qa55,qa56,qa57,qa99,rgs1,rgs2,caqa10,caqa11,caqa31,cargs1,uat1,uat2,uat3,uat4,uat5,uat6,uat7,uat8,cauat1,cauat2,cauat3,cauat4,cauat6,cauat7,bpv,cabpv,int1,int2,int3,int4,int5,caint3,caint4,caint5,perf,caperf,jukebox,jukebox-dev,jukebox-canada,jukebox-canada-dev,jukebox_canada,fktest,local,int6,int7
+# this is the default environment - we don't really want a real default environment
+environments_default=select
+
+# this is a list of UAT environments
+environments_uat=select,bpv,uat1,uat2,uat3,uat4,uat5,uat6,uat7,uat8,cauat1,cauat2,cauat3,cauat4,cauat6,cauat7,cabpv
+
+# this is a list of non-UAT environments
+environments_qa=select,qa1,qa2,qa3,qa4,qa5,qa6,qa7,qa8,qa9,qa10,qa11,qa12,qa13,qa14,qa15,qa16,qa17,qa18,qa19,qa20,qa21,qa22,qa23,qa24,qa25,qa26,qa27,qa28,qa29,qa30,qa31,qa32,qa33,qa34,qa35,qa36,qa37,qa38,qa39,qa40,qa41,qa42,qa43,qa44,qa45,qa46,qa47,qa49,qa51,qa52,qa53,qa54,qa55,qa56,qa57,qa99,rgs1,rgs2,caqa10,caqa11,caqa31,cargs1,int1,int2,int3,int4,int5,caint3,caint4,caint5
+
+# this is a list of environments to use for golden-path testing
+environments_golden=select,qa10,qa11,qa31,qa37,qa38,caqa10,caqa11,caqa31,bpv,uat1,uat2,uat3,uat4,uat5,uat6,uat7,uat8,cauat1,cauat2,cauat3,cauat4,cauat6,cauat7,cabpv
+
+# this is a list of brands
+brands=select,gr,mg,pb,pk,pt,rj,we,ws,admin,corp
+brands_uc=select,GR,MG,PB,PK,PT,RJ,WE,WS
+brands_default=select
+
+# this is the list of releases
+releases=23.18,23.16,23.14,23.12,23.10,23.08,23.06,23.04,23.02,22.18
+
+# this is a list of release shortcuts
+shortcuts=trunk-shortcut,23.18-shortcut,23.16-shortcut,23.14-shortcut,23.12-shortcut,23.10-shortcut,23.08-shortcut,23.06-shortcut,23.04-shortcut,23.02-shortcut,22.18-shortcut
+
+# these are lists of markets - slightly different contents for different jobs
+market=USA,Canada
+markets=CAN,US
+
+# this is a list of content subsystems
+subsystems=CAT,ECMCS,ECMHOMEPAGE,ECMMSG,ECMPAGES,ECMPROMOS,ENDECA,FEED_ID,HOMEPAGE,IDEAS,ODIS,ODIS_SERVICE,PROMOS,PROMO_VIZ,RECIPE,REGLANDING,MSG,MISC,TMPL,CMX
+

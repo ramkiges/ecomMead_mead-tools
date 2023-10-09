@@ -1,0 +1,52 @@
+#!/bin/bash
+# adds comments to a Jira ticket
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/apps/java/bin:~/bin
+export PATH
+
+JIRA_URL="https://jira.wsgc.com/rest/api/2"
+TIMEOUT="--connect-timeout 30  --max-time 60"
+JIRA_FAIL="AUTHENTICATED_FAILED"
+JIRA_TMP="/tmp/$(basename $0)-$$.txt"
+
+BailOut() {
+    rm -f $JIRA_TMP
+
+    [[ -n $1 ]] && { echo "$(basename $0)/${LOGNAME}@$(hostname --short): $*" >&2; exit 2; }
+    echo "Usage: $(basename $0) <ticket> <comments>"
+    exit 1
+}
+
+# validate Jira creds
+[[ -e $HOME/.jira ]] && JIRA_CRED=$HOME/.jira
+[[ -e $HOME/.credentials.d/jira-cli-user ]] && JIRA_CRED=$HOME/.credentials.d/jira-cli-user
+[[ -z $JIRA_CRED ]] && BailOut "Jira cred file variable undefined (JIRA_CRED)"
+[[ -e $JIRA_CRED ]] || BailOut "Can't find Jira cred file ($JIRA_CRED)"
+source $JIRA_CRED
+[[ -z $JIRA_USER ]] && JIRA_USER=$USERNAME
+[[ -z $JIRA_PASS ]] && JIRA_PASS=$PASSWORD
+[[ -z "$JIRA_USER" ]] && BailOut "Can't parse Jira user from $JIRA_CRED"
+[[ -z "$JIRA_PASS" ]] && BailOut "Can't parse Jira pass from $JIRA_CRED"
+
+#sed --version 2>/dev/null |grep -iq gnu || BailOut "Need to install GNU sed"
+
+# todo - add logic to strip URL https://jira.wsgc.com/browse/MEAD-7193
+TICKETS=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+TICKETS=$(echo "$TICKETS" | sed -es/,/' '/g -es/\\[//g -e s/\\]//g -es/_/-/g 2>/dev/null)
+TICKET=$(echo "$TICKETS" | sed -es/HTTPS://g -es/JIRA.WSGC.COM//g -es/BROWSE//g -es%/%' '%g 2>/dev/null)
+shift
+COMMENTS=$(echo "$*" | sed ':a;N;$!ba;s/\n/\\n/g' | tr -cd "[:print:]")
+[[ -z $COMMENTS ]] && BailOut
+
+for jira in $TICKETS
+do
+    [ $jira = "DEVOPS" ] && continue
+    ISSUE="$JIRA_URL/issue/$jira/comment"
+    DATA="{\"body\":\"$COMMENTS\"}"
+    curl $TIMEOUT -sk -u $JIRA_USER:$JIRA_PASS -X POST --data "$DATA" -H "Content-Type: application/json" $ISSUE > $JIRA_TMP 2>&1
+    [[ $? -ne 0 ]] && BailOut "curl failed"        
+    FAIL=$(grep -Ei "$JIRA_FAIL" $JIRA_TMP | awk -F '[<>]' '{ print $3 }')
+    [[ -n $FAIL ]] && BailOut "Fail - $FAIL"
+    rm -f $JIRA_TMP
+done
+
+exit 0

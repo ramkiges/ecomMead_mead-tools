@@ -1,0 +1,95 @@
+#!/bin/bash
+# simple script for tweaking jenkins jobs
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps:~/bin:/wsgc/bin
+export PATH
+DEFAULT_TIMESPEC="H H(18-23) * * *"
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$1" 
+
+	echo "Usage: $(basename $0) <job> ..."
+	exit 1
+}
+
+[ -z "$1" ] && BailOut
+
+[ -z "$TIMESPEC" ] && TIMESPEC=$DEFAULT_TIMESPEC
+
+for JOB in $*
+do
+	[ ! -f "$JOB" ] && JOB="$JOB.xml"
+	[ ! -f "$JOB" ] && BailOut "Can't find $JOB"
+
+	git pull -q >/dev/null 2>&1
+
+  sed -es/"version='1.1'"/"version='1.0'"/g -i $JOB
+
+	case $(basename $0) in
+		job-disable ) 
+      xmlstarlet ed --inplace -u "project/disabled" -v "true" $JOB
+      MSG="$(basename $0): disable job"
+		;;
+
+		job-enable )
+      xmlstarlet ed --inplace -u "project/disabled" -v "false" $JOB
+      MSG="$(basename $0): enable job"
+		;;
+
+		job-sched )
+            env=$(echo "$JOB" | grep -i "deploy-" | awk -F- '{ print $2 }')
+            case $env in
+                bpv | qa54 | qa31 | caqa31 ) TIMESPEC="H 21 * * *" ;;
+                rgs* ) TIMESPEC="H 19 * * *" ;;
+                uat1 | uat2 | uat3 | uat4 | uat6 ) TIMESPEC="" ;;
+                cargs1 | cauat* | cadev* | cabpv* ) TIMESPEC="H 23 * * *" ;;
+                qa10 | caqa10 ) TIMESPEC="H 8,18 * * *" ;;
+                qa11 | caqa11 | int* | qa31 ) TIMESPEC="H H(16-18) * * *" ;;
+                qa27 ) TIMESPEC="H H(16-19) * * *" ;;
+                * ) TIMESPEC="H H(1-4) * * *" ;;
+            esac
+            echo "$JOB" | grep -iq "appsetting" && TIMESPEC="H/5 * * * *"
+			      grep -iq '<spec>' $JOB && cat $JOB | sed -e s%"<spec>.*"%"<spec>$TIMESPEC</spec>"%g > /tmp/$JOB.new && cp /tmp/$JOB.new $JOB
+            MSG="$(basename $0): set job execution time"
+		;;
+#		job-desc )
+#			grep -iq '<description>' $JOB && cat $JOB | sed -e s%"<description>.*"%"</description></description>"%g > /tmp/$JOB.new && cp /tmp/$JOB.new $JOB
+#			MSG="$(basename $0): set job description"
+#		;;
+		job-no-autodeploy | job-no-sched | job-nosched ) 
+			grep -iq '<spec>' $JOB && cat $JOB | sed -e s%"<spec>.*"%"<spec></spec>"%g > /tmp/$JOB.new && cp /tmp/$JOB.new $JOB
+            MSG="$(basename $0): remove scheduled execution"
+        ;;
+		job-nochild ) 
+			cat $JOB | sed -e s%"<childProjects>.*"%"<childProjects></childProjects>"%g > /tmp/$JOB.new && cp /tmp/$JOB.new $JOB
+            MSG="$(basename $0): remove child jobs"
+		;;
+    job-slack )
+            #default channel
+            ROOM="#team-devops-notice"
+            env=$(echo "$JOB" | grep -i "deploy-" | awk -F- '{ print $2 }')
+            case $env in
+                qa35   ) ROOM="#team-ecom-zarkos" ;;
+                qa54   ) ROOM="#qa54-gmtp-env" ;;
+                qa31   ) ROOM="#qa54-gmtp-env" ;;
+                caqa31   ) ROOM="#qa54-gmtp-env" ;;
+                caqa10 ) ROOM="#qa54-gmtp-env" ;;
+                caqa11 ) ROOM="#qa54-gmtp-env" ;;
+                #cauat* ) ROOM="#qa54-gmtp-env" ;;
+            esac
+            cat $JOB | sed -es%"<room>.*"%"<room>$ROOM</room>"%g > /tmp/$JOB.new && cp /tmp/$JOB.new $JOB
+    ;;
+		* ) 
+			echo "No idea what's going on here - no symlink for $0"
+			exit 1
+		;;
+	esac 
+
+	git add $JOB 
+done
+git commit -m "[DEVOPS] $MSG " && git push -q >/dev/null 2>&1
+
+sleep 5
+
+#runjob build JenkinsJobMgr
+

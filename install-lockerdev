@@ -1,0 +1,37 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:$HOME/bin:$PATH
+
+sudo rm -f /apps/mead-tools/get-adg-delivery
+
+FILES="get-env-team cleanup-mead-tools take-note get-manifest-property get-catalog* jenkins-job-properties.txt setenv-mead ecm2gen test-svn-access geturls getschema get-schema getdb get-db copy-ecm-generations.sh chksvc jira-* wcm-update-recipe wcm-update-cat brand2site site2brand gen2dir dir2gen jenkins-jnlp jmxclient.jar activate-sku update-xcadm-content getbrand getdomain get-domain getversion asset-clone propset propget update-security-privs getsiteid get-siteid get-site-id site2market market2label label2market slack-comment get-market getmarket get-market gethost wsi_settings.sh wsi_settings set-backend*  yq getdbenv  commit-check commit-clear captcha generation-check generation-clear generation-check-group getakamai getbrandlist copy-prod-generations getoverride get-override-url getoauthhost update-etcd-bootstrap-records  set-oauth get-brand-list get-buildsystem-host get-buildsystem-url get-deployment-properties validate-content-generations get-akamai get-origin get-mfe-generations get-dp-generations get-dp-setting parse-log get-installation get-env-list get-cmx-* get-manifest get-oauth-host get-overridescope get-appsetting-job stage-*-generation get-dp-schema chkschema get-etcd-* get-ecm-* get-bgb-* get-adg-* get-backend etcd-bootstrap-all set-manifest-property sync-fork appsetting-blame get-job-history"
+
+[[ $(hostname) = "artrck-vdcn002" ]] || exit 1
+
+BRANCH=$(git branch | grep '\*' | awk '{ print $NF }')
+[[ -n $1 ]] && INSTALL=$1 || INSTALL=master
+git checkout $INSTALL || exit 1
+
+sudo mkdir -p /apps/mead-tools
+sudo chmod 775 /apps/mead-tools
+sudo chown tomcat:webadmin /apps/mead-tools
+
+for file in $FILES
+do
+	echo "$file" | egrep -iq "generate-" && continue
+
+  [[ -e /apps/mead-tools/$(basename $file) ]] && sudo mv /apps/mead-tools/$(basename $file) /apps/mead-tools/.$(basename $file)
+	sudo cp $file /apps/mead-tools
+  sudo chown tomcat:webadmin /apps/mead-tools/$(basename $file) &
+done
+
+[[ -e /usr/local/bin/yq ]] || sudo cp yq /usr/local/bin
+rpm -qa | grep -iq jq || sudo yum -y install jq -d0
+rpm -qa | grep -iq hub || sudo yum -y install hub -d0
+rpm -qa | grep -iq "^datamash-" || sudo yum -y install datamash -d0
+
+sudo cp mead-creds.tar /home/imageuser
+sudo su - imageuser bash -c "cd /home/imageuser; tar xf mead-creds.tar"
+sudo cp mead-creds.tar /home/builder
+sudo su - builder bash -c "cd /home/builder; tar xf mead-creds.tar"
+
+#sudo /usr/bin/yum -y --disablerepo=\* --enablerepo=wsgc-\* update wsgc-devops-toolchain-scm-tools-1.0 -d0

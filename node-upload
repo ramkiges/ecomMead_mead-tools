@@ -1,0 +1,103 @@
+#!/bin/bash
+# used to upload node sass binaries to nexus
+# https://github.com/sass/node-sass/releases
+# https://npmjs.org/package/node-sass
+#https://nodejs.org/dist/v12.18.2/node-v12.18.2-linux-x64.tar.gz
+TMP=/tmp/$(basename $0)
+
+# .npmrepo is where the creds would be kept
+NPM_CRED=$HOME/.npmrepo
+
+# list of bindings to grab for that version
+BUILD_LIST="57 64 67 72 79 83 88 93 108"
+########
+
+BailOut() {
+    [ -n "$1" ] && echo "$*"
+    echo "Usage: $(basename $0) <version>
+https://github.com/sass/node-sass/releases
+https://npmjs.org/package/node-sass"
+    exit 1
+}
+
+VERSION=$1
+VERSION=4.17.0
+[ -z "$VERSION" ] && BailOut "Need version to download and stage"
+
+# validate NPM repo creds
+[ -z "$NPM_CRED" ] && BailOut "NPM cred file variable undefined (NPM_CRED)"
+[ -f "$NPM_CRED" ] || BailOut "Can't find NPM cred file ($NPM_CRED)"
+
+source $NPM_CRED
+[ -z "$NPM_USER" ] && BailOut "Can't parse NPM user from $NPM_CRED"
+[ -z "$NPM_PASS" ] && BailOut "Can't parse NPM pass from $NPM_CRED"
+LOGIN="$NPM_USER:$NPM_PASS"
+
+# set up the working area
+rm -rf $TMP
+mkdir -p $TMP || BailOut "Can't create $TMP"
+cd $TMP || BailOut "Can't cd to $TMP"
+echo "Version: $VERSION" > README
+
+# sanity checks
+[ -z "$VERSION" ] && BailOut "Need version!"
+[ -z "$BUILD_LIST" ] && BailOut "Need list of builds to download/stage!"
+
+# remove any existing files
+rm -f *.node
+
+for PLATFORM in linux-x64 win32-x64 darwin-x64
+do
+    for BUILD in $BUILD_LIST
+    do
+        URL="https://github.com/sass/node-sass/releases/download/v${VERSION}/${PLATFORM}-${BUILD}_binding.node"
+        FILE="${PLATFORM}-${BUILD}_binding.node"
+        echo "Download: $PLATFORM $VERSION $BUILD - $FILE from $URL"
+        curl -s -q -L -k -O "$URL"
+        if [ $? -ne 0 ] 
+        then
+            echo "Failed to download - curl returned $?"
+            continue
+        fi
+
+        if [ ! -f "$FILE" ] 
+        then
+            echo "Failed to download - file is missing"
+            continue
+        fi
+
+        if file $FILE | egrep -qi "ascii|html" 
+        then
+            echo "Alternate deployment"
+            URL=https://nodejs.org/dist/v${VERSION}/node-v${VERSION}-${PLATFORM}.tar.gz
+            NEW_FILE=$(basename $URL)
+
+            [[ -e $NEW_FILE ]] || { echo "Download $NEW_FILE"; curl -s -q -L -k -O "$URL"; }
+            file $NEW_FILE | egrep -qi "ascii|html" && { echo "Still not a valid file $NEW_FILE"; echo; break; }
+
+            set -x
+            scp -q $NEW_FILE rundeck:/tmp
+            ssh -q rundeck "curl -u $LOGIN --upload-file /tmp/$NEW_FILE https://npmrepo-dev.wsgc.com/repository/npm-external/nodejs/v${VERSION}/$NEW_FILE --insecure"
+            ssh -q rundeck "curl -u $LOGIN --upload-file /tmp/$NEW_FILE https://npmrepo.wsgc.com/repository/npm-external/nodejs/v${VERSION}/$NEW_FILE --insecure"
+            set +x
+            #curl -u $LOGIN --upload-file $NEW_FILE https://npmrepo-dev.wsgc.com/repository/npm-external/nodejs/v${VERSION}/$NEW_FILE --insecure
+            #curl -u $LOGIN --upload-file $NEW_FILE https://npmrepo.wsgc.com/repository/npm-external/nodejs/v${VERSION}/$NEW_FILE --insecure
+
+            echo
+            break
+        fi
+
+        if file $FILE | egrep -qi "ascii|html" 
+        then
+            echo "Failed to download $BUILD - incorrect type (probably not a valid combination)"
+            continue                
+        fi
+    
+        echo "Upload:   $PLATFORM $VERSION $BUILD - $FILE to nexus as v${VERSION}/${PLATFORM}-${BUILD}_binding.node"
+        curl -u $LOGIN --upload-file $FILE https://npmrepo-dev.wsgc.com/repository/wsgc-raw-local/v${VERSION}/${PLATFORM}-${BUILD}_binding.node --insecure
+        curl -u $LOGIN --upload-file $FILE https://npmrepo.wsgc.com/repository/wsgc-raw-local/v${VERSION}/${PLATFORM}-${BUILD}_binding.node --insecure
+
+        echo
+    done
+done
+

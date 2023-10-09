@@ -1,0 +1,666 @@
+#!/bin/bash
+# grabs the version number for a given artifact from artifactory
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:~/bin
+
+# constants
+NS="http://maven.apache.org/POM/4.0.0"
+ARTIFACTORY_URL="https://artifactory.wsgc.com/artifactory"
+#ARTIFACTORY_URL="https://artrck-vccn006.wsgc.com/artifactory"
+SNAPSHOTREPO_URL="https://snapshotrepo.wsgc.com/artifactory/snapshotrepo-rpm"
+CONFIGS="wsgc-devops-releases/com/wsgc/devops"
+WSGC_RELEASES="wsgc-releases/com/wsgc"
+DEVOPS_RELEASES="wsgc-devops-releases/com/wsgc"
+export TZ="America/Los_Angeles"
+CURL_OPTIONS="-L --connect-timeout 10 --max-time 20"
+DP_SITES="git@github.wsgc.com:eCommerce-Bedrock/dp-sites.git"
+DP_BASELOGIC="git@github.wsgc.com:eCommerce-Bedrock/dp-baselogic.git"
+umask 000
+cd /tmp
+
+BailOut() {
+  [ -n "$1" ] && (>&2 echo "$(basename $0) error: $*")
+	(>&2 echo "Usage: $(basename $0) <artifact> [release] ")
+
+    [ -d "$TMP_DP" ] && rm -rf $TMP_DP 
+    [ -d "$TMP_BASELOGIC" ] && rm -rf $TMP_BASELOGIC 
+	exit 1
+}
+
+case $(basename $0) in
+    getversion )
+        MODE=getversion
+        ARTIFACTORY=$ARTIFACTORY_URL
+
+        # parse artifactory properties file
+        for credfile in $(ls ~/.artifactory $HOME/.credentials.d/artifactory-devops_ro-user $HOME/.credentials.d/artifactory-mavenbuild-user 2>/dev/null) 
+        do
+            ART_RO_USER=$(egrep "USERNAME=|ART_RO_USER=" $credfile | grep -iv "^.*#" | tail -1 | awk -F= '{ print $2 }')
+            ART_RO_PASS=$(egrep "PASSWORD=|ART_RO_PASS=" $credfile | grep -iv "^.*#" | tail -1 | awk -F= '{ print $2 }')
+            [[ -n $ART_RO_USER && -n $ART_RO_PASS ]] && break
+        done
+        [[ -z $ART_RO_USER || -z $ART_RO_PASS ]] && BailOut "Unable to find artifactory creds"
+        CURL_LOGIN="--user $ART_RO_USER:$ART_RO_PASS"
+    ;;
+
+    getsnapshot )
+        MODE=getsnapshot
+        ARTIFACTORY=$SNAPSHOTREPO_URL
+        CURL_LOGIN=
+    ;;
+    *) BailOut "Can't figure out which artifactory instance to use" ;;
+esac
+
+ARTIFACT=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+RELEASE=$(echo "$2" | egrep -i "^[a-z]|^[1-9][0-9]\.[0-9][0-9]" | tr '[:upper:]' '[:lower:]')
+ART_VERSION=$(echo "$2" | grep -i "^[0-9]")
+
+[ -z "$ARTIFACT" ] && BailOut
+
+ARTIFACT=$(echo "$ARTIFACT" | sed -e s/^dp-//g)
+
+lookUp() {
+	REPO="$1"
+
+  [[ -n $VERBOSE ]] && echo "$(basename $0): $(basename $REPO)" >&2
+
+    # special snowflake hack for releases which are in the "wrong" repo in artifactory
+    [ "$RELEASE" = "aquaman" ] && REPO=$(echo "$REPO" | sed -es/wsgc-devops-releases/wsgc-releases/g)
+    [ "$RELEASE" = "jakarta" ] && REPO=$(echo "$REPO" | sed -es/wsgc-devops-releases/wsgc-releases/g)
+    [ "$RELEASE" = "istanbul" ] && REPO=$(echo "$REPO" | sed -es/wsgc-devops-releases/wsgc-releases/g)
+    [ "$RELEASE" = "helsinki" ] && REPO=$(echo "$REPO" | sed -es/wsgc-devops-releases/wsgc-releases/g)
+    #[ "$RELEASE" = "ironman" ] && REPO=$(echo "$REPO" | sed -es/wsgc-devops-releases/wsgc-releases/g)
+
+    [[ $RELEASE = "release" ]] && RELEASE=
+    [[ $RELEASE = "trunk" ]] && RELEASE=
+
+    # if we're passed a release name, look up the corresponding foundation/baselogic/components used in that release
+	if [ -n "$RELEASE" ] 
+	then
+        # checkout the shortcut
+		    SVN_SHORTCUT="https://repos.wsgc.com/svn/shortcuts/evolution/branches/$RELEASE-shortcut"
+		    svn ls $SVN_SHORTCUT >/dev/null 2>&1 || BailOut "Can't find shortcut for $RELEASE ($SVN_SHORTCUT)"
+
+        # get the numerical version of the release from java.yml
+        RELEASE_VERSION=$(svn cat $SVN_SHORTCUT/java.yaml 2>/dev/null | grep -i "branch:" | awk '{ print $NF }' | sed -es/release-//g -es/\.x$//g -es/branch://gi)
+        [[ -z $RELEASE_VERSION ]] && BailOut "RELEASE_VERSION came up empty - branch is blank in java.yaml?"
+        echo "$ARTIFACT" | egrep -iq "sites|admin|gr|mg|pb|pk|pt|rj|we|ws" && TARGET_VERSION=$RELEASE_VERSION
+
+        # for foundation/platform/components, check out the git repos so we can read their poms
+        if [ "$ARTIFACT" = "foundation" -o "$ARTIFACT" = "baselogic" -o "$ARTIFACT" = "components" ]
+        then
+            # checkout dp-sites 
+            TMP_DP=/tmp/getversion-$RELEASE-dp-sites-$RELEASE_VERSION-$$
+            mkdir -p $TMP_DP || BailOut "could not create $TMP_DP"
+            git clone $DP_SITES $TMP_DP >/dev/null 2>&1 || BailOut "Could not clone DP sites $DP_SITES ($RELEASE/$RELEASE_VERSION)"
+            cd $TMP_DP || BailOut "Could not cd to $TMP_DP"
+
+            # checkout branch associated with this release
+            git checkout release-${RELEASE_VERSION}.x >/dev/null 2>&1 || BailOut "Could not checkout DP release-${RELEASE_VERSION}.x"
+            BASELOGIC=$(xmlstarlet sel -N pom=$NS -t -v "/pom:project/pom:properties/pom:baselogic.version" pom.xml 2>/dev/null | sed -es/-SNAPSHOT//g | tr -d "[:space:]")
+            # if the version is a -SNAPSHOT then go back and get the released version
+            BASELOGIC_SNAPSHOT=$(xmlstarlet sel -N pom=$NS -t -v "/pom:project/pom:properties/pom:baselogic.version" pom.xml 2>/dev/null | grep -i -- "-SNAPSHOT")
+            [ -n "$BASELOGIC_SNAPSHOT" ] && BASELOGIC=$(getversion baselogic $BASELOGIC)
+            # if that didn't work, go back and get the snapshot version
+            [ -z "$BASELOGIC" ] && BASELOGIC=$(xmlstarlet sel -N pom=$NS -t -v "/pom:project/pom:properties/pom:baselogic.version" pom.xml 2>/dev/null | sed -es/-SNAPSHOT//g )
+
+            # checkout branch of baselogic associated with this release
+            TMP_BASELOGIC=/tmp/getversion-$RELEASE-dp-baselogic-$BASELOGIC-$$
+            mkdir -p $TMP_BASELOGIC || BailOut "could not create $TMP_BASELOGIC"
+            git clone $DP_BASELOGIC $TMP_BASELOGIC >/dev/null 2>&1 || BailOut "Can't clone baselogic $DP_BASELOGIC"
+            cd $TMP_BASELOGIC || BailOut "Could not cd to $TMP_BASELOGIC"
+            git checkout tags/release-$BASELOGIC >/dev/null 2>&1 || BailOut "Could not checkout baselogic tags/release-$BASELOGIC"
+
+            # 'TARGET_VERSION' is the version of the artifact that we will look for in artifactory, not to be confused with the release version
+            # we already have the baselogic version
+            [ "$ARTIFACT" = "baselogic" ] && TARGET_VERSION=$BASELOGIC
+
+            # parse foundation version from the pom
+            [ "$ARTIFACT" = "foundation" ] && TARGET_VERSION=$(xmlstarlet sel -N pom=$NS -t -v "/pom:project/pom:properties/pom:foundation.version" pom.xml 2>/dev/null)
+
+            # parse components  version from the pom
+            [ "$ARTIFACT" = "components" ] && TARGET_VERSION=$(xmlstarlet sel -N pom=$NS -t -v "/pom:project/pom:properties/pom:components.version" pom.xml 2>/dev/null)
+
+            # clean up
+            [ -z "$DEBUG" ] && rm -rf $TMP_DP $TMP_BASELOGIC 
+            cd /tmp
+        fi
+	fi
+
+    # grab metadata from arrtfactory
+	FETCH="curl $CURL_OPTIONS $CURL_LOGIN -s --insecure $ARTIFACTORY/$REPO/maven-metadata.xml"
+
+	if [ -n "$RELEASE_VERSION" ]
+	then
+        # if we're narrowing our search by release version, then look for TARGET_VERSION in the metadata
+		    VERSION=$($FETCH | grep -i '<version>' | egrep -i "<version>$TARGET_VERSION</version>|<version>$TARGET_VERSION\.[[:digit:]]{1,4}</version>" | tail -1 | awk -F '[<>]' '{ print $3 }')
+
+        # this is a hack for certain corner cases, like kittypryde
+        if [ -z "$VERSION" ]
+        then
+          echo "$ARTIFACT" | egrep -iq "sites|admin|gr|mg|pb|pk|pt|rj|we|ws" && VERSION=$RELEASE_VERSION
+          echo "$ARTIFACT" | egrep -iq "baselogic" && VERSION=$BASELOGIC
+        fi
+	else
+        # otherwise just grab the lastest version
+        VERSION=$($FETCH | grep -i "<version>$ART_VERSION.*" | grep -i "<version>[0-9].*" | awk -F '[<>]' '{ print $3 }' | sort --version-sort | tail -1)
+	fi
+
+    # print the verson on stdout
+	echo "$VERSION"
+
+    # if env variable SHOWREPO is set, print the repo URL
+	[ -n "$SHOWREPO" ] && echo "Repo=$ARTIFACTORY/$REPO"
+
+    # if env variable SHOWLINK is set, print the artifactory URL
+	[ -n "$SHOWLINK" ] && echo "Artifact=$ARTIFACTORY/$REPO/$VERSION"
+
+    # if env variable SHOWTIME is set, print the datestamp of the artifact
+	if [ -n "$SHOWTIME" -o -n "$TIMESTAMP" ]
+	then
+        POM=$(curl $CURL_OPTIONS $CURL_LOGIN --list-only -s --insecure $ARTIFACTORY/$REPO/$VERSION/ | grep -i "\.pom" | head -1 | awk -F '[""]' '{ print $2 }')
+        DATE=$(curl $CURL_OPTIONS $CURL_LOGIN --head -s --insecure $ARTIFACTORY/$REPO/$VERSION/$POM |grep -i "last-modified" | cut -d: -f 2- | cut -d, -f 2- | sed -e s/'^ '//g)
+        [ `uname` = "Linux" ] && DATE=$(date -d "$DATE" +'%Y-%m-%d %H:%M')
+        [ `uname` = "Darwin" ] && DATE=$(date -j -f '%d %b %Y %T %Z' "$DATE" +'%Y-%m-%d %H:%M' 2>/dev/null)
+        echo "TimeStamp=$DATE"
+	fi
+}
+
+#SHOWCONF=1
+if [ -n "$SHOWCONF" -o -n "$SHOWCFG" -o -n "$SHOWCONFIG" -o -n "$SHOWCONFIGS" ]
+then
+	for package in $(curl $CURL_OPTIONS $CURL_LOGIN -s --insecure "$ARTIFACTORY/$CONFIGS/" | grep "href=" | awk -F '[""]' '{ print $2 }' | egrep -vi '\.\.' )
+	do
+		S=
+		LIST=$(curl $CURL_OPTIONS $CURL_LOGIN -s --insecure "$ARTIFACTORY/$CONFIGS/$package/" | grep "href=" | awk -F '[""]' '{ print $2 }' | egrep "$ARTIFACT-prd")
+		for dir in $LIST
+		do
+			SINGLE=$(echo "$dir" | egrep -vi 'gr-|mg-|pb-|pk-|pt-|we-|ws-|-mg|-pb|-pt|-rj|-pk|-we|-ws|prdab|prdrk|prdsac')
+			if [ -n "$SINGLE" ] 
+			then
+				SINGLE=$(echo "$SINGLE" | sed -e s=/==g)
+				V=$(SHOWTIME=  lookUp "$CONFIGS/$ARTIFACT/$SINGLE" | head -1)
+				T=$(SHOWTIME=1 lookUp "$CONFIGS/$ARTIFACT/$SINGLE" | grep -i timestamp | awk -F= '{ print $2 }')
+				/bin/echo -n "$V%$T|"
+				break
+			else
+				[ -z "$S" ] && /bin/echo -n "|"
+				S=1
+			fi
+			
+			MULTI=$(echo "$dir" | egrep -i 'prdab|prdrk|prdsac' | egrep -vi 'gr-|mg-|pb-|pk-|pt-|we-|ws-|-mg|-pb|-pt|-pk|-rj|-we|-ws' )
+			for site in prdab prdrk prdsac
+			do
+				for pkg in $MULTI
+				do
+					echo "$pkg" | grep -iq "$site" || continue	
+					pkg=$(echo "$pkg" | sed -e s=/==g)
+					V=$(SHOWTIME=  lookUp "$CONFIGS/$ARTIFACT/$pkg" | head -1)
+					T=$(SHOWTIME=1 lookUp "$CONFIGS/$ARTIFACT/$pkg" | grep -i timestamp | awk -F= '{ print $2 }')
+					/bin/echo -n "$V%$T|"
+				done
+			done
+		done
+	done
+	exit 0
+fi
+
+# special trick for ecom-svc- artifacts
+if echo "$ARTIFACT" | grep -iq "ecom-svc-" 
+then
+  v=
+  SVC=$(echo "$ARTIFACT" | cut -d- -f3- | sed -es/-//g)
+  [[ $ARTIFACT = wsgc-ecom-svc-catalog-webapp ]] && { lookUp "$WSGC_RELEASES/ecommerce/svc/catalog/wsgc-ecom-svc-catalog-webapp"; exit 0; }
+  [[ $ARTIFACT = ecom-svc-checkout-webapp-parent ]] && { lookUp "$WSGC_RELEASES/ecommerce/svc/checkout/wsgc-ecom-svc-checkout-webapp-parent"; exit 0; }
+  [[ $ARTIFACT = ecom-svc-app-delivery ]] && { lookUp "$WSGC_RELEASES/ecommerce/appdelivery/ecom-svc-app-delivery"; exit 0; }
+  [[ $ARTIFACT = ecom-svc-parent ]] && { lookUp "$WSGC_RELEASES/ecommerce/svc/$ARTIFACT"; exit 0; }
+  [[ $ARTIFACT = ecom-svc-associateorder ]] && ARTIFACT=ecom-svc-associate-order
+  [[ $ARTIFACT = ecom-svc-businesssales ]] && ARTIFACT=ecom-svc-business-sales
+  [[ $ARTIFACT = ecom-svc-creditcard ]] && ARTIFACT=ecom-svc-credit-card
+  [[ $ARTIFACT = ecom-svc-customerservice ]] && ARTIFACT=ecom-svc-customer-service
+  [[ $ARTIFACT = ecom-svc-productselection ]] && ARTIFACT=ecom-svc-product-selection
+  [[ $ARTIFACT = ecom-svc-internationalcheckout ]] && ARTIFACT=ecom-svc-international-checkout
+  [[ $ARTIFACT = ecom-svc-order-servicing ]] && ARTIFACT=ecom-svc-order-servicing
+  [[ $ARTIFACT = ecom-svc-dpdelivery ]] && ARTIFACT=ecom-svc-dp-delivery
+  [[ $ARTIFACT = ecom-svc-customer ]] && ARTIFACT=ecom-svc-customer
+  [[ -z $v ]] && v=$(lookUp "$WSGC_RELEASES/ecommerce/svc/$SVC/$ARTIFACT")
+  [[ -n $v ]] && { echo "$v"; exit 0; }
+  echo "*** $(basename $0): did not find $ARTIFACT in ecom-svc ***" >&2
+fi
+
+# for released artifacts, this big honkin' case statement serves as a 'shortcut' so we don't have to troll through artifactory
+if [ $MODE = "getversion" ]
+then
+    case $ARTIFACT in
+
+      wsgc-credit-card-orchestration ) lookUp "$WSGC_RELEASES/creditcard/orchestration/wsgc-credit-card-orchestration/"; exit 0;;
+      wsgc-corp | corp ) lookUp "$WSGC_RELEASES/ecommerce/wsgc-corp/"; exit 0;;
+      wsgc-devops-corp-common-config-app ) lookUp "$DEVOPS_RELEASES/devops/corp/$ARTIFACT/"; exit 0;;
+      wsgc-devops-corp-service-tomcat ) lookUp "$DEVOPS_RELEASES/devops/corp/$ARTIFACT/"; exit 0;;
+      wsgc-devops-corp-prdrk-config-app ) lookUp "$DEVOPS_RELEASES/devops/corp/$ARTIFACT/"; exit 0;;
+      wsgc-devops-corp-prdab-config-app ) lookUp "$DEVOPS_RELEASES/devops/corp/$ARTIFACT/"; exit 0;;
+
+	    aem ) lookUp "ext-release-local/com/adobe/AEM6"; exit 0;;
+	    #wsgc-devops-edam-common-config | wsgc-edam-tools ) lookUp "$WSGC_RELEASES/devops/edam-tools/wsgc-edam-tools"; exit 0;;
+
+	    edam-tools | wsgc-edam-tools ) lookUp "$WSGC_RELEASES/devops/edam-tools/wsgc-edam-tools"; exit 0;;
+
+      edam-common* | \
+      edam-uat* | \
+      ui.* | \
+      ui.apps.*.config | \
+      ui.*.*.acls | \
+      ui.*.acls | \
+      ui.oak.index | \
+      ui.rep.namespaces | \
+      ui.system.user ) \
+        v=$(lookUp "$DEVOPS_RELEASES/devops/edam/$ARTIFACT")
+        [ -z "$v" ] && v=$(lookUp "$DEVOPS_RELEASES/devops/edam/we/$ARTIFACT")
+        echo $v
+        exit 0
+      ;;
+
+      cma-author-config ) lookUp "$DEVOPS_RELEASES/devops/cma/author/cma-author-config"; exit 0;;
+      wsgc-devops-cma-common-config ) lookUp "$DEVOPS_RELEASES/devops/cma/wsgc-devops-cma-common-config"; exit 0;;
+
+      etcd-syncappconfig-helm-config | etcd-syncappconfig ) lookUp "$WSGC_RELEASES/ecommerce/appdelivery/ecom-svc-app-delivery"; exit 0;;
+      mfe-interim-build-tool ) lookUp "$WSGC_RELEASES/ecommerce/tools/mfe-interim-build-tool"; exit 0;;
+
+    	entity-compare-tool ) lookUp "$WSGC_RELEASES/ecommerce/tool/entity-compare-tool"; exit 0;;
+
+      ecom-svc-order-servicing ) lookUp "$WSGC_RELEASES/ecommerce/orderservicing/orderservicing"; exit 0;;
+
+      wsgc-cart-checkout ) lookUp "$WSGC_RELEASES/ecommerce/services/wsgc-cart-checkout"; exit 0;;
+
+      wsgc-content-parent ) lookUp "$WSGC_RELEASES/ecommerce/svc/content/webapp/wsgc-content-parent"; exit 0;;
+      wsgc-content-webapp ) lookUp "$WSGC_RELEASES/ecommerce/svc/content/webapp/wsgc-content-webapp"; exit 0;;
+      wsgc-content-endpoints ) lookUp "$WSGC_RELEASES/ecommerce/svc/content/webapp/wsgc-content-endpoints"; exit 0;;
+
+    	wsgc-product-configurator-client ) lookUp "$WSGC_RELEASES/ecommerce/services/product/configurator/client/wsgc-product-configurator-client-impl"; exit 0;;
+
+    	wsgc-ecommerce-apps ) lookUp "$WSGC_RELEASES/ecommerce/wsgc-ecommerce-apps"; exit 0;;
+    	wsgc-foundation | foundation ) lookUp "$WSGC_RELEASES/ecommerce/foundation/wsgc-foundation"; exit 0;;
+    	wsgc-components | components | components-parent ) ARTIFACT=components; lookUp "$WSGC_RELEASES/ecommerce/components/components-parent"; exit 0;;
+    	wsgc-baselogic | baselogic ) ARTIFACT=baselogic; lookUp "$WSGC_RELEASES/ecommerce/baselogic/wsgc-baselogic"; exit 0;;
+      wsgc-ecommerce-sites-parent | sites | dp-sites ) 
+          ARTIFACT=sites; 
+          v=$(lookUp "$DEVOPS_RELEASES/ecommerce/sites/wsgc-ecommerce-sites-parent") 
+          [ -z "$v" ] && v=$(lookUp "$DEVOPS_RELEASES/ecommerce/$ARTIFACT/wsgc-$ARTIFACT")
+          echo $v
+          exit 0
+        ;;
+    	#xcadm ) lookUp "$WSGC_RELEASES/ecommerce/sites/wsgc-admin"; exit 0;;
+    	xcadm ) lookUp "$DEVOPS_RELEASES/ecommerce/sites/wsgc-admin"; exit 0;;
+    	admin|gr|mg|pb|pk|pt|rj|we|ws|sites) 
+            v=$(lookUp "$DEVOPS_RELEASES/ecommerce/sites/wsgc-$ARTIFACT")
+            [ -z "$v" ] && v=$(lookUp "$DEVOPS_RELEASES/ecommerce/$ARTIFACT/wsgc-$ARTIFACT")
+            echo $v
+            exit 0
+        ;;
+    	wsgc-admin|wsgc-gr|wsgc-mg|wsgc-pb|wsgc-pk|wsgc-pt|wsgc-we|wsgc-ws|wsgc-sites|wsgc-rj) 
+            v=$(lookUp "$DEVOPS_RELEASES/ecommerce/sites/$ARTIFACT")
+            [ -z "$v" ] && v=$(lookUp "$DEVOPS_RELEASES/ecommerce/$ARTIFACT/$ARTIFACT")
+            echo $v
+            exit 0
+        ;;
+
+	    application-configuration-service | wsgc-configuration) lookUp "$WSGC_RELEASES/ecommerce/configuration/wsgc-configuration"; exit 0;;
+	    apmagents | wsgc-apmagents ) lookUp "wsgc-devops-releases/com/appdynamics/apmagents"; exit 0;;
+	    apmagents-jdk7 | wsgc-apmagents-jdk7 ) lookUp "wsgc-devops-releases/com/appdynamics/apmagents-jdk7"; exit 0;;
+
+	    tomcat-parent|wsgc-tomcat-parent|wsgc-tomcat-parent-8 ) lookUp "$CONFIGS/wsgc-tomcat-parent"; exit 0;;
+	    #wsgc-tomcat-parent-6 ) lookUp "$CONFIGS/wsgc-tomcat-parent"; exit 0;;
+
+	    actioncode ) lookUp "$WSGC_RELEASES/actioncode/wsgc-action-code"; exit 0;;
+	    aosauthentication ) lookUp "$WSGC_RELEASES/aosauthentication/aosauthentication"; exit 0;;
+	    #avs ) lookUp "$WSGC_RELEASES/avs/avs"; exit 0;;
+
+	    wsgc-internationalshipping-catalog-services-war ) lookUp "$WSGC_RELEASES/services/internationalshipping/wsgc-internationalshipping-catalog-services-war"; exit 0;;
+	    c3-service | c3 ) lookUp "$WSGC_RELEASES/services/c3/c3"; exit 0;;
+	    c3-client ) lookUp "$WSGC_RELEASES/ecommerce/c3/client/wsgc-c3-client"; exit 0;;
+	    wsgc-devops-c3-config ) lookUp "$CONFIGS/c3/wsgc-devops-c3-config"; exit 0;;
+	    wsgc-devops-c3-config-app-prdrk ) lookUp "$CONFIGS/c3/wsgc-devops-c3-config-app-prdrk"; exit 0;;
+        wsgc-devops-c3-config-app-prdab ) lookUp "$CONFIGS/c3/wsgc-devops-c3-config-app-prdab"; exit 0;;
+        wsgc-devops-c3-config-common ) lookUp "$CONFIGS/c3/wsgc-devops-c3-config-common"; exit 0;; 
+
+	    wsgc-cre | cre ) lookUp "$WSGC_RELEASES/cre/wsgc-cre"; exit 0;;
+	    wsgc-cre-admin-war | wsgc-cre-admin | cre-admin ) lookUp "$WSGC_RELEASES/cre/wsgc-cre-admin-war"; exit 0;;
+	    wsgc-devops-cre-config-app-prdab ) lookUp "$CONFIGS/cre/wsgc-devops-cre-config-app-prdab"; exit 0;;
+	    wsgc-devops-cre-config-app-prdrk ) lookUp "$CONFIGS/cre/wsgc-devops-cre-config-app-prdrk"; exit 0;;
+
+	    wsgc-devops-cpcr-war ) lookUp "$CONFIGS/cpcr/wsgc-devops-cpcr-war"; exit 0;;
+	    wsgc-devops-cpcr-root | cpcr ) lookUp "$CONFIGS/cpcr/wsgc-devops-cpcr-root"; exit 0;;
+        wsgc-devops-cpcr-common-config-app ) lookUp "$CONFIGS/cpcr/wsgc-devops-cpcr-common-config-app"; exit 0;;
+        wsgc-devops-cpcr-config-app-prdab ) lookUp "$CONFIGS/cpcr/wsgc-devops-cpcr-config-app-prdab"; exit 0;;
+        wsgc-devops-cpcr-config-app-prdrk ) lookUp "$CONFIGS/cpcr/wsgc-devops-cpcr-config-app-prdrk"; exit 0;;
+
+	    inventory ) lookUp "$WSGC_RELEASES/inventory/inventory-service"; exit 0;;
+	    inventory-service ) lookUp "$WSGC_RELEASES/services/inventory/inventory-service"; exit 0;;
+	    inventory-adjustment ) lookUp "$WSGC_RELEASES/inventory/inventory-service"; exit 0;;
+	    inventory-common | wsgc-devops-invent-common ) lookUp "$CONFIGS/invent/wsgc-devops-invent-common"; exit 0;;
+	    inventory-adjustment-common | wsgc-devops-invent-adjustment-common) lookUp "$CONFIGS/invent-adjustment/wsgc-devops-invent-adjustment-common"; exit 0;;
+
+	    buildsystem | buildsystem-?? | buildsystem-??? ) lookUp "$WSGC_RELEASES/ecommerce/buildsystem/buildsystem"; exit 0;;
+	    buildsystem-webapp ) lookUp "$WSGC_RELEASES/ecommerce/buildsystem/buildsystem-webapp"; exit 0;;
+	    biggreenbutton-webapp | bgb-service | bgb | bgb-svc | ecmagent-bgb | bgb-ca ) lookUp "$WSGC_RELEASES/ecommerce/biggreenbutton-webapp"; exit 0;;
+	    #bgb|biggreenbutton ) lookUp "$WSGC_RELEASES/ecommerce/biggreenbutton"; exit 0;;
+
+      wsgc-devops-bgb-service-tomcat ) lookUp "$DEVOPS_RELEASES/devops/tomcat/wsgc-devops-bgb-service-tomcat"; exit 0;;
+
+      wsgc-devops-toolchain-bgb-common-config-bgb ) lookUp "$DEVOPS_RELEASES/devops/toolchain/wsgc-devops-toolchain-bgb-common-config-bgb"; exit 0;;
+	    wsgc-devops-toolchain-bgb-common-config-buildsystem ) lookUp "$DEVOPS_RELEASES/devops/toolchain/wsgc-devops-toolchain-bgb-common-config-buildsystem"; exit 0;;
+	    wsgc-devops-toolchain-bgb-common-config-bgb-ca-prdrk ) lookUp "$DEVOPS_RELEASES/devops/toolchain/wsgc-devops-toolchain-bgb-common-config-bgb-ca-prdrk"; exit 0;;
+
+      wsgc-devops-buildsystem-service-tomcat ) lookUp "$DEVOPS_RELEASES/devops/tomcat/wsgc-devops-buildsystem-service-tomcat"; exit 0;;
+
+      wsgc-devops-ecmagent-bgb-common-config ) lookUp "$CONFIGS/ecmagent/wsgc-devops-ecmagent-bgb-common-config"; exit 0;;
+      wsgc-devops-ecmagent-bgb-tomcat ) lookUp "$CONFIGS/ecmagent/wsgc-devops-ecmagent-bgb-tomcat"; exit 0;;
+      wsgc-devops-ecmagent-imgproc-common-config ) lookUp "$CONFIGS/ecmagent/wsgc-devops-ecmagent-imgproc-common-config"; exit 0;;
+      wsgc-devops-ecmagent-imgproc-tomcat ) lookUp "$CONFIGS/ecmagent/wsgc-devops-ecmagent-imgproc-tomcat"; exit 0;;
+
+	    homefront ) lookUp "$WSGC_RELEASES/ecommerce/cm/homefront"; exit 0;;
+
+	    aoslogon ) lookUp "$WSGC_RELEASES/aoslogon/wsgc-aoslogon"; exit 0;;
+        wsgc-aos-login-service | aos-login-service ) lookUp "$WSGC_RELEASES/aos/login/wsgc-aos-login-service"; exit 0;;
+
+	    ec-server ) lookUp "$WSGC_RELEASES/ecommerce/ec/wsgc-ec-server"; exit 0;;
+	    ec ) lookUp "$WSGC_RELEASES/ecommerce/ec/wsgc-ec-pom"; exit 0;;
+	    ecmq-config-prd-rk|ecmq-prdrk-config ) lookUp "$CONFIGS/ecmq/wsgc-devops-ecmq-prdrk-config"; exit 0;;
+	    ecmq-config-prd-sac|ecmq-prdsac-config ) lookUp "$CONFIGS/ecmq/wsgc-devops-ecmq-prdsac-config"; exit 0;;
+
+	    ecm ) lookUp "$WSGC_RELEASES/ecommerce/cm/ecom-content-management"; exit 0;;
+	    ecom-publishing-agent | ecmagent-service | ecmagent-svc ) lookUp "$WSGC_RELEASES/ecommerce/cm/ecom-publishing-agent"; exit 0;;
+
+        wsgc-contentprocessor|contentprocessor-server|contentprocessor ) lookUp "$WSGC_RELEASES/ecommerce/contentprocessor-server"; exit 0;;
+        wsgc-devops-contentprocessor-common ) lookUp "$CONFIGS/contentprocessor/wsgc-devops-contentprocessor-common"; exit 0;;
+        wsgc-devops-contentprocessor-wsgc-devops-contentprocessor-prdrk-config-cp ) lookUp "$CONFIGS/contentprocessor/wsgc-devops-contentprocessor-prdrk-config-cp"; exit 0;;
+        wsgc-devops-contentprocessor-wsgc-devops-contentprocessor-uat-config-cp ) lookUp "$CONFIGS/contentprocessor/wsgc-devops-contentprocessor-uat-config-cp"; exit 0;;
+
+	    #datafeeds-core ) lookUp "$WSGC_RELEASES/ecommerce/datafeeds-core"; exit 0;;
+	    #datafeeds-webapp ) lookUp "$WSGC_RELEASES/ecommerce/datafeeds-webapp"; exit 0;;
+	    #datafeeds-processor ) lookUp "$WSGC_RELEASES/ecommerce/datafeeds-processor"; exit 0;;
+	    #datafeeds-extractor ) lookUp "$WSGC_RELEASES/ecommerce/datafeeds-processor"; exit 0;;
+	    #df | datafeeds ) lookUp "$WSGC_RELEASES/ecommerce/datafeeds"; exit 0;;
+
+	    registry | registry-v2 | registry-v3 ) lookUp "$WSGC_RELEASES/services/registry/wsgc-registry"; exit 0;;
+	    wsgc-registry-admin|wsgc-reg-admin|registry-adm|registry-admin|regadmin|regadm ) lookUp "$WSGC_RELEASES/regadmin/wsgc-registry-admin"; exit 0;;
+	    wsgc-registry-common ) lookUp "$WSGC_RELEASES/services/registry/wsgc-registry-common"; exit 0;;
+	    wsgc-devops-registry-fdn-common-config ) lookUp "$CONFIGS/registry-fdn/wsgc-devops-registry-fdn-common-config"; exit 0;;
+	    wsgc-membership-service | membership-service ) lookUp "$WSGC_RELEASES/services/wsgc-membership-service/"; exit 0;;
+
+        wsgc-devops-registry-common-config ) lookUp "$CONFIGS/registry/wsgc-devops-registry-common-config"; exit 0;;
+        wsgc-devops-registry-prd-config ) lookUp "$CONFIGS/registry/wsgc-devops-registry-prd-config"; exit 0;;
+        wsgc-devops-registry-prd-prdab-config ) lookUp "$CONFIGS/registry/wsgc-devops-registry-prd-prdab-config"; exit 0;;
+        wsgc-devops-registry-prd-prdrk-config ) lookUp "$CONFIGS/registry/wsgc-devops-registry-prd-prdrk-config"; exit 0;;
+
+	    cross-brand-registry ) lookUp "$WSGC_RELEASES/services/registry/wsgc-cross-brand-registry-service"; exit 0;;
+	    registry-adm-config | registry-admin-config) lookUp "$CONFIGS/registry-adm/wsgc-devops-registry-adm-config"; exit 0;;
+	    wsgc-devops-registry-adm-config-app-prdrk1 ) lookUp "$CONFIGS/registry-adm/wsgc-devops-registry-adm-config-app-prdrk1"; exit 0;;
+	    wsgc-devops-registry-admin-common-config-app|registry-admin-common|registry-adm-common ) lookUp "$CONFIGS/registry-admin/wsgc-devops-registry-admin-common-config-app"; exit 0;;
+
+	    wsgc-profile | profile ) lookUp "$WSGC_RELEASES/profile/wsgc-profile"; exit 0;;
+	    wsgc-profile-service ) lookUp "$WSGC_RELEASES/profile/wsgc-profile-service"; exit 0;;
+	    profile-config|profile-cfg ) lookUp "$CONFIGS/profile/wsgc-devops-profile-prd-config-app"; exit 0;;
+	    profile-config-prd-ab ) lookUp "$CONFIGS/profile/wsgc-devops-profile-prdab-config-app"; exit 0;;
+	    profile-config-prd-rk ) lookUp "$CONFIGS/profile/wsgc-devops-profile-prdrk-config-app"; exit 0;;
+	    profile-config-prd-sac) lookUp "$CONFIGS/profile/wsgc-devops-profile-prdsac-config-app"; exit 0;;
+	    wsgc-devops-profile-service-tomcat ) lookUp "$CONFIGS/profile/wsgc-devops-profile-service-tomcat"; exit 0;;
+
+	    wsgc-favorites | favorites | favorites-service ) lookUp "$WSGC_RELEASES/favorites/wsgc-favorites"; exit 0;;
+	    wsgc-devops-favorites-common-config ) lookUp "$CONFIGS/favorites/wsgc-devops-favorites-common-config"; exit 0;; 
+	    wsgc-devops-favorites-prd-config ) lookUp "$CONFIGS/favorites/wsgc-devops-favorites-prd-config"; exit 0;;
+	    wsgc-devops-favorites-prd-prdab-config ) lookUp "$CONFIGS/favorites/wsgc-devops-favorites-prd-prdab-config"; exit 0;;
+	    wsgc-devops-favorites-prd-prdrk-config ) lookUp "$CONFIGS/favorites/wsgc-devops-favorites-prd-prdrk-config"; exit 0;;
+	    wsgc-devops-favorites-service-tomcat ) lookUp "$CONFIGS/favorites/wsgc-devops-favorites-service-tomcat"; exit 0;;
+       
+	    oauth-server|oauth-server-parent ) lookUp "$WSGC_RELEASES/oauth/oauth-server"; exit 0;;
+	    wsgc-devops-oauth-service-tomcat ) lookUp "$CONFIGS/oauth/wsgc-devops-oauth-service-tomcat"; exit 0;;
+	    oauth-common|wsgc-devops-oauth-common-config ) lookUp "$CONFIGS/oauth/wsgc-devops-oauth-common-config"; exit 0;;
+	    oauth-client ) lookUp "$WSGC_RELEASES/oauth/wsgc-oauth-client"; exit 0;;
+
+      wsgc-feed-generator-web ) lookUp "$WSGC_RELEASES/ecommerce/feedgenerator/wsgc-feed-generator-web"; exit 0;;
+	    wsgc-feed-generator | oss-feedgen | oss-feed-generator ) lookUp "$WSGC_RELEASES/ecommerce/feedgenerator/wsgc-feed-generator"; exit 0;;
+	    wsgc-devops-oss-feedgen-common-config-app | wsgc-feed-generator-common | oss-feed-generator-common | oss-feedgen-common ) lookUp "$CONFIGS/oss-feedgen/wsgc-devops-oss-feedgen-common-config-app"; exit 0;;
+	    wsgc-devops-oss-feedgen-prdrk-config-app ) lookUp "$CONFIGS/oss-feedgen/wsgc-devops-oss-feedgen-prdrk-config-app"; exit 0;;
+      wsgc-devops-oss-feedgen-prdsac-config-app ) lookUp "$CONFIGS/oss-feedgen/wsgc-devops-oss-feedgen-prdsac-config-app"; exit 0;;
+
+	    wsgc-search-domain-orchestrator | oss-search-orchestrator| search-domain-orchestrator ) lookUp "$WSGC_RELEASES/ecommerce/search/wsgc-search-domain-orchestrator"; exit 0;;
+	    wsgc-search-domain-orchestrator-web ) lookUp "$WSGC_RELEASES/ecommerce/search/wsgc-search-domain-orchestrator-web"; exit 0;;
+	    wsgc-devops-oss-search-orchestrator-common-config-app ) lookUp "$CONFIGS/oss-search-orchestrator/wsgc-devops-oss-search-orchestrator-common-config-app"; exit 0;;
+	    wsgc-devops-oss-search-orchestrator-prdrk-config-app ) lookUp "$CONFIGS/oss-search-orchestrator/wsgc-devops-oss-search-orchestrator-prdrk-config-app"; exit 0;;
+
+	    wsgc-search-domain-publisher | search-domain-publisher | oss-search-publisher | oss-publisher ) lookUp "$WSGC_RELEASES/ecommerce/search/wsgc-search-domain-publisher"; exit 0;;
+	    wsgc-search-domain-publisher-web ) lookUp "$WSGC_RELEASES/ecommerce/search/wsgc-search-domain-publisher-web"; exit 0;;
+	    wsgc-devops-oss-search-publisher-common-config-app ) lookUp "$CONFIGS/oss-search-publisher/wsgc-devops-oss-search-publisher-common-config-app"; exit 0;;
+	    wsgc-devops-oss-search-publisher-prdrk-config-app ) lookUp "$CONFIGS/oss-search-publisher/wsgc-devops-oss-search-publisher-prdrk-config-app"; exit 0;;
+
+        wsgc-devops-publisher-prdrk-config-app ) lookUp "$CONFIGS/publisher/wsgc-devops-publisher-prdrk-config-app"; exit 0;;
+        wsgc-devops-publisher-prdsac-config-app ) lookUp "$CONFIGS/publisher/wsgc-devops-publisher-prdsac-config-app"; exit 0;;
+        wsgc-devops-singleuse-common-config-app ) lookUp "$CONFIGS/singleuse/wsgc-devops-singleuse-common-config-app"; exit 0;;
+        wsgc-devops-singleuse-prdsac-config-app ) lookUp "$CONFIGS/singleuse/wsgc-devops-singleuse-prdsac-config-app"; exit 0;;
+        wsgc-devops-singleuse-prdrk-config-app ) lookUp "$CONFIGS/singleuse/wsgc-devops-singleuse-prdrk-config-app"; exit 0;;
+
+	    wsgc-storelocator| storelocator ) lookUp "$WSGC_RELEASES/storelocator/wsgc-storelocator"; exit 0;;
+        wsgc-devops-storelocator-common-config ) lookUp "$CONFIGS/storelocator/wsgc-devops-storelocator-common-config"; exit 0;;
+	    #wsgc-devops-storelocator-prd-config ) lookUp ""; exit 0;;
+
+        wsgc-devops-publisher-common-config-app ) lookUp "$CONFIGS/publisher/wsgc-devops-publisher-common-config-app"; exit 0;;
+
+	    hinoki ) lookUp "$WSGC_RELEASES/ecommerce/testautomation/hinoki"; exit 0;;
+	    hinoki-data ) lookUp "$WSGC_RELEASES/ecommerce/testautomation/hinoki-data"; exit 0;;
+	    evergreen-core | evergreen) lookUp "$WSGC_RELEASES/ecommerce/testautomation/evergreen"; exit 0;;
+
+	    loyalty ) lookUp "$WSGC_RELEASES/loyalty/wsgc-loyalty"; exit 0;;
+	    loyalty-client ) lookUp "$WSGC_RELEASES/loyalty/wsgc-loyalty-client"; exit 0;;
+	    loyalty-service ) lookUp "$WSGC_RELEASES/loyalty/wsgc-loyalty-service-war"; exit 0;;
+	    loyalty-batch|loyalty-batch-processing|wsgc-loyalty-batch-processing ) lookUp "$WSGC_RELEASES/loyalty/wsgc-loyalty-batch-processing"; exit 0;;
+	    loyalty-batch-config ) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-batch-common-config"; exit 0;;
+	    loyalty-batch-config-prd-ab ) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-batch-prdab-config"; exit 0;;
+	    loyalty-batch-config-prd-rk ) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-batch-prdrk-config"; exit 0;;
+	    loyalty-config|loyalty-cfg | wsgc-devops-loyalty-common-config-app) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-common-config-app"; exit 0;;
+	    *loyalty-config-prd-ab ) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-prdab-config-app"; exit 0;;
+	    *loyalty-config-prd-rk ) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-prdrk-config-app"; exit 0;;
+
+	    #
+	    wsgc-devops-loyalty-batch-prdrk-config | loyalty-batch-prdrk-config ) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-batch-prdrk-config"; exit 0;;
+	    loyalty-prdab-config ) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-prdab-config-app" ; exit 0;;
+	    loyalty-prdrk-config ) lookUp "$CONFIGS/loyalty/wsgc-devops-loyalty-prdrk-config-app" ; exit 0;;
+
+	    canada-registry ) lookUp "$WSGC_RELEASES/ecommerce/wsgc-caregistry"; exit 0;;
+	    canada-registry-pb ) lookUp "$WSGC_RELEASES/ecommerce/wsgc-caregistry-pb"; exit 0;;
+	    canada-registry-pk ) lookUp "$WSGC_RELEASES/ecommerce/wsgc-caregistry-pk"; exit 0;;
+	    canada-registry-ws ) lookUp "$WSGC_RELEASES/ecommerce/wsgc-caregistry-ws"; exit 0;;
+
+	    reward-certificate-service|reward-certificate|rewards|rewards-certificate|rewards-service ) lookUp "$WSGC_RELEASES/reward-certificate-service"; exit 0;;
+
+	    payment| payment-client ) lookUp "$WSGC_RELEASES/payment/payment-client"; exit 0;;
+
+	    endecaetl ) lookUp "$WSGC_RELEASES/ecommerce/search/endecaetl"; exit 0;;
+
+	    pricing | pricing-service | wsgc-pricing-webapp ) lookUp "$WSGC_RELEASES/promotions/wsgc-pricing-webapp"; exit 0;;
+	    pricing-service-omsd ) lookUp "$WSGC_RELEASES/promotions/wsgc-pricing-webapp"; exit 0;;
+	    singleuse | pricing-singleuse ) lookUp "$WSGC_RELEASES/promotions/wsgc-pricing-webapp"; exit 0;;
+	    publisher| pricing-publisher ) lookUp "$WSGC_RELEASES/promotions/wsgc-pricing-webapp"; exit 0;;
+	    #singleuse | wsgc-promouse-webapp ) lookUp "$WSGC_RELEASES/promotions/wsgc-pricing-webapp"; exit 0;;
+	    wsgc-devops-pricing-prdab-config-app|pricing-config-prd-ab|pricing-cfg-prd-ab|prcing-cfg-prdab ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdab-config-app"; exit 0;;
+	    #pricing-config-prd-rk|pricing-cfg-prd-rk|prcing-cfg-prdrk ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdrk-config-app"; exit 0;;
+	    wsgc-devops-pricing-prdrk1-config-app|pricing-config-prd-rk1|pricing-cfg-prd-rk1|prcing-cfg-prdrk1 ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdrk1-config-app"; exit 0;;
+	    wsgc-devops-pricing-prdrk2-config-app|pricing-config-prd-rk2|pricing-cfg-prd-rk2|prcing-cfg-prdrk2 ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdrk2-config-app"; exit 0;;
+	    pricing-config-prd-sac|pricing-cfg-prd-sac|prcing-cfg-prdsac ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdsac-config-app"; exit 0;;
+	    wsgc-devops-pricing-common-config-app | wsgc-devops-pricing-common) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-common-config-app"; exit 0;;
+	    wsgc-devops-pricing-service-tomcat ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-service-tomcat"; exit 0;;
+
+	    promotion-parent ) lookUp "$WSGC_RELEASES/promotions/promotion-parent"; exit 0;;
+	    wsgc-promotion-admin | promotion-admin | promotions-admin ) lookUp "$WSGC_RELEASES/promotions/wsgc-promotion-admin"; exit 0;;
+	    promotion-common | wsgc-devops-pradm-common-config-app ) lookUp "$CONFIGS/pradm/wsgc-devops-pradm-common-config-app"; exit 0;;
+	    wsgc-devops-pradm-prdrk-config-app ) lookUp "$CONFIGS/pradm/wsgc-devops-pradm-prdrk-config-app"; exit 0;;
+	    wsgc-devops-pradm-prdsac-config-app ) lookUp "$CONFIGS/pradm/wsgc-devops-pradm-prdsac-config-app"; exit 0;;
+
+	    entity-compare-tool | entity-comparison-tool ) lookUp "$WSGC_RELEASES/ecommerce/tool/entity-compare-tool"; exit 0;;
+	    wcm-tools | wsgc-wcm-tools ) lookUp "$WSGC_RELEASES/devops/wcm/wsgc-wcm-tools"; exit 0;;
+	    wcm | wcm-aes ) lookUp "$WSGC_RELEASES/ecommerce/wcm/wcm"; exit 0;;
+	    wsgc-cq ) lookUp "$CONFIGS/wsgc-cq"; exit 0;;
+	    wsgc-devops-wcm-prd-config-cm ) lookUp "$CONFIGS/wcm/wsgc-devops-wcm-prd-config-cm"; exit 0;;
+	    wcm-common | wsgc-devops-wcm-common ) lookUp "$CONFIGS/wcm/wsgc-devops-wcm-common"; exit 0;;
+	    wsgc-devops-rerun-module-wcm ) lookUp "$CONFIGS/rerun-module/wsgc-devops-rerun-module-wcm"; exit 0;;
+
+	    edam|edam.ui.apps ) lookUp "$WSGC_RELEASES/ecommerce/edam/edam"; exit 0;;
+
+	    #solr ) lookUp "devops_dev/org/apache/solr/solr"; exit 0;;
+	    mdm-config-prd-ab ) lookUp "$CONFIGS/mdm/wsgc-devops-mdm-prdab-config-app" ; exit 0;;
+	    mdm-config-prd-rk ) lookUp "$CONFIGS/mdm/wsgc-devops-mdm-prdrk-config-app" ; exit 0;;
+
+	    mdm-consumer ) lookUp "$WSGC_RELEASES/mdm/mdm-consumer"; exit 0;;
+	    mdm-consumer-service ) lookUp "$WSGC_RELEASES/mdm/mdm-consumer-service"; exit 0;;
+
+      wsgc-devops-frontend-common ) lookUp "$DEVOPS_RELEASES/devops/frontend/wsgc-devops-frontend-common"; exit 0;;
+	    wsgc-devops-frontend-prd-config-app|frontend-prd-config-app|frontend-prd-config|frontend-realm-prod|frontend-realm ) lookUp "$DEVOPS_RELEASES/devops/frontend/wsgc-devops-frontend-prd-config-app"; exit 0;;
+      wsgc-devops-frontend-role* ) lookUp "$DEVOPS_RELEASES/devops/frontend/wsgc-devops-frontend-role-app"; exit 0;;
+      wsgc-devops-frontend-service-tomcat8 ) lookUp "$DEVOPS_RELEASES/devops/frontend/wsgc-devops-frontend-service-tomcat8"; exit 0;;
+      wsgc-devops-toolchain-node-prd ) lookUp "$DEVOPS_RELEASES/devops/toolchain/wsgc-devops-toolchain-node-prd"; exit 0;;
+
+	    gizmotron ) lookUp "$WSGC_RELEASES/gizmotron/gizmotron"; exit 0;;
+	    wsgc-devops-gizmotron-salesforce-common-config ) lookUp "$CONFIGS/gizmotron/wsgc-devops-gizmotron-salesforce-common-config"; exit 0;;
+
+	    datapublish ) lookUp "$WSGC_RELEASES/services/datapublish/datapublish-common"; exit 0;;
+
+	    wsgc-devops-caweb-common-config-app ) lookUp "$CONFIGS/caweb/wsgc-devops-caweb-common-config-app"; exit 0;;
+	    wsgc-devops-caweb-prdab-config-app ) lookUp "$CONFIGS/caweb/wsgc-devops-caweb-prdab-config-app"; exit 0;;
+	    wsgc-devops-caweb-prdrk-config-app ) lookUp "$CONFIGS/caweb/wsgc-devops-caweb-prdrk-config-app"; exit 0;;
+    	wsgc-devops-ecm-common ) lookUp "$CONFIGS/ecm/wsgc-devops-ecm-common"; exit 0;; 
+    	wsgc-devops-ecm-prd-config ) lookUp "$CONFIGS/ecm/wsgc-devops-ecm-prd-config"; exit 0;;
+    	wsgc-devops-ecm-prd-prdrk-config ) lookUp "$CONFIGS/ecm/wsgc-devops-ecm-prd-prdrk-config"; exit 0;;
+    	wsgc-devops-ecm-prd-config ) lookUp "$CONFIGS/ecm/wsgc-devops-ecm-prd-config"; exit 0;;
+    	wsgc-devops-ecmq-config-common ) lookUp "$CONFIGS/ecmq/wsgc-devops-ecmq-config-common"; exit 0;; 
+    	wsgc-devops-homefront-common-config-app ) lookUp "$CONFIGS/homefront/wsgc-devops-homefront-common-config-app"; exit 0;; 
+    	wsgc-devops-homefront-prdrk-config ) lookUp "$CONFIGS/homefront/wsgc-devops-homefront-prdrk-config"; exit 0;;
+    	wsgc-devops-invent-adjustment-config-app-prdab ) lookUp "$CONFIGS/invent-adjustment/wsgc-devops-invent-adjustment-config-app-prdab"; exit 0;;
+    	wsgc-devops-invent-adjustment-config-app-prdrk ) lookUp "$CONFIGS/invent-adjustment/wsgc-devops-invent-adjustment-config-app-prdrk"; exit 0;;
+    	wsgc-devops-invent-config-app-prdab ) lookUp "$CONFIGS/invent/wsgc-devops-invent-config-app-prdab"; exit 0;;
+    	wsgc-devops-invent-config-app-prdrk ) lookUp "$CONFIGS/invent/wsgc-devops-invent-config-app-prdrk"; exit 0;;
+    	wsgc-devops-mdm-common-config-app ) lookUp "$CONFIGS/mdm/wsgc-devops-mdm-common-config-app"; exit 0;; 
+    	wsgc-devops-oauth-prdab-config ) lookUp "$CONFIGS/oauth/wsgc-devops-oauth-prdab-config"; exit 0;;
+    	wsgc-devops-oauth-prdrk-config ) lookUp "$CONFIGS/oauth/wsgc-devops-oauth-prdrk-config"; exit 0;;
+    	wsgc-devops-pricing-prdsac-config-app ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdsac-config-app"; exit 0;;
+    	wsgc-devops-profile-common-config-app ) lookUp "$CONFIGS/profile/wsgc-devops-profile-common-config-app"; exit 0;; 
+    	wsgc-devops-registry-admin-prdrk1-config-app ) lookUp "$CONFIGS/registry-admin/wsgc-devops-registry-admin-prdrk1-config-app"; exit 0;;
+    	wsgc-devops-rewards-common-config ) lookUp "$CONFIGS/rewards/wsgc-devops-rewards-common-config"; exit 0;; 
+    	wsgc-devops-rewards-prd-config ) lookUp "$CONFIGS/rewards/wsgc-devops-rewards-prd-config"; exit 0;;
+    	wsgc-devops-rewards-prd-prdrk-config ) lookUp "$CONFIGS/rewards/wsgc-devops-rewards-prd-prdrk-config"; exit 0;;
+    	wsgc-devops-xcadm-common-config ) lookUp "$CONFIGS/xcadm/wsgc-devops-xcadm-common-config"; exit 0;; 
+    	wsgc-devops-xcadm-prd-config ) lookUp "$CONFIGS/xcadm/wsgc-devops-xcadm-prd-config"; exit 0;;
+    	wsgc-devops-xcadm-prd-prdab-config ) lookUp "$CONFIGS/xcadm/wsgc-devops-xcadm-prd-prdab-config"; exit 0;;
+    	wsgc-devops-xcadm-prd-prdrk-config ) lookUp "$CONFIGS/xcadm/wsgc-devops-xcadm-prd-prdrk-config"; exit 0;;
+    
+    	wsgc-devops-registry-fdn-prd-config ) lookUp "$CONFIGS/registry-fdn/wsgc-devops-registry-fdn-prd-config"; exit 0;;
+    	wsgc-devops-registry-fdn-prd-ab1-config ) lookUp "$CONFIGS/registry-fdn/wsgc-devops-registry-fdn-prd-ab1-config"; exit 0;;
+    	wsgc-devops-registry-fdn-prd-rk1-config ) lookUp "$CONFIGS/registry-fdn/wsgc-devops-registry-fdn-prd-rk1-config"; exit 0;;
+        wsgc-devops-registry-fdn-prd-rk1v-config ) lookUp "$CONFIGS/registry-fdn/wsgc-devops-registry-fdn-prd-rk1v-config"; exit 0;;
+        wsgc-devops-registry-fdn-prd-ab1v-config ) lookUp "$CONFIGS/registry-fdn/wsgc-devops-registry-fdn-prd-ab1v-config"; exit 0;;
+    
+    	wsgc-devops-application ) lookUp "$CONFIGS/wsgc-devops-application"; exit 0;;
+    	wsgc-devops-root ) lookUp "$CONFIGS/wsgc-devops-root"; exit 0;;
+    	wsgc-rerun-modules-parent ) lookUp "$CONFIGS/rpm/wsgc-rerun-modules-parent"; exit 0;;
+    	wsgc-tomcat-parent ) lookUp "$CONFIGS/wsgc-tomcat-parent"; exit 0;;
+    
+        wsgc-sccint ) lookUp "$WSGC_RELEASES/scc/wsgc-sccint"; exit 0;;
+        wsgc-devops-sccint-common-config-app ) lookUp "$CONFIGS/sccint/wsgc-devops-sccint-common-config-app"; exit 0;;
+        wsgc-devops-sccint-prdsac-config-app ) lookUp "$CONFIGS/sccint/wsgc-devops-sccint-prdsac-config-app"; exit 0;;
+        wsgc-devops-sccint-prdrk-config-app ) lookUp "$CONFIGS/sccint/wsgc-devops-sccint-prdrk-config-app"; exit 0;;
+
+        wsgc-sccext ) lookUp "$WSGC_RELEASES/scc/wsgc-sccext"; exit 0;;
+        wsgc-devops-sccext-common-config-app ) lookUp "$CONFIGS/sccext/wsgc-devops-sccext-common-config-app"; exit 0;;
+        wsgc-devops-sccext-prdrk-config-app ) lookUp "$CONFIGS/sccext/wsgc-devops-sccext-prdrk-config-app"; exit 0;;
+        wsgc-devops-sccext-prdsac-config-app ) lookUp "$CONFIGS/sccext/wsgc-devops-sccext-prdsac-config-app"; exit 0;;
+
+	    orderservicing ) lookUp "$WSGC_RELEASES/ecommerce/orderservicing/orderservicing"; exit 0;;
+	    order-management ) lookUp "$WSGC_RELEASES/ordermanagement/order-management"; exit 0;;
+	    inventory-reservation ) lookUp "$WSGC_RELEASES/inventory/reservation/inventory-reservation-service/"; exit 0;;
+
+	    inventory-transit-schedule ) lookUp "$WSGC_RELEASES/inventory/transit/inventory-transit-schedule/"; exit 0;;
+	    inventory-transit-schedule-processor ) lookUp "$WSGC_RELEASES/inventory/transit/processor/inventory-transit-schedule-processor/"; exit 0;;
+	    inventory-transit-schedule-consumer ) lookUp "$WSGC_RELEASES/inventory/transit/consumer/inventory-transit-schedule-consumer/"; exit 0;;
+
+        spring3-jms ) lookUp "$WSGC_RELEASES/ecommerce/jms/spring3-jms"; exit 0;;
+        spring4-jms ) lookUp "$WSGC_RELEASES/ecommerce/jms/spring4-jms"; exit 0;;
+
+        microservice-parent ) lookUp "$WSGC_RELEASES/platform/microservice-parent"; exit 0;;
+        platform-svc-config ) lookUp "$WSGC_RELEASES/platform/configsvc/platform-svc-config"; exit 0;;
+        platform-svc-session ) lookUp "$WSGC_RELEASES/platform/sessionsvc/platform-svc-session"; exit 0;;
+        platform-base-dependencies ) lookUp "$WSGC_RELEASES/platform/platform-base-dependencies"; exit 0;;
+        platform-component-parent ) lookUp "$WSGC_RELEASES/platform/platform-component-parent"; exit 0;;
+        platform-parents ) lookUp "$WSGC_RELEASES/platform/platform-parents"; exit 0;;
+        platform-telemetry | telemetry ) lookUp "$WSGC_RELEASES/platform/telemetry/platform-telemetry"; exit 0;;
+        telemetry-logging ) lookUp "$WSGC_RELEASES/platform/telemetry/telemetry-logging"; exit 0;;
+        microservice-shell ) lookUp "$WSGC_RELEASES/platform/shell/microservice-shell"; exit 0;;
+        platform-microservice-shell ) lookUp "$WSGC_RELEASES/platform/shell/platform-microservice-shell"; exit 0;;
+        #platform-project-check ) lookUp "$WSGC_RELEASES/platform/projectcheck/platform-project-check"; exit 0;;
+        platform-messaging ) lookUp "$WSGC_RELEASES/platform/messaging/platform-messaging"; exit 0;;
+
+        customer-data-indexer | platform-svc-customer-search-indexer ) lookUp "$WSGC_RELEASES/customer-data-indexer"; exit 0;;
+
+        wsgc-rest ) lookUp "$WSGC_RELEASES/rest/wsgc-rest"; exit 0;;
+
+        #data-loaders ) lookUp "$WSGC_RELEASES/bigdata/dataloaders/data-loaders"; exit 0;;
+
+        # more spoon-feeding
+        wsgc-devops-pricing-prdab1-config-app ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdab1-config-app"; exit 0;;
+        wsgc-devops-pricing-prdrk-omsd-config-app ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdrk-omsd-config-app"; exit 0;;
+        wsgc-devops-pricing-prdab-omsd-config-app ) lookUp "$CONFIGS/pricing/wsgc-devops-pricing-prdab-omsd-config-app"; exit 0;;
+        wsgc-devops-homefront-prdrk-config ) lookUp "$CONFIGS/homefront/wsgc-devops-homefront-prdrk-config"; exit 0;;
+        wsgc-devops-invent-adjustment-config-app-prdrk ) lookUp "$CONFIGS/invent-adjustment/wsgc-devops-invent-adjustment-config-app-prdrk"; exit 0;;
+        wsgc-devops-invent-config-app-prdrk ) lookUp "$CONFIGS/invent/wsgc-devops-invent-config-app-prdrk"; exit 0;;
+        wsgc-devops-wcm-aes-common ) lookUp "$CONFIGS/wcm/wsgc-devops-wcm-aes-common"; exit 0;; 
+	    #*) BailOut "Can't find artifact \"$ARTIFACT\" " ; exit 0;;
+
+ 
+esac 
+fi
+
+# need to put these in an order of where they're most likely to find an artifact fastest
+[ $MODE = "getversion" ] && REPO_LIST="\
+$ARTIFACTORY/$DEVOPS_RELEASES \
+$ARTIFACTORY/$WSGC_RELEASES \
+$ARTIFACTORY/$DEVOPS_RELEASES/devops \
+$ARTIFACTORY/$DEVOPS_RELEASES/ecommerce \
+$ARTIFACTORY/$DEVOPS_RELEASES/tools \
+$ARTIFACTORY/$DEVOPS_RELEASES/devops/aem \
+$ARTIFACTORY/$WSGC_RELEASES/services \
+$ARTIFACTORY/$WSGC_RELEASES/devops \
+$ARTIFACTORY/$WSGC_RELEASES/ecommerce \
+$ARTIFACTORY/$WSGC_RELEASES/ecommerce/svc \
+$ARTIFACTORY/$WSGC_RELEASES/ecommerce/utilities \
+$ARTIFACTORY/$WSGC_RELEASES/ecommerce/edam \
+$ARTIFACTORY/$WSGC_RELEASES/platform \
+$ARTIFACTORY/$WSGC_RELEASES/platform/messaging \
+$ARTIFACTORY/$WSGC_RELEASES/platform/telemetry \
+$ARTIFACTORY/$WSGC_RELEASES/platform/shell \
+$ARTIFACTORY/$WSGC_RELEASES/inventory/transit \
+$ARTIFACTORY/$WSGC_RELEASES/bigdata \
+$ARTIFACTORY/$WSGC_RELEASES/contentmanagement \
+$ARTIFACTORY/$WSGC_RELEASES/reservation \
+$ARTIFACTORY/$DEVOPS_RELEASES/appdynamics \
+$ARTIFACTORY/mvnrelease \
+"
+[ $MODE = "getsnapshot" ] && REPO_LIST="$ARTIFACTORY/com/wsgc/devops"
+
+# this was experimental - I'll try again later
+[ -n "$DEBUG" ] && echo "> $ARTIFACT" >&2
+for top in $REPO_LIST
+do
+    [ -n "$DEBUG" ] && echo "  $top" >&2
+	for dir in $(curl $CURL_OPTIONS $CURL_LOGIN -s --insecure "$top/" | grep -i "href=" | awk -F '[""]' '{ print $2 }' | egrep -vi '\.\.' )
+	do
+        #[ -n "$DEBUG" ] && echo "       $dir" >&2
+		found=$(curl $CURL_OPTIONS $CURL_LOGIN -s --insecure "$top/$dir/" | grep -i "href=" | awk -F '[""]' '{ print $2 }' | egrep -i "$ARTIFACT/$|wsgc-$ARTIFACT/$|$ARTIFACT/wsgc-$ARTIFACT/$" | sed -e s='/$'==g)
+		if [ -n "$found" ]
+		then
+			BASE=$(echo "$top/$dir$found" | sed -e s=$ARTIFACTORY/==g)
+			lookUp $BASE
+			exit 0
+		fi
+	done
+done
+
+BailOut "Can't find artifact \"$ARTIFACT\" "
+
+

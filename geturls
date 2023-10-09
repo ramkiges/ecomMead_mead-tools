@@ -1,0 +1,271 @@
+#!/bin/bash
+#TODO: https://pk-preprd-rk1v/
+#TODO: https://aktest-www.potterybarn.com
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+
+SSHOPTS="-o StrictHostKeyChecking=no"
+# simple hack of a script to dump a list of the devops URLs for a brand and env
+SITELIST="rk1v sac1v rk1 sac1 ab1v ab1"
+if [[ -n $DEVOPS_REPO ]]
+then
+  WSI_SETTINGS=$(which wsi_settings 2>/dev/null)
+  DEVOPS=$DEVOPS_REPO
+else
+  WSI_SETTINGS=$(which wsi_settings 2>/dev/null)
+  DEVOPS=$(cat ~/.wsi_settings 2>/dev/null)
+fi
+
+NC=$(which nc 2>/dev/null)
+FRONTEND_URL="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+HOST=
+
+BRAND=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+ENVIRO=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$*" 
+	cat << EOF
+Usage: $(basename $0) <brand[,brand1,brand2,...]> <env[env2,env3,...]>
+
+    brands: $(getbrandlist)
+    env: int[1..2] qa[1..19] rgs1 uat[1..3] rgs1 mdm perf ecmprv ca
+EOF
+	exit 1
+}
+
+[ -z "$ENVIRO" ] && BailOut 
+
+# if "BRAND" or "ENVIRO" contain a comma, then parse values and loop, then exit
+if [ "$(echo "$BRAND $ENVIRO" | egrep ',')" ]
+then
+	BRAND_LIST=$(echo "$BRAND" | sed -e "s/,/ /g")
+	ENV_LIST=$(echo "$ENVIRO" | sed -e "s/,/ /g")
+	for b in $BRAND_LIST
+	do
+		for e in $ENV_LIST
+		do
+			eval $0 $b $e
+		done
+	done
+	exit 0
+fi
+
+# validate env
+[ "$ENVIRO" = "uat" ] && ENVIRO="uat1"
+[ "$ENVIRO" = "ca1" ] && ENVIRO="cadev1"
+[ "$ENVIRO" = "cadev" ] && ENVIRO="cadev1"
+[ "$ENVIRO" = "rgs" ] && ENVIRO="rgs1"
+[ "$ENVIRO" = "regression" ] && ENVIRO="rgs1"
+[ "$ENVIRO" = "regression1" ] && ENVIRO="rgs1"
+[ "$ENVIRO" = "regression2" ] && ENVIRO="rgs2"
+[ "$ENVIRO" = "integration" ] && ENVIRO="int1"
+[ "$ENVIRO" = "integration2" ] && ENVIRO="int2"
+[[ $ENVIRO = "prd" || $ENVIRO = "prod" ]] && ENVIRO="prdrk"
+[ "$ENVIRO" = "preprd" ] && ENVIRO="preprdrk"
+[ "$ENVIRO" = "aktest" ] && ENVIRO="preprdrk"
+[ "$ENVIRO" = "capreprd" ] && ENVIRO="capreprdab"
+[ "$ENVIRO" = "caaktest" ] && ENVIRO="capreprdab"
+
+# validate brand
+echo "$BRAND" | egrep -iq "gr|rj|mg|pb|pk|pt|ws|we|wcm|ecm|xcadm|admin" 
+if [ $? -ne 0 ]
+then
+	echo "$2" | egrep -iq "mg|pb|pk|pt|ws|we" 
+	[ $? -ne 0 ] & BailOut "Error: BRAND '$BRAND' appears to be invalid"
+	BRAND=$2
+	ENV=$1
+fi
+
+ENV_NUM=$(echo $ENVIRO | tr "A-Z" "a-z" | sed -e s/[a-z]//g)
+[ -z "$ENV_NUM" ] && ENV_NUM=`echo $BRAND | tr "A-Z" "a-z" | sed -e s/[a-z]//g`
+#[ -z "$ENV_NUM" ] && BailOut "Can't figure out what env you want from $BRAND $ENV"
+
+# figure out which setting realm we're in 
+echo "$ENVIRO" | egrep -qEi "jukebox|^qa|^int|^rgs|^uat|^stg|^dev|^perf|^ecmca|^ecmqa|^ecmprd|^ecmint|^ecmuat|^ecmprv|^ecmprev|^bpv|^staging|^ca" && REALM=qa
+echo "$ENVIRO" | egrep -qEi "prod|preprod|caprod|capreprod|preprdab|preprdrk|prdab|prdrk|aktest|caprdrk|caprdab|caaktest" && REALM=prd
+[[ -z $REALM ]] && BailOut "No 'realm' found for $BRAND $ENVIRO"
+
+# prod snowflakes - this tool wasn't originally designed to run on prod
+[[ $ENVIRO = "prod" || $ENVIRO = "prd" ]] && POM_URL=$FRONTEND_URL/$REALM/config/app/trunk/$BRAND/prdrk/pom.xml
+[[ $ENVIRO = "preprod" || $ENVIRO = "preprd" ]] && POM_URL=$FRONTEND_URL/$REALM/config/app/trunk/$BRAND/preprdrk/pom.xml
+[[ $ENVIRO = "caprod" || $ENVIRO = "caprd" ]] && POM_URL=$FRONTEND_URL/$REALM/config/app/trunk/$BRAND/caprdab/pom.xml
+[[ $ENVIRO = "capreprod" || $ENVIRO = "capreprd" ]] && POM_URL=$FRONTEND_URL/$REALM/config/app/trunk/$BRAND/capreprdab/pom.xml
+
+[[ -z $POM_URL ]] && POM_URL=$FRONTEND_URL/$REALM/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+
+if [ "$BRAND" = "xcadm" -o "$BRAND" = "admin" ]
+then  
+  case $ENVIRO in 
+    prd* | prod*) POM_URL="https://repos.wsgc.com/svn/devops/application/xcadm/prd/config/trunk/prdrk/pom.xml" ;;
+    caprd* | caprod*) POM_URL="https://repos.wsgc.com/svn/devops/application/xcadm/prd/config/trunk/$ENVIRO/pom.xml" ;;
+    dev*) POM_URL="https://repos.wsgc.com/svn/devops/application/xcadm/dev/config/trunk/$ENVIRO/pom.xml" ;;
+    qa*) POM_URL="https://repos.wsgc.com/svn/devops/application/xcadm/qa/config/trunk/$ENVIRO/pom.xml" ;;
+    uat*) POM_URL="https://repos.wsgc.com/svn/devops/application/xcadm/qa/config/trunk/$ENVIRO/pom.xml" ;;
+    ca-*) POM_URL="https://repos.wsgc.com/svn/devops/application/xcadm/qa/config/trunk/$ENVIRO/pom.xml" ;;
+  esac
+fi
+
+# this is for the cases when someone wants to use this locally
+if [[ -d $DEVOPS ]]
+then
+    PROPERTIES=packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site
+
+    # assemble frontend and pom variables
+    FRONTEND=application/frontend-2.1/$REALM/config/app/trunk
+    POM="$DEVOPS/$FRONTEND/$BRAND/$ENVIRO/pom.xml"
+    #[ -f "$POM" ] || BailOut "Can't find pom: $POM"
+
+    # get schema
+    SCHEMA=$(getschema $BRAND $ENVIRO | awk -F: '{ print $1 }')
+    [ -z "$SCHEMA" ] && BailOut "Can't figure out schema"
+
+    # get DB server name
+    svn --non-interactive up -q $POM
+    SERVER=$(egrep -i "<frontend.datasource.ecomDB.url>" $POM 2>/dev/null | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z" | awk -F\@ '{ print $2 }' | awk -F: '{ print $1 }')
+    [[ -z $SERVER ]] && BailOut "No db 'server' found for $BRAND $ENVIRO"
+
+    SERVICE=$(egrep -i "<frontend.datasource.ecomDB.url>" $POM 2>/dev/null | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z" | awk -F [/:] '{ print $NF }')
+    echo "$SERVICE" | grep -iq "webprf" && SERVICE="webprf"
+    [[ -z $SERVICE ]] && BailOut "No db 'service' found for $BRAND $ENVIRO"
+
+    # get override/global/defaults
+    OVERRIDE="$DEVOPS/$PROPERTIES/$SERVICE/$SCHEMA/$BRAND/override/override.properties"
+	  DEFAULTS="$(echo "$OVERRIDE" | rev | cut -d'/' -f3- | rev)/default/default.properties"
+	  GLOBALS="$(echo "$OVERRIDE" | rev | cut -d'/' -f4- | rev)/global/global.properties"
+    svn --non-interactive up -q $OVERRIDE 
+    svn --non-interactive up -q $DEFAULTS 
+    svn --non-interactive up -q $GLOBALS 
+
+    if [ "$BRAND" = "xcadm" -o "$BRAND" = "admin" ]
+    then
+        case $ENVIRO in 
+            prd*) POM="$DEVOPS/application/xcadm/prd/config/trunk/$ENVIRO/pom.xml" ;;
+            dev*) POM="$DEVOPS/application/xcadm/dev/config/trunk/$ENVIRO/pom.xml" ;;
+            qa*) POM="$DEVOPS/application/xcadm/qa/config/trunk/$ENVIRO/pom.xml" ;;
+        esac
+        [ -f "$POM" ] || POM=
+    fi
+
+	[ -e "$POM" ] && 	echo " $POM"
+	[ -e "$OVERRIDE" ] && 	echo " $OVERRIDE"
+	[ -e "$DEFAULTS" ] && 	echo " $DEFAULTS"
+	[ -e "$GLOBALS" ] && 	echo " $GLOBALS"
+#else
+#	#SCHEMA=$(svn --non-interactive cat $FRONTEND_URL/qa/config/app/trunk/$BRAND/$ENVIRO/pom.xml 2>/dev/null |grep -i "<frontend.tableowner>" | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+#	[ -n "$POM_URL" ] && 	echo " $POM_URL"
+fi
+
+[ -n "$POM_URL" ] && POMHOST=$(svn --non-interactive cat "$POM_URL" 2>/dev/null | egrep -i "frontendNodeName|xcadm.nodeName" | awk -F '[<>]' '{ print $3 }')
+
+for SITE in $SITELIST
+do
+    HOSTLIST=""
+    echo "$ENVIRO" | grep -iq "capreprdrk" && HOSTLIST="$HOSTLIST $BRAND-capreprd-${SITE}"
+    echo "$ENVIRO" | grep -iq "preprdrk" && HOSTLIST="$HOSTLIST $BRAND-preprd-${SITE}"
+    echo "$ENVIRO" | grep -iq "^int" && HOSTLIST="$HOSTLIST $BRAND-int${ENV_NUM}-${SITE} ${BRAND}${ENVIRO}qa${SITE}"
+    echo "$ENVIRO" | grep -iq "^uat" && HOSTLIST="$HOSTLIST $BRAND-uat${ENV_NUM}-${SITE} ${BRAND}${ENVIRO}qa${SITE}"
+    echo "$ENVIRO" | grep -iq "^rgs" && HOSTLIST="$HOSTLIST $BRAND-rgs${ENV_NUM}-${SITE} ${BRAND}${ENVIRO}qa${SITE}"
+    echo "$ENVIRO" | grep -iq "^staging" && HOSTLIST="$HOSTLIST $BRAND-staging-${SITE}"
+    echo "$ENVIRO" | grep -iq "^caqa" && HOSTLIST="$HOSTLIST $BRAND-caqa${ENV_NUM}-${SITE} $BRAND-caintdev${ENV_NUM}-${SITE}"
+    echo "$ENVIRO" | grep -iq "^cargs" && HOSTLIST="$HOSTLIST $BRAND-cargs${ENV_NUM}-${SITE}"
+    echo "$ENVIRO" | grep -iq "^cauat" && HOSTLIST="$HOSTLIST $BRAND-cauat${ENV_NUM}-${SITE}"
+    echo "$ENVIRO" | grep -iq "^cadev" && HOSTLIST="$HOSTLIST $BRAND-cadev${ENV_NUM}-${SITE}"
+    echo "$ENVIRO" | grep -iq "^qa" && HOSTLIST="$HOSTLIST $BRAND-intdev${ENV_NUM}-${SITE} ${BRAND}${ENVIRO}qa${SITE}"
+    #[ "$ENVIRO" = "qa" ] && HOSTLIST="$BRAND-intdev${ENV_NUM}-$SITE $HOSTLIST"
+    HOSTLIST="$HOSTLIST ${BRAND}-${ENVIRO}-${SITE} ${BRAND}${ENVIRO}${SITE}"
+    [ -n "$POMHOST" ] && HOSTLIST="$POMHOST $HOSTLIST"
+
+    for HOST in $HOSTLIST
+    do
+      IP=$(host -t A "$HOST" 2>/dev/null | egrep -i "address" | awk '{ print $NF }' | head -1)
+      [[ -n $IP ]] && break
+
+      # perf env is a special snowflake
+      if echo "$ENVIRO" | egrep -iq "perf([1-9])?"$
+      then
+        HOST=$(gethost $BRAND $ENVIRO)
+        IP=$(host -t A "$HOST" 2>/dev/null | egrep -i "address" | awk '{ print $NF }' | head -1)
+        break
+      fi
+
+        [ "$ENVIRO" = "ecmint" ] && HOST="${BRAND}ecmprvintrk1v"
+        [ "$ENVIRO" = "ecmca1" -o "$ENVIRO" = "ecmca" ] && HOST="${BRAND}ecmprv-ca1-rk1v"
+        [ "$ENV" = "ecmqa1" -o "$ENVIRO" = "ecmqa" ] && HOST="${BRAND}ecmprv-qa-rk1v"
+        [ "$ENVIRO" = "ecmuat1" -o "$ENVIRO" = "ecmuat" ] && HOST="${BRAND}ecmprv-uat-rk1v"
+        [ "$ENVIRO" = "ecmprd1" ] && HOST="${BRAND}ecmprv-prd-rk1v"
+    	#echo "try: $HOST"
+        #IP=`host -t A "$HOST" 2>/dev/null | egrep -vi "fail|NXDOMAIN" | awk '{ print $NF }' | head -1 `
+        IP=`host -t A "$HOST" 2>/dev/null | egrep -i "address" | awk '{ print $NF }' | head -1 `
+        [ -n "$IP" ] && break
+    done
+    [ -n "$IP" ] && break
+done
+[[ -z "$IP" ]] && HOST=
+
+echo "$ENVIRO" | egrep -iq "regression|integration|rgs" &&  www= || www="www."
+ENV_URL=$(echo "$ENVIRO" | sed -es/"^ca"//g)
+[ "$ENVIRO" = "qa1" ] && ENV_URL="qa"
+[ "$ENVIRO" = "uat1" ] && ENV_URL="uat"
+[ "$ENVIRO" = "cauat1" ] && ENV_URL="uat"
+[ "$ENVIRO" = "uat" ] && ENV_URL="uat"
+[ "$ENVIRO" = "int" ] && ENV_URL="integration"
+[ "$ENVIRO" = "int1" ] && ENV_URL="integration"
+[ "$ENVIRO" = "int2" ] && ENV_URL="integration2"
+[ "$ENVIRO" = "rgs1" ] && ENV_URL="regression"
+[ "$ENVIRO" = "rgs2" ] && ENV_URL="regression2"
+[ "$ENVIRO" = "cargs1" ] && ENV_URL="regression"
+[ "$ENVIRO" = "perf" ] && ENV_URL="perf"
+[ -z "$ENV_URL" ] && echo "$ENVIRO" | egrep -iq "^qa|^uat|^bpv|^ca" && ENV_URL="$ENVIRO"
+ENV_URL="${www}${ENV_URL}"
+
+# get the domain from the frontend pom, or it's parent, if it's no defined there
+P_POM="$(dirname $(dirname $POM_URL))/pom.xml"
+DOMAIN=$(svn --non-interactive cat $POM_URL 2>/dev/null|egrep -i "<frontend.domain>" | sort -u | grep -iv '!--' | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+[ -z "$DOMAIN" ] && DOMAIN=$(svn --non-interactive cat $P_POM 2>/dev/null|egrep -i "<frontend.domain>" | grep -iv '!--' | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+
+AKAMAI=$(get-akamai $BRAND $ENVIRO)
+
+HFQDN=$(host $HOST 2>/dev/null| head -1 | awk '{ print $1 }')
+#[ -n "$HFQDN" ] && HOST=$HFQDN
+SHORT=$(echo $HOST | awk -F\. '{ print $1 }')
+UGLY=$(host $HFQDN 2>/dev/null| egrep -vi "nxdomain|not found" | tail -1 | awk '{ print $1 }' | awk -F\. '{ print $1 }')
+
+# get the installation
+INSTALLATION=$(get-installation $BRAND $ENVIRO)
+echo "installation: $INSTALLATION"
+
+# get the siteId
+ID=$(brand2site $BRAND $ENVIRO)
+[[ -z $ID ]] && BailOut "Can't determine siteId"
+
+if [[ $ENVIRO = "jukebox" ]]
+then
+  echo "https://$BRAND-ecommerce-jukebox-release.services.west.nonprod.wsgc.com/admin/summary.html"
+fi
+
+if [ -n "$HOST" ] 
+then
+    echo "$HOST" | grep -iq "wsgc.com" || HOST="$HOST.wsgc.com"
+    echo "$UGLY" | grep -iq "wsgc.com" || UGLY="$UGLY.wsgc.com"
+    echo "host: $HOST"
+    [ "$UGLY" != "$SHORT" ] && echo "Ugly: $UGLY"
+    echo "IP:$IP"
+    [ -n "$ID" ] && echo "siteid: $ID"
+    [ -n "$DOMAIN" ] && echo "domain: $DOMAIN"
+    echo "frontend: https://$HOST"
+    echo " https://$HOST/admin/configuration"
+    echo " https://$HOST/summary.html"
+    #echo " https://$HOST/admin/summary.html"
+    echo " https://$HOST/admin/settings/"
+    echo " https://$HOST/admin/tests/"
+    echo " https://$HOST/admin/jobs/"
+    echo " https://$HOST:38666/"
+    echo " https://$HOST/admin/jobs/all-server-status.html"
+else
+    [ -n "$AKAMAI" ] && echo " $AKAMAI"
+fi
+
+echo "akamai: $AKAMAI"
+
+exit 0

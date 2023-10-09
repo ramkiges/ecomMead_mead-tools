@@ -1,0 +1,95 @@
+#!/bin/bash
+# adds comments to a Jira ticket
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/apps/java/bin:~/bin
+export PATH
+
+# Jira ticket defaults
+TYPE="Task"
+PROJECT="MEAD"
+
+# transitions
+CREATE=1
+CLOSE=2
+REOPEN=3
+START=4
+STOP=301
+RESOLVE=5
+
+# misc variables
+TIMEOUT="--connect-timeout 30 --max-time 60"
+DATA=/tmp/$(basename $0)-$$.json
+umask 000
+
+BailOut() {
+	[ -n "$1" ] && echo "$(basename $0)/${LOGNAME}@$(hostname --short): $*" >&2
+	echo "Usage: $(basename $0) -t <ticket> -c <comment>" >&2
+	exit 1
+}
+
+# validate Jira creds
+[[ -e $HOME/.jira ]] && JIRA_CRED=$HOME/.jira
+[[ -e $HOME/.credentials.d/jira-cli-user ]] && JIRA_CRED=$HOME/.credentials.d/jira-cli-user
+[[ -z "$JIRA_CRED" ]] && BailOut "Jira cred file variable undefined (JIRA_CRED)"
+[[ -f "$JIRA_CRED" ]] || BailOut "Can't find Jira cred file ($JIRA_CRED)"
+source $JIRA_CRED
+[[ -z $JIRA_USER ]] && JIRA_USER=$USERNAME
+[[ -z $JIRA_PASS ]] && JIRA_PASS=$PASSWORD
+[[ -z "$JIRA_USER" ]] && BailOut "Can't parse Jira user from $JIRA_CRED"
+[[ -z "$JIRA_PASS" ]] && BailOut "Can't parse Jira pass from $JIRA_CRED"
+
+## argument assignment
+TICKET=$1
+while getopts "ht:c:" opt 
+do
+    case ${opt} in
+        h) BailOut ;;            
+        c) COMMENT=$OPTARG ;;
+        t) TICKET=$OPTARG ;;
+    esac
+done
+
+[ -z "$TICKET" ] && BailOut "Need ticket"
+
+ACTION=$(echo "$(basename $0)" | sed -es/jira-//g | awk -F\. '{ print $1 }')
+case $ACTION in
+  start ) ID=$START 
+    cat > $DATA << EOF
+{ "transition" : {"id":"$ID"} }
+EOF
+    ;;
+  stop ) ID=$STOP 
+    cat > $DATA << EOF
+{ "transition" : {"id":"$ID"} }
+EOF
+    ;;
+  close ) ID=$CLOSE 
+    cat > $DATA << EOF
+{ "transition" : {"id":"$ID"} }
+EOF
+    ;;
+  reopen ) ID=$REOPEN 
+    cat > $DATA << EOF
+{ "transition" : {"id":"$ID"} }
+EOF
+    ;;
+  *) BailOut
+esac
+
+JQ=$(which jq)
+[ -z "$JQ" ] && echo "You will probably want to install jq" >&2
+
+cat > $DATA << EOF
+{ "transition" : {"id":"$ID"} }
+EOF
+
+JIRA_URL="https://jira.wsgc.com/rest/api/2/issue/$TICKET/transitions"
+
+#curl $TIMEOUT -sk -u $JIRA_USER:$JIRA_PASS -X GET $JIRA_URL?expand=transitions.fields > /tmp/close.json 2>&1
+
+[ -n "$COMMENT" ] && jira-comment $TICKET "$COMMENT"
+curl $TIMEOUT -sk -u $JIRA_USER:$JIRA_PASS -X POST -d @$DATA -H "Content-Type: application/json" $JIRA_URL 
+ret=$?
+
+rm -f $DATA
+
+exit $ret

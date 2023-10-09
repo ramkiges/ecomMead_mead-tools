@@ -1,0 +1,9 @@
+#keyword | association | contact
+custapppostrk1p | avs (Address Verification Service) | ITInfrastructureMiddleware@WSGC.com
+JMSException | |
+sync error
+UPS soap|UPS connection|ITInfrastructureMiddleware@WSGC.com
+sick queue|MQ|SupplyChainNonProdSupport@wsgc.com
+sterling|sterling|SupplyChainNonProdSupport@wsgc.com
+
+#/opt/quest/bin/vastool user checkaccess builder

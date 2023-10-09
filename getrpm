@@ -1,0 +1,47 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/opt/homebrew/bin:~/bin
+TMP=/tmp/getrpm
+
+BailOut() {
+	exec 2>&1
+	[ -n "$1" ] && echo "$1" 
+    echo "Usage: $(basename $0) <rpm> [dir]"
+    exit 1    
+}
+
+# parse artifactory properties
+ART_CRED=~/.artifactory
+[ -f $ART_CRED ] || BailOut "Can't find cred file $ART_CRED"
+[ -z "$ART_RO_USER" ] && ART_RO_USER=$(grep ART_RO_USER $ART_CRED | grep -iv "^.*#" | tail -1 | awk -F= '{ print $2 }')
+[ -z "$ART_RO_PASS" ] && ART_RO_PASS=$(grep ART_RO_PASS $ART_CRED | grep -iv "^.*#" | tail -1 | awk -F= '{ print $2 }')
+[ -z "$ART_RO_USER" ] && BailOut "Can't parse artifactory pass from $ART_CRED"
+[ -z "$ART_RO_PASS" ] && BailOut "Can't parse artifactory pass from $ART_CRED"
+LOGIN="$ART_RO_USER:$ART_RO_PASS"
+
+[ $(uname) = "Linux" ] || BailOut "Can't run on $(uname)"
+RPM2CPIO=$(which rpm2cpio 2>/dev/null)
+[ -z "$RPM2CPIO" ] && BailOut "We need rpm2cpio :( "
+
+RPM="$1"
+DIR="$2"
+
+[ -z "$RPM" ] && BailOut
+[ -z "$DIR" ] && DIR="$TMP/$(basename "$RPM" | sed -e s/\.rpm//gi)"
+
+mkdir -p $DIR
+cd $DIR || BailOut "Can't cd to $DIR"
+
+if echo "$RPM" | egrep -qi "http://|https://"
+then
+    FILE=$(basename "$RPM")
+    curl -O -ks "$RPM"
+    type=$(file "$FILE" | awk -F: '{ print $2 }' | tr "A-Z" "a-z" | awk '{ print $1 }')
+    [ "$type" = "html" ] && curl $LOGIN -O -ks "$RPM"
+else
+    FILE=$RPM
+fi
+[ -f "$FILE" ] || BailOut "Can't find $FILE"
+
+eval $RPM2CPIO $DIR/$FILE | cpio -vicdm 2>/dev/null
+echo "rpm files are in $DIR"
+

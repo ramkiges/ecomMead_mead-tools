@@ -1,0 +1,53 @@
+#!/bin/bash 
+# parse application log for clues
+export PATH=$JAVA_HOME/bin:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/apps/mead-tools:/home/jenkins/node_modules/.bin
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(basename $0): $*"  >&2
+  echo "Usage: $(basename $0) <url> [ticket]" >&2
+#  echo "Use KEYWORDS environment variable for custom keywords" >&2
+  exit 255
+}
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+ICON_FLAG=" (flag) "
+
+URL=$1
+TICKET=$2
+[[ -z $URL ]] && BailOut
+
+HINTS=" ERROR |Exception:|Unexpected error occurred|no.*accounts found|\] ERROR|illegal"
+HINTS_PRICING="unknown dataset|Request Data Error"
+
+EXCLUDE="DomainPublisherElementFactory|AccessTokenRequiredException"
+
+LOGVIEW="logview:System@111"
+TIMEOUT="--connect-timeout 30 --max-time 90"
+USER_AGENT="--user-agent $(basename $0)"
+TAIL=25
+
+FILE=$(basename $URL)
+[[ $FILE =~ promo ]] && HINTS="$HINTS|$HINTS_PRICING"
+
+# figure out creds
+
+# try without a login
+curl $TIMEOUT $USER_AGENT -fsqk "$URL/" >/dev/null 2>&1
+# if that doesn't work, use the default
+[[ $? -ne 0 ]] && LOGIN="--user $LOGVIEW "
+curl $TIMEOUT $USER_AGENT $LOGIN -fsqk "$URL/" >/dev/null 2>&1 || BailOut "Unable to fetch $(basename $URL)"
+
+if [[ -n $TICKET ]]
+then
+  MSG=$(curl $TIMEOUT $USER_AGENT $LOGIN -fsqk "$URL" | egrep -i "$HINTS" | egrep -iv "$EXCLUDE" $KEYWORDS | tail -$TAIL)
+  jira-comment "$TICKET" "${ICON_INFO}$(basename $0) {noformat:title=$URL}$MSG{noformat}"
+else
+  curl $TIMEOUT $USER_AGENT --user "$LOGVIEW" -fsqk "$URL" | egrep -i "$HINTS" | egrep -iv "$EXCLUDE" 
+fi
+
+exit 0
+

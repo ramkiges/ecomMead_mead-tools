@@ -1,0 +1,26 @@
+#!/bin/bash
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:~/bin
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*" >&2
+  exit 255
+}
+
+DIR=$1
+[[ -z $DIR ]] && exit 1
+
+case $DIR in
+  events ) MFE="ecom-app-phygital ecom-svc-phygital";;
+  product* ) MFE="ecom-app-product" ;;
+  shop ) MFE="ecom-app-shop" ;;
+  search ) MFE="ecom-app-shop" ;;
+  account ) MFE="ecom-app-customer ecom-svc-customer" ;;
+  customer-service ) MFE="ecom-app-order-servicing ecom-svc-order-servicing" ;;
+  shoppingcart ) MFE= ;;
+  * ) MFE=$DIR ;;
+esac
+
+[[ -n $MFE ]] && { echo "$MFE"; exit 0; }
+
+exit 64
+

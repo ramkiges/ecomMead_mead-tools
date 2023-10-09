@@ -1,0 +1,47 @@
+#!/bin/bash
+# returns the URL to the appsetting overrides file
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+export PATH
+
+FRONTEND="https://repos.wsgc.com/svn/devops/application/frontend-2.1"
+APPSETTINGS="https://repos.wsgc.com/svn/devops/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site"
+
+BailOut() {
+  [[ -n $1 ]] && echo "
+$(basename $0): $*
+" >&2
+  echo "Usage: $(basename $0) <brand> <env>" >&2
+  exit 255
+}
+
+BRAND=$1
+ENVIRO=$2
+[[ -z $ENVIRO ]] && BailOut
+
+[ "$ENVIRO"  = "qa" ] && ENVIRO="qa1"
+[ "$ENVIRO"  = "ca1" ] && ENVIRO="cadev1"
+[ "$ENVIRO"  = "cadev" ] && ENVIRO="cadev1"
+[ "$ENVIRO"  = "regression" ] && ENVIRO="rgs1"
+[ "$ENVIRO"  = "regression2" ] && ENVIRO="rgs2"
+[ "$ENVIRO"  = "integration" ] && ENVIRO="int"
+[ "$ENVIRO"  = "integration1" ] && ENVIRO="int"
+[ "$ENVIRO"  = "integration2" ] && ENVIRO="int2"
+
+POM=$FRONTEND/$REALM/config/app/trunk/$BRAND/$ENVIRO/pom.xml
+
+echo "$ENVIRO" | egrep -qEi "jukebox|^qa|^int|^rgs|^uat|^stg|^dev|^perf|^ecmca|^ecmqa|^ecmprd|^ecmint|^ecmuat|^ecmprv|^ecmprev|^bpv|^staging|^ca" && REALM=qa
+echo "$ENVIRO" | egrep -qEi "preprdab|preprdrk|prdab|prdrk|aktest" && REALM=prd
+[[ -z $REALM ]] && BailOut "No 'realm' found for $BRAND $ENVIRO"
+
+SCHEMA=$(getschema $BRAND $ENVIRO 2>/dev/null | awk -F: '{ print $1 }')
+[[ -z $SCHEMA ]] && BailOut "Can't get schema for $BRAND $ENVIRO"
+SID=$(getschema $BRAND $ENVIRO 2>/dev/null | awk -F: '{ print $2 }')
+
+#OWNER=$(svn --non-interactive cat $POM 2>/dev/null | egrep -i "<frontend.tableowner>" | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z")
+#SID=$(svn --non-interactive cat $POM 2>/dev/null | egrep -i "<frontend.datasource.ecomDB.url>" | awk -F '[<>]' '{ print $3 }' | tr "A-Z" "a-z" | awk -F '[:/]'  '{ print $NF }')
+
+OVERRIDE="$APPSETTINGS/$SID/$SCHEMA/$BRAND/override/override.properties"
+
+echo "$OVERRIDE"
+
+exit 0

@@ -1,0 +1,45 @@
+#!/bin/bash
+# this script installs the MFE build package, not to be confused with the MFE Build Tool
+
+DEFAULT_TAG="@^6.1.0"
+#DEFAULT_TAG="@^5.0.0"
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*" >&2 
+  echo "Some possible options:
+  @^6.1.0
+  @^5.0.0
+  @6.1.0-platformrigelmfedependencies.3
+  @6.0.0-platformrigeldevelop.6
+  @6.0.0-ecomrimodevelop.2 
+  
+  Default is $DEFAULT_TAG"
+
+  exit 128
+}
+
+TAG=$1
+
+[[ -z $TAG ]] && TAG=$DEFAULT_TAG
+#[[ -z $TAG ]] && BailOut "Need tag"
+
+sudo chmod o+w /usr/bin
+
+sudo chmod a+w \
+  /usr/lib/node_modules \
+  /usr/lib/node_modules/@mfe-build/mfe-build \
+  /usr/lib/node_modules/@mfe-build/mfe-build/node_modules \
+  /usr/lib/node_modules/@mfe-build/mfe-build/node_modules/@mfe-build/mfe-build-settings  >/dev/null 2>&1
+
+echo "fixing file permissions..."
+find /usr/lib/node_modules/@mfe-build/mfe-build/node_modules -exec sudo chmod a+w {} >/dev/null 2>&1 \; &
+find /usr/lib/node_modules/@mfe-build/.mfe-build.DELETE -exec sudo chmod a+w {} >/dev/null 2>&1 \; &
+wait
+
+sudo su - jenkins bash -c "npm config set color false"
+sudo su - jenkins bash -c "npm install -g @mfe-build/mfe-build$TAG"
+sudo chmod o-w /usr/bin
+
+find /usr/lib/node_modules/@mfe-build/ -exec sudo chown jenkins:jenkins {} \; >/dev/null 2>&1 &
+
+exit 0

@@ -1,0 +1,38 @@
+#!/bin/bash
+export PATH=/apps:/apps/mead-tools:/apps/release-tools:/apps/groovy/bin:/apps/maven/latest/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:~/bin
+
+# some jobs have parameters but we just take the defaults
+# the problem is runJenkinsJob will fail if said parameters are not passed
+# this is a list of jobs for which we need to dummy-up parameters
+BWP="deploy.*war|deploy.*content|appsettings-"
+HOST=$(hostname)
+
+BailOut() {
+	[[ -n $1 ]] && echo "$*" >&2
+	echo "Usage: $(basename $0) " >&2
+}
+
+[ -z "$JENKINS_USER" ] && JENKINS_USER=ciuser
+
+AUTH_FILE=~/.credentials.d/jenkins-${JENKINS_USER}-user
+[ -e $AUTH_FILE ] || BailOut "Auth file ($AUTH_FILE) not found"
+AUTH_TOKEN=$( (source "$AUTH_FILE"; echo "$JENKINS_TOKEN") )
+
+echo "$*" | egrep -iq -- "-f|-v" && FOLLOW="--console"
+echo "$*" | egrep -iq -- "-s" && FOLLOW="--wait"
+
+for a in $*
+do
+    # remove the old '-p' arguments
+    [ "$a" = "-f" ] && continue
+    [ "$a" = "-v" ] && continue
+    [ "$a" = "-s" ] && continue
+    [ "$a" = "-p" ] && continue
+    [ "$a" = "build" ] && continue
+    CMD="$CMD $a"
+done
+
+# this nonsense is to get past the null argument error
+echo "$CMD" | egrep -iq "$BWP" && CMD="$CMD foo=bar"
+
+

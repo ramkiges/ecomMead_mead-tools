@@ -1,0 +1,141 @@
+#!/bin/bash
+# switch an GMTP env schema
+
+TMP=/tmp/$(basename $0)
+ENV_CFG=src/main/resources/tomcat/apps/bgb/etc/environmentConfig-override.xml
+OSS_ORCHESTRATOR=git@github.wsgc.com:eCommerce-DevOps/oss-search-orchestrator-ca-qa-config.git
+OSS_FEEDGEN=git@github.wsgc.com:eCommerce-DevOps/oss-feedgen-service-ca-qa-config.git
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "Usage: $(basename $0) <env> <dst_schema> [ticket]"
+  exit 1 
+}
+
+ENVIRO=$1
+DST_SCHEMA=$2
+TICKET=$(echo "$3" | tr "a-z" "A-Z")
+
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+
+# we're only going to allow pre-selected environments
+if [[ -z $DST_SCHEMA ]]
+then
+  case $ENVIRO in
+    qa31|caqa31 ) DST_SCHEMA=eqa3_app_owner;;
+    cargs1 ) DST_SCHEMA=dtc_app_owner;;
+    caqa10 ) DST_SCHEMA=dtcmou_app_owner;;
+    caqa11 ) DST_SCHEMA=dtc_app_owner;;
+    qa9 ) DST_SCHEMA=dtcmou_app_owner;;
+    cauat* ) DST_SCHEMA=dtcmou_app_owner;;
+    cabpv* ) DST_SCHEMA=dtcmou_app_owner;;
+    * ) BailOut "We probably shouldm't do this for $ENVIRO"
+  esac
+fi
+
+[[ -z $DST_SCHEMA ]] && BailOut "Need destination schema"
+
+cd $(cat ~/.wsi_settings)/packaging/wsgc-appsettings-configuration/trunk/appsetting-properties/schema-site || exit 1
+svn up -q || exit 1
+
+echo "$ENVIRO" | grep -iq "^ca" && BGB_REPO=git@github.wsgc.com:eCommerce-DevOps/bgb-ca-rgs1-config.git || BGB_REPO=git@github.wsgc.com:eCommerce-DevOps/bgb-rgs1-config.git
+echo "*** Setup $ENVIRO for $DST_SCHEMA ***"
+
+DP_CFG=src/main/resources/tomcat/apps/bgb/etc/dp$ENVIRO
+
+for BRAND in pb pk we ws
+do
+  echo "> $BRAND"
+  # settings are commented out as there are usually settings that are back-end specific
+  #schema-switch -b $BRAND -e $ENVIRO -d $DST_SCHEMA -p settings -t $TICKET
+  schema-switch -b $BRAND -e $ENVIRO -d $DST_SCHEMA -s $DST_SCHEMA -p deployments -t $TICKET
+  schema-switch -b $BRAND -e $ENVIRO -d $DST_SCHEMA -s $DST_SCHEMA -p pom -t $TICKET
+done
+
+rm -rf $TMP
+mkdir -p $TMP
+cd $TMP
+git clone -q $BGB_REPO $TMP/bgb
+git clone -q $OSS_ORCHESTRATOR 
+git clone -q $OSS_FEEDGEN 
+
+cd $TMP/bgb || BailOut "Can't cd to $TMP/bgb"
+
+# 
+grep -i -A+5 "environment id.*${ENVIRO}" $ENV_CFG
+echo
+
+if [[ $DST_SCHEMA = "dtcmou_app_owner" ]]
+then
+  # this isn't working
+  #sed -es%'Service id=\"dpqa2/db\"'%'Service id=\"dpeqa3/db\"'%g -i $ENV_CFG 
+
+  cat > $DP_CFG << EOF
+# $(basename $BGB_REPO | sed -es/\.git//g)
+owner=dtcmou_app_owner
+connection=dbi:Oracle:host=webqark2p;sid=webqa2;port=3800
+credentialfile=/bgb/tomcat-bgb/apps/bgb/credentials/db_webqa2
+EOF
+
+  # appsettings
+  #wsi_settings.sh --brand pb,pk,we,ws --env $ENVIRO --bulk CART_CHECKOUT.SERVICE_URI.r=https://ecommerce-cart-checkout-qa2.services.west.nonprod.wsgc.com/cartservice/v1/domain/
+
+fi
+
+if [[ $DST_SCHEMA = "eqa3_app_owner" ]]
+then
+  # this isn't working
+  #sed -es%'Service id=\"dpqa2/db\"'%'Service id=\"dpeqa3/db\"'%g -i $ENV_CFG 
+
+  cat > $DP_CFG << EOF
+# $(basename $BGB_REPO | sed -es/\.git//g)
+owner=eqa3_app_owner
+connection=dbi:Oracle:host=webqark2p;sid=webqa2;port=3800
+credentialfile=/bgb/tomcat-bgb/apps/bgb/credentials/db_eqa3
+EOF
+
+  # appsettings
+  #wsi_settings.sh --brand pb,pk,we,ws --env $ENVIRO --bulk CART_CHECKOUT.SERVICE_URI.r=https://ecommerce-cart-checkout-qa3.services.west.nonprod.wsgc.com/cartservice/v1/domain/
+
+fi
+
+if [[ $DST_SCHEMA = "dtc_app_owner" ]]
+then
+  # this isn't working
+  #sed -es%'Service id=\"dpeqa3/db\"'%'Service id=\"dpqa2/db\">'%g -i $ENV_CFG 
+
+  cat > $DP_CFG << EOF
+# $(basename $BGB_REPO | sed -es/\.git//g)
+owner=dtc_app_owner
+connection=dbi:Oracle:host=webqark2p;sid=webqa2;port=3800
+credentialfile=/bgb/tomcat-bgb/apps/bgb/credentials/db_webqa2
+EOF
+
+  # appsettings
+  #wsi_settings.sh --brand pb,pk,we,ws --env $ENVIRO --bulk CART_CHECKOUT.SERVICE_URI.r=https://ecommerce-cart-checkout-qa1.services.west.nonprod.wsgc.com/cartservice/v1/domain/
+fi
+
+if [[ $DST_SCHEMA = "ws_app_owner" ]]
+then
+  # this isn't working
+  #sed -es%'Service id=\"ws_app_owner/db\"'%'Service id=\"dpqa2/db\">'%g -i $ENV_CFG 
+
+  cat > $DP_CFG << EOF
+# $(basename $BGB_REPO | sed -es/\.git//g)
+owner=ws_app_owner
+connection=dbi:Oracle:host=webqark2p;sid=webqa2;port=3800
+credentialfile=/bgb/tomcat-bgb/apps/bgb/credentials/db_webqa2
+EOF
+
+  # appsettings
+  #wsi_settings.sh --brand pb,pk,we,ws --env $ENVIRO --bulk CART_CHECKOUT.SERVICE_URI.r=https://ecommerce-cart-checkout-regression.services.west.nonprod.wsgc.com/cartservice/v1/domain/
+
+fi
+
+git add $DP_CFG $ENV_CFG
+git commit -m "[$TICKET] switch to $DST_SCHEMA"
+git push
+
+[[ -n $TICKET ]] && jira-comment $TICKET "Switch $ENVIRO to $DST_SCHEMA" >/dev/null 2>&1
+
+

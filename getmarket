@@ -1,0 +1,47 @@
+#!/bin/bash
+# fetch the market from a frontend pom in SVN - intended to be used in scripts
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+MARKET=
+BRANDS=$(get-brand-list -d\|)
+
+BailOut() {
+	[[ -n $1 ]] && echo "$(basename $0): $*" >&2
+  #echo "Usage: $(basename $0) <brand> [env]" >&2
+  exit 0
+}
+
+test-svn-access || BailOut "SVN failed"
+
+if [[ $1 =~ prd || $1 =~ prod ]]
+then
+    MARKET=US
+    [[ $1 =~ ca ]] && MARKET=CAN
+
+    echo "$MARKET"
+    exit 0
+fi
+
+BRAND=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+ENVIRO=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+[[ -z $ENVIRO ]] && BailOut "Need environment"
+[[ $BRAND = "admin" ]] && exit 0
+egrep -iq $BRAND <<< "$BRANDS" || BailOut "$BRAND is not a valid brand"
+
+[[ $ENVIRO = "regression" ]] && ENVIRO=rgs1
+[[ $ENVIRO = "integration2" ]] && ENVIRO=int2
+
+[[ $ENVIRO = "ca" || $ENVIRO = "can" ]] && SITEID=$(brand2site "ca$BRAND")
+#[[ -z $ENVIRO ]] && { brand2site $BRAND; exit 0; }
+
+SITEID=$(getsiteid $BRAND $ENVIRO)
+
+X=${SITEID:0:1}
+case $X in
+  6 ) MARKET="US" ;;
+  7 ) MARKET="CAN" ;;
+esac
+
+echo "$MARKET"
+
+exit 0
+

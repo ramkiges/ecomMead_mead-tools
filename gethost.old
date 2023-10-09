@@ -1,0 +1,80 @@
+#!/bin/bash
+PATH=/opt/homebrew/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:~/bin
+
+BailOut() {
+  [[ -n $1 ]] && echo "$(hostname):$(basename $0): $*" >&2
+  exit 255
+}
+
+test-svn-access || BailOut 
+
+TMP=$HOME/.toolchain-resource-model
+RUNDECK_REPO=git@github.wsgc.com:eCommerce-DevOps/toolchain-resource-model.git
+# clone rundeck repo
+[[ -e $TMP/.git ]] || git clone --depth 1 -q $RUNDECK_REPO $TMP >/dev/null 2>&1 || BailOut "Unable to clone $RUNDECK_REPO"
+cd $TMP
+git pull -q >/dev/null 2>&1
+
+DP_LOGIN="pkqaenv:Ca8tWh33l"
+TIMEOUT="--connect-timeout 10  --max-time 20"
+
+BRAND=$(tr '[:upper:]' '[:lower:]' <<< $1)
+ENVIRO=$(tr '[:upper:]' '[:lower:]' <<< $2)
+MARKET=$(tr '[:upper:]' '[:lower:]' <<< $3)
+[[ -z $ENVIRO ]] && BailOut
+
+#if [[ $ENVIRO =~ prd || $ENVIRO =~ prod || $ENVIRO =~ perf ]]
+#then
+
+# corp snowflake
+[[ $BRAND = "corp" && $ENV="qa" ]] && { echo "corp-qa1-rk1v"; exit 0; }
+
+# we'll need one of these for each market
+[[ $ENVIRO =~ ^ca ]] && { MARKET="ca"; ENVIRO=$(sed -es/^ca//g <<< $ENVIRO); }
+
+[[ -z $MARKET ]] && MARKET=$(getmarket $BRAND $ENVIRO | tr '[:upper:]' '[:lower:]')
+[[ -n $MARKET ]] && MARKET="/$MARKET"
+[[ $MARKET =~ ca ]] && MARKET=ca
+[[ $MARKET =~ us ]] && MARKET=
+
+[[ $ENVIRO =~ uat ]] && tag="${MARKET}$ENVIRO"
+[[ $ENVIRO =~ int ]] && tag="${MARKET}$ENVIRO"
+[[ $ENVIRO =~ rgs ]] && tag="${MARKET}$ENVIRO"
+[[ $ENVIRO =~ qa ]] && tag="${MARKET}$ENVIRO"
+[[ $ENVIRO =~ bpv ]] && tag="${MARKET}$ENVIRO"
+[[ $ENVIRO =~ perf || $ENVIRO =~ prf ]] && tag="${MARKET}perf"
+[[ $ENVIRO =~ prd || $ENVIRO =~ prod ]] && tag="${MARKET}prd"
+[[ $ENVIRO =~ preprd || $ENVIRO =~ preprd || $ENVIRO =~ aktest ]] && tag="${MARKET}preprd"
+[[ -z $tag ]] && BailOut "No tag found for $BRAND $ENVIRO"
+
+#HOST_LIST=$(grep -ihr "frontend" $TMP | egrep -vi "preprd|ecm" | grep -i "$tag" | grep -i ",$BRAND," | awk -F\" '{ print $2 }' | awk -F\. '{ print $1 }' | sort -r)
+HOST_LIST=$(grep -ihr "frontend" $TMP | grep -iw "$tag" | grep -i ",$BRAND" | awk -F\" '{ print $2 }' | awk -F\. '{ print $1 }' | sort -r)
+[[ -z $HOST_LIST ]] && HOST_LIST=$(grep -ihr "frontend" $TMP | grep -iw "$ENVIRO" | grep -i ",$BRAND" | awk -F\" '{ print $2 }' | awk -F\. '{ print $1 }' | sort -r)
+
+# if there's more than one host then loop through them to get the first that responds
+if [[ $(echo $HOST_LIST | wc -w) -gt 1 ]]
+then
+  for host in $HOST_LIST
+  do
+    summary="https://${host}.wsgc.com/admin/summary.html"
+    curl $TIMEOUT -fqsk --user $DP_LOGIN $summary >/dev/null 2>&1 && break 
+    host=
+  done
+else
+  host=$HOST_LIST
+fi
+[[ -n $host ]] && { echo "$host"; exit 0; }
+
+# fallback to a basic DNS-resolvable host
+for host in $HOST_LIST
+do
+  host $host >/dev/null 2>&1 && break
+  host=
+done
+[[ -n $host ]] && { echo "$host"; exit 0; }
+
+BailOut "No host found for $BRAND $ENVIRO"
+
+#geturls $* 2>/dev/null | grep -i "host:" | awk '{ print $NF }'
+
+exit $?

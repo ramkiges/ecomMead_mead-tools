@@ -1,0 +1,18 @@
+#!/bin/bash
+
+BailOut() {
+    [ -n "$1" ] && (>&2 echo "Error: $*")
+    (>&2 echo "Usage: $(basename $0) <app>")
+    exit 1
+}
+
+APP=$1
+[ -z "$APP" ] && BailOut
+
+POD=$(kubectl get pods -n $APP | egrep -ivw "NAME" | awk '{ print $1 }')
+
+[ -z "$POD" ] && BailOut
+
+echo $POD
+exit 0
+

@@ -1,0 +1,63 @@
+#!/bin/bash
+
+IMGHOST="img-qa-rk1v" # new server
+#IMGHOST="img-qa1-rk1v" # old server
+
+MSG="[DEVOPS] $IMGHOST migration - final run before decomm"
+
+BailOut() {
+    [ -n "$1" ] && echo "$(basename $0): $*"
+
+	exit 1
+}
+
+FILES=$*
+[ -z "$FILES" ] && FILES=$(egrep -ilr "img-qa-rk1v|imgqark1v|img-qa1-rk1v|10.7.1.122" . 2>/dev/null)
+
+[ -z "$FILES" ] && BailOut "No files selected for fixing"
+
+svn up 2>/dev/null
+git pull 2>/dev/null
+
+for file in $FILES
+do
+	echo "file: $file"
+
+    # I'm going through extra steps here so that we end up with FQDN's everywhere
+
+    sed -es!imgqark1v!${IMGHOST}!gi -i $file
+    sed -es!img-qa-rk1v!${IMGHOST}!gi -i $file
+    sed -es!img-qa1-rk1v!${IMGHOST}!gi -i $file
+
+    #sed -es!imgqark1v:!${IMGHOST}.wsgc.com:!gi -i $file
+    #sed -es!imgqark1v.wsgc.com:!${IMGHOST}.wsgc.com:!gi -i $file
+    #sed -es!imgqark1v/!${IMGHOST}.wsgc.com/!gi -i $file
+    #sed -es!imgqark1v.wsgc.com/!${IMGHOST}.wsgc.com/!gi -i $file
+    #sed -es!imgqark1v!${IMGHOST}!gi -i $file
+
+    # change to FQDN
+    sed -es!${IMGHOST}/!${IMGHOST}.wsgc.com/!gi -i $file
+    sed -es!${IMGHOST}:!${IMGHOST}.wsgc.com:!gi -i $file
+    sed -es!wsgc.com.wsgc.com!wsgc.com!gi -i $file # this is an error I've found in a few files
+
+    # let's FQDN this one, too
+    sed -es!invadj-qa1-rk1v/!invadj-qa1-rk1v.wsgc.com/!gi -i $file
+
+    # this is for cleanup from experiments I've been doing
+    #sed -es!img-qa-rk1v!${IMGHOST}!gi -i $file
+    #sed -es!10.7.1.122!${IMGHOST}.wsgc.com!gi -i $file
+
+	svn diff $file 2>/dev/null | egrep "^-|^\+"
+    svn commit -m "$MSG" $file 2>/dev/null
+
+    git diff $file 2>/dev/null | egrep "^-|^\+" | sort -k2
+    git add $file 2>/dev/null 
+    git commit -m "$MSG" $file 2>/dev/null
+    git push 2>/dev/null
+
+    echo
+done
+
+#svn up 2>/dev/null 
+#git pull 2>/dev/null 
+

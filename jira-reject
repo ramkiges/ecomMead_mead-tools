@@ -1,0 +1,34 @@
+#!/bin/bash
+# pre-defined jira rejection
+PATH=/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/apps/java/bin:~/bin
+export PATH
+
+# Jira icons
+ICON_FAIL=" (x) "
+ICON_SUCC=" (/) "
+ICON_WARN=" (!) "
+ICON_INFO=" (i) "
+
+BailOut() {
+    [[ -n $1 ]] && { echo "$(basename $0)/${LOGNAME}@$(hostname --short): $*" >&2; exit 2; }
+    echo "Usage: $(basename $0) <ticket> [comments]"
+    exit 1
+}
+
+TICKET=$(tr '[:lower:]' '[:upper:]' <<< $1)
+COMMENTS=$2
+[[ -z $TICKET ]] && BailOut
+[[ -n $COMMENTS ]] && COMMENTS="$ICON_WARN $COMMENTS"
+
+JIRA=https://jira.wsgc.com/browse/$TICKET
+
+#jira-comment "$TICKET" "$ICON_INFO This ticket has been rejected because it does not meet the [Mead Ticket Guidelines|https://confluence.wsgc.com/display/ES/MEAD+Ticket+Guidelines]
+jira-comment "$TICKET" "$ICON_INFO We would like to help you, but we need more information: please update this ticket by including your description of your triage process, including technical steps you performed, parameters you reviewed, and log excerpts you think are relevant to your issue.  So that this doesn’t sit in our queue, please reopen the ticket once you’ve finished providing updates. 
+For more information about how to file a MEAD ticket, please see [Mead Ticket Guidelines|https://confluence.wsgc.com/display/ES/MEAD+Ticket+Guidelines]
+$COMMENTS"
+
+jira-close -t "$TICKET" -c "$ICON_FAIL Closed due to incomplete information - you may re-open the ticket and provide the missing details" >/dev/null 2>&1
+
+slack-comment -c slack-pri-enterprise-devops-mead -m "$TICKET has been rejected $JIRA"
+
+exit 0

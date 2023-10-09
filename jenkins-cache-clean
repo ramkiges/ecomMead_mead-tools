@@ -1,0 +1,70 @@
+#!/bin/bash
+PATH=/bin:/sbin:/usr/bin:/usr/local/bin:/apps/maven/latest/bin
+SCRIPT=/tmp/maven-cache-clean.sh
+SLAVES="ecombuild ecom-jenkins-agent-3 ecom-jenkins-agent-4 ecom-jenkins-agent-5 ecom-jenkins-agent-6 ecom-jenkins-agent-7 ecom-jenkins-agent-8 ecom-jenkins-agent-9 ecom-jenkins-agent-10 ecom-jenkins-agent-11 ecom-jenkins-agent-14 ecom-jenkins-agent-15"
+JOBS="\
+  wsgc-devops-frontend21-common \
+  wsgc-devops-frontend21-qa-app-config \
+  wsgc-devops-frontend21-qa-mg-app-config \
+  wsgc-devops-frontend21-qa-pb-app-config \
+  wsgc-devops-frontend21-qa-pk-app-config \
+  wsgc-devops-frontend21-qa-pt-app-config \
+  wsgc-devops-frontend21-qa-we-app-config \
+  wsgc-devops-frontend21-qa-ws-app-config \
+  wsgc-devops-frontend21-qa-single-env \
+  rerun-module-tomcat-frontend \
+  apmagents \
+  wsgc-devops-frontend-service-tomcat \
+  wsgc-devops-wcm-config-any \
+  wsgc-devops-wcm-common \
+  wsgc-devops-wcm-uat-config-cm \
+"
+
+[[ -n "$1" ]] && JOBS="$*"
+#SLAVES=ecom-jenkins-agent-4
+
+cat > $SCRIPT << EOF
+#!/bin/bash
+PATH=$PATH
+JOBS="$JOBS"
+JAVA_HOME=/apps/jdk8
+MAVEN_HOME=/apps/maven/latest
+PATH=$JAVA_HOME/bin:$MAVEN_HOME/bin:/apps/python3/bin:$PATH
+
+for job in \$JOBS
+do
+  [ -d /apps/jenkins-slave/workspace/\$job ] || continue
+  echo "** \$job clean"
+  set -x
+  cd /apps/jenkins-slave/workspace/\$job
+  sudo -u jenkins PATH=$PATH /apps/maven/latest/bin/mvn dependency:purge-local-repository >/dev/null 2>&1
+  set +x
+  echo
+done
+
+for job in \$JOBS
+do
+  [ -d /apps/jenkins-slave/workspace/\$job ] || continue
+  echo "** \$job deploy"
+  set -x
+  cd /apps/jenkins-slave/workspace/\$job 
+  sudo -u jenkins PATH=$PATH /apps/maven/latest/bin/mvn clean deploy >/dev/null 2>&1
+  set +x
+  echo
+done
+
+
+exit 0
+EOF
+
+chmod 755 $SCRIPT
+
+for slave in $SLAVES
+do
+  echo "> $slave"
+  scp -q $SCRIPT $slave:/tmp
+  ssh -q -tt $slave "sudo $SCRIPT " #</dev/null >/dev/null 2>&1" &
+  echo
+done
+
+

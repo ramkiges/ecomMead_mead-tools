@@ -1,0 +1,118 @@
+#!/bin/bash
+# compare Jenkins nodes
+PATH=/opt/homebrew/bin:/usr/local/bin:/apps/mead-tools:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin
+TMP=/tmp/$(basename $0)
+
+BailOut() {
+  [[ -n $1 ]] && echo "$*"
+  echo "Usage: $(basename $0) node-a[:label] node-b[:label]"
+  echo "
+Notes:
+* this tool relies on having ssh keys between the machine running the script and the jenkins nodes
+* only diffs are shown - if the qtwo items are the same, it is not displayed
+* the raw info files are available in $TMP for further investigation 
+* use the :label to make it easier to keep track of which node is which, eg ecom-jenkins-agent-21:good ecom-jenkins-agent-20:bad "
+  exit 255
+}
+
+P_JSON=/usr/lib/node_modules/@mfe-build/mfe-build/package.json
+MASTER=ecombuild
+
+# parse out the node names and 'label' associated with each one
+NODE_A=$(awk -F: '{ print $1 }' <<< $1 | awk -F\. '{ print $1 }')
+NODE_B=$(awk -F: '{ print $1 }' <<< $2 | awk -F\. '{ print $1 }')
+NOTE_A=$(awk -F: '{ print $2 }' <<< $1)
+NOTE_B=$(awk -F: '{ print $2 }' <<< $2)
+
+KEYWORD=$3
+
+[[ $# -lt 2 ]] && BailOut
+
+for node in $MASTER $NODE_A $NODE_B
+do
+  ssh -q $node "hostname >/dev/null 2>&1" || BailOut "Unable to ssh to $node"
+done
+
+mkdir -p $TMP
+
+for node in A B
+do
+  h=NODE_${node}
+  host=${!h}
+  n=NOTE_${node}
+  label=${!n}
+  out=$TMP/$host.out
+
+  [[ -n $label ]] && echo "host: $host ($label)" > $out || echo "$host" > $out
+  echo >> $out
+
+  echo "*** MFE Build:" >> $out
+  ssh -q -tt $node "jq ._requested.raw $P_JSON | sed -es/\\\"//g | awk -F\@ '{ print \$NF }'" >> $out
+  echo >> $out
+
+  echo "*** wsgc packages:" >> $out
+  ssh -q $host "rpm -qa | egrep -i 'wsgc' | sort " >> $out
+  echo >> $out
+
+  echo "*** native packages:" >> $out
+  ssh -q $host "rpm -qa | egrep -i -- 'nodejs|git2u|docker|apache-ant|apache-maven|python' | sort " >> $out
+  echo >> $out
+
+  echo "*** docker:" >> $out
+  ssh -q $host "docker --version" >> $out 2>&1
+  echo >> $out
+
+  echo "*** git:" >> $out
+  ssh -q $host "git --version" >> $out 2>&1
+  echo >> $out
+
+  echo "*** subversion:" >> $out
+  ssh -q $host "svn --version 2>&1 | grep -w version" >> $out 2>&1
+  echo >> $out
+
+  echo "*** node:" >> $out
+  ssh -q $host "node --version" >> $out 2>&1
+  echo >> $out
+
+  echo "*** npm:" >> $out
+  ssh -q $host "npm --version" >> $out 2>&1
+  echo >> $out
+
+  echo "*** ant:" >> $out
+  ssh -q $host "/apps/ant/latest/bin/ant -version" >> $out 2>&1
+  echo >> $out
+
+  echo "*** mvn:" >> $out
+  ssh -q $host "/apps/maven/latest/bin/mvn --version" >> $out 2>&1
+  echo >> $out
+
+  echo "*** helm:" >> $out
+  #ssh -q $host "/usr/local/bin/helm version 2>/dev/null" >> $out 2>&1
+  ssh -q -tt $host "sudo su - jenkins bash -c 'helm version'" >> $out 2>&1
+  echo >> $out
+
+  echo "*** kubectl:" >> $out
+  ssh -q $host "/usr/local/bin/kubectl version --short " >> $out 2>&1
+  echo >> $out
+
+  echo "*** go:" >> $out
+  ssh -q $host "go version" >> $out 2>&1
+  echo >> $out
+
+  echo "*** environment:" >> $out
+  ssh -q -tt $host "sudo su - jenkins bash -c env" | egrep -iv 'LS_COLORS|XDG_SESSION_ID|LESSOPEN|LOGNAME|HIST' >> $out
+
+  dos2unix -q $out
+done
+
+if [[ -n $KEYWORD ]]
+then
+    diff $TMP/$NODE_A.out $TMP/$NODE_B.out | egrep -i "$KEYWORD"
+else
+    diff $TMP/$NODE_A.out $TMP/$NODE_B.out
+fi
+
+echo "
+Output: $TMP/$NODE_A.out $TMP/$NODE_B.out"
+
+exit 0

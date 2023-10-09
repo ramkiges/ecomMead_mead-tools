@@ -1,0 +1,41 @@
+#!/bin/bash
+PATH=/apps/mead-tools:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:$HOME/bin:$PATH
+
+# this script is to install the mead-tools scripts on a BGB server - not to install the BGB application
+TARGET="bgb-|bgbrck-|bgbsac-"
+
+sudo rm -f /apps/mead-tools/get-adg-delivery
+
+FILES="get-env-team cleanup-mead-tools take-note get-catalog* setenv-mead ecm2gen geturls getschema getdb get-db copy-ecm-generations.sh chksvc jira-comment jira-create jira-close jira-delete wcm-update-recipe wcm-update-cat brand2site site2brand gen2dir dir2gen jenkins-jnlp jmxclient.jar activate-sku update-xcadm-content getbrand getdomain getversion gethost get-host asset-clone propset propget getsiteid get-siteid get-site-id site2market market2label label2market slack-comment getmarket yq getdbenv get-ecm-* get-etcd-env getakamai getbrandlist copy-prod-generations getoverride getoauthhost update-etcd-bootstrap-records set-oauth get-brand-list get-buildsystem-host get-buildsystem-url get-deployment-properties get-mfe-generations get-dp-generations jira-label parse-log get-installation getinstallation get-env-list get-cmx-generation checkcontent get-akamai get-origin get-adg-* get-manifest get-backend sync-fork"
+
+BailOut() {
+    [ -n "$1" ] && (>&2 echo "Error: $*")
+    (>&2 echo "Usage: $(basename $0) [cleanup]")
+    rm -rf $TMP
+    exit 1
+}
+
+hostname | egrep -iq "$TARGET" || BailOut "This is intended to be run on $TARGET"
+
+BRANCH=$(git branch | grep '\*' | awk '{ print $NF }')
+[[ -n $1 ]] && INSTALL=$1 || INSTALL=master
+git checkout $INSTALL || exit 1
+
+sudo mkdir -p /apps/mead-tools
+for file in $FILES
+do
+  f=$(basename $file)
+	echo "$file" | egrep -iq "generate-|txt$" && continue
+
+  [[ -e /apps/mead-tools/$f ]] && sudo mv /apps/mead-tools/$f /apps/mead-tools/.$f
+	sudo cp $file /apps/mead-tools
+done
+sudo chown -R tomcat:webadmin /apps/mead-tools &
+sudo chmod -R 775 /apps/mead-tools &
+
+[[ -e /usr/local/bin/yq ]] || sudo cp yq /usr/local/bin
+rpm -qa | grep -iq "^dos2unix" || sudo yum -y install dos2unix -d0
+rpm -qa | grep -iq "^hub" || sudo yum -y install hub -d0
+rpm -qa | grep -iq "^jq" || sudo yum -y install jq -d0
+
+exit 0

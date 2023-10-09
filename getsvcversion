@@ -1,0 +1,41 @@
+#!/bin/bash
+PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/apps/mead-tools:/apps/scripts:/apps:/opt/homebrew/bin:~/bin
+CURL_OPTS="-H 'Cache-Control: no-cache' -fsqk"
+ORIGIN_ENV=qa14
+
+BailOut() {
+	[[ -n $1 ]] && echo ">>> ERROR: $1" >&2
+  echo "Usage: $(basename $0) <brand> <env> <svc>" >&2
+  exit 255
+}
+
+BRAND=$1
+ENVIRO=$2
+SVC=$3
+
+[[ -z $SVC ]] && BailOut
+
+# get creds
+AUTH_USER="svcaecjnk"
+AUTH_FILE=~/.credentials.d/jenkins-$AUTH_USER-user
+[ -e $AUTH_FILE ] || BailOut "Auth file ($AUTH_FILE) not found"
+AUTH_USER=$( (source "$AUTH_FILE"; echo "$USERNAME") )
+AUTH_PASS=$( (source "$AUTH_FILE"; echo "$PASSWORD") )
+LOGIN="$AUTH_USER:$AUTH_PASS"
+
+[[ $ENVIRO =~ qa ]] && ORIGIN_ENV=qa14
+[[ $ENVIRO =~ uat ]] && ORIGIN_ENV=uat
+
+AKAMAI=$(geturls $BRAND $ENVIRO | grep -i akamai | awk '{ print $NF }')
+DOMAIN=$(getdomain $BRAND $ENVIRO)
+DELIVERY="https://$ORIGIN_ENV-svc.westelm.com/$ENVIRO.$DOMAIN/.delivery/summary/index.html"
+
+INFO="$AKAMAI/$SVC/.info/summary.html"
+
+#curl --user "$LOGIN" $CURL_OPTS $INFO
+VERSION=$(curl --user "$LOGIN" $CURL_OPTS $INFO | grep -i -A+1 "mfe version" | tail -1 | awk -F '[<>]' '{ print $5 }')
+[[ -n $VERSION ]] && { echo $VERSION; exit 0; }
+
+# try something else...
+
+exit 1 
